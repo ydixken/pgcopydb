@@ -716,6 +716,11 @@ startLogicalStreaming(StreamSpecs *specs)
 		/* ignore errors, try again unless asked to stop */
 		bool cleanExit = pgsql_stream_logical(&stream, &context);
 
+		if (!cleanExit && !ld_store_output_rollback(specs->outputDB))
+		{
+			return false;
+		}
+
 		if ((cleanExit && context.endpos != InvalidXLogRecPtr) ||
 			asked_to_stop || asked_to_stop_fast || asked_to_quit)
 		{
@@ -954,6 +959,11 @@ streamWrite(LogicalStreamContext *context)
 			context->onRetry = false;
 		}
 
+		if (!ld_store_output_begin(replayDB))
+		{
+			return false;
+		}
+
 		/* insert the message to our current SQLite logical decoding file */
 		if (privateContext->plugin == STREAM_PLUGIN_PGOUTPUT)
 		{
@@ -1010,6 +1020,11 @@ streamWrite(LogicalStreamContext *context)
 	}
 	else if (metadata->action == STREAM_ACTION_COMMIT)
 	{
+		if (!ld_store_output_commit(replayDB))
+		{
+			return false;
+		}
+
 		privateContext->transactionInProgress = false;
 		privateContext->currentXid = 0;
 
@@ -1308,19 +1323,17 @@ streamCloseFile(LogicalStreamContext *context, bool time_to_abort)
 /*
  * streamFlush is a callback function for our LogicalStreamClient.
  *
- * This function is called when it's time to flush the data that's currently
- * being written to disk, by calling fsync(). This is triggerred either on a
- * time basis from within the writeFunction callback, or when it's
- * time_to_abort in pgsql_stream_logical.
+ * Commit the SQLite batch before publishing its LSN to the source.
  */
 bool
 streamFlush(LogicalStreamContext *context)
 {
+	StreamContext *privateContext = (StreamContext *) context->private;
+
 	log_debug("streamFlush: written %X/%X cur %X/%X",
 			  LSN_FORMAT_ARGS(context->tracking->written_lsn),
 			  LSN_FORMAT_ARGS(context->cur_record_lsn));
 
-	/* if needed, flush our current file now (fsync) */
 	if (context->tracking->flushed_lsn < context->tracking->written_lsn)
 	{
 		/*
@@ -1334,7 +1347,16 @@ streamFlush(LogicalStreamContext *context)
 			/* errors have already been logged */
 			return false;
 		}
+	}
 
+	/* A repeated LSN can still leave an open keepalive transaction. */
+	if (!ld_store_output_commit(privateContext->outputDB))
+	{
+		return false;
+	}
+
+	if (context->tracking->flushed_lsn < context->tracking->written_lsn)
+	{
 		context->tracking->flushed_lsn = context->tracking->written_lsn;
 
 		log_debug("Flushed up to %X/%X",
@@ -1397,6 +1419,11 @@ streamKeepalive(LogicalStreamContext *context)
 			.lsn = context->cur_record_lsn,
 			.time = keepaliveTime
 		};
+
+		if (!ld_store_output_begin(replayDB))
+		{
+			return false;
+		}
 
 		if (!ld_store_insert_internal_message(replayDB, &keepalive))
 		{
@@ -1664,7 +1691,12 @@ prepareMessageMetadataFromContext(LogicalStreamContext *context)
 		previous->skipping = false;
 		metadata->skipping = false;
 
-		/* insert the message to our current SQLite logical decoding file */
+		/* This BEGIN is written before streamWrite inserts the current message. */
+		if (!ld_store_output_begin(privateContext->outputDB))
+		{
+			return false;
+		}
+
 		if (!ld_store_insert_message(privateContext->outputDB, previous))
 		{
 			/* errors have already been logged */

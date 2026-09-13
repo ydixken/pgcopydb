@@ -2065,6 +2065,16 @@ catalog_commit(DatabaseCatalog *catalog)
 
 
 /*
+ * catalog_rollback rolls back a SQLite transaction.
+ */
+bool
+catalog_rollback(DatabaseCatalog *catalog)
+{
+	return catalog_execute(catalog, "ROLLBACK");
+}
+
+
+/*
  * catalog_register_setup registers the setup metadata for this catalog.
  */
 bool
