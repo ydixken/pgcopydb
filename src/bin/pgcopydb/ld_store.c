@@ -181,6 +181,48 @@ ld_store_open_replaydb(StreamSpecs *specs)
 
 
 /*
+ * Receive owns the output transaction; the handle survives reconnects.
+ */
+bool
+ld_store_output_begin(DatabaseCatalog *catalog)
+{
+	if (catalog == NULL || catalog->db == NULL ||
+		!sqlite3_get_autocommit(catalog->db))
+	{
+		return true;
+	}
+
+	return catalog_begin(catalog, false);
+}
+
+
+bool
+ld_store_output_commit(DatabaseCatalog *catalog)
+{
+	if (catalog == NULL || catalog->db == NULL ||
+		sqlite3_get_autocommit(catalog->db))
+	{
+		return true;
+	}
+
+	return catalog_commit(catalog);
+}
+
+
+bool
+ld_store_output_rollback(DatabaseCatalog *catalog)
+{
+	if (catalog == NULL || catalog->db == NULL ||
+		sqlite3_get_autocommit(catalog->db))
+	{
+		return true;
+	}
+
+	return catalog_rollback(catalog);
+}
+
+
+/*
  * ld_store_set_first_cdc_filename selects the CDC file with the smallest id
  * in cdc_files (regardless of done_time_epoch) and stores its path in
  * specs->outputDB->dbfile.
@@ -1143,6 +1185,11 @@ ld_store_rotate_outputdb(StreamSpecs *specs, uint64_t commit_lsn)
 			 specs->outputDB->dbfile,
 			 LSN_FORMAT_ARGS(commit_lsn));
 
+	if (!ld_store_output_commit(specs->outputDB))
+	{
+		return false;
+	}
+
 	/* 1. mark current output.db as done in cdc_files */
 	if (!ld_store_close_outputdb_cdc(specs, commit_lsn))
 	{
@@ -1740,11 +1787,7 @@ ld_store_insert_message(DatabaseCatalog *catalog,
 
 
 /*
- * ld_store_insert_pgoutput_message stores a decoded pgoutput message.
- *
- * Inserts one row into `output` (with nspname/relname/old_type, NULL message)
- * and one row per column per section into `pgoutput_col`, all inside a single
- * SQLite transaction so the two tables are always consistent.
+ * The caller owns the transaction for the output and pgoutput_col inserts.
  */
 bool
 ld_store_insert_pgoutput_message(DatabaseCatalog *catalog,

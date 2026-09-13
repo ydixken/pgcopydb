@@ -300,27 +300,24 @@ __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-S
     The Postgres documentation for ``pg_stat_replication.write_lsn`` is:
     Last write-ahead log location written to disk by this standby server.
 
-    In the pgcopydb case, the sentinel field write_lsn is the position that
-    has been written to disk (as JSON) by the streaming process.
+    In the pgcopydb case, the sentinel field write_lsn is the position written to the SQLite CDC store by the streaming process, which may still be in an uncommitted batch.
 
   - ``flush_lsn``
 
     The Postgres documentation for ``pg_stat_replication.flush_lsn`` is:
     Last write-ahead log location flushed to disk by this standby server
 
-    In the pgcopydb case, the sentinel field flush_lsn is the position that
-    has been written and then fsync'ed to disk (as JSON) by the streaming
-    process.
+    In the pgcopydb case, the sentinel field flush_lsn tracks durable progress in the SQLite CDC store.
+    The streaming process commits writes at every source COMMIT, at least every 10 seconds, and before closing or rotating the store.
+    SQLite synchronous mode remains FULL, and flush_lsn advances only after the batch commits.
+    Replication feedback uses replay_lsn when it is nonzero; otherwise it uses this committed flush position.
 
   - ``replay_lsn``
 
     The Postgres documentation for ``pg_stat_replication.replay_lsn`` is:
     Last write-ahead log location replayed into the database on this standby server
 
-    In the pgcopydb case, the sentinel field replay_lsn is the position that
-    has been applied to the target database, as kept track from the WAL.json
-    and then the WAL.sql files, and using the Postgres API for `Replication
-    Progress Tracking`__.
+    In the pgcopydb case, the sentinel field replay_lsn is the position applied to the target database, tracked using the SQLite CDC store and the Postgres API for `Replication Progress Tracking`__.
 
     __ https://www.postgresql.org/docs/current//replication-origins.html
 

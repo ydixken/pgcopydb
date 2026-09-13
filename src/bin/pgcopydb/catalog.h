@@ -60,6 +60,7 @@ bool catalog_set_wal_mode(DatabaseCatalog *catalog);
 
 bool catalog_begin(DatabaseCatalog *catalog, bool immediate);
 bool catalog_commit(DatabaseCatalog *catalog);
+bool catalog_rollback(DatabaseCatalog *catalog);
 
 bool catalog_register_setup(DatabaseCatalog *catalog,
 							const char *source_pg_uri,
