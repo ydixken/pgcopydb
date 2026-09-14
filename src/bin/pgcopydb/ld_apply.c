@@ -139,6 +139,20 @@ stream_apply_catchup(StreamSpecs *specs)
 
 	bool success = stream_apply_replaydb(specs, &context);
 
+	/* Endpos may fall after an asynchronously committed transaction. */
+	if (success)
+	{
+		uint64_t durableLSN = InvalidXLogRecPtr;
+
+		if (!stream_apply_find_durable_lsn(&context, &durableLSN) ||
+			durableLSN < context.previousLSN)
+		{
+			log_error("Failed to confirm durable apply progress at %X/%X",
+					  LSN_FORMAT_ARGS(context.previousLSN));
+			success = false;
+		}
+	}
+
 	(void) pipeline_state_end(specs->sourceDB, "apply",
 							  context.previousLSN, success);
 	(void) stream_apply_cleanup(&context);
@@ -1016,7 +1030,9 @@ stream_apply_transaction(StreamApplyContext *context,
 
 	log_debug("COMMIT xid %u LSN %X/%X", xid, LSN_FORMAT_ARGS(commitLSN));
 
-	if (!pgsql_execute(applyPgConn, "COMMIT"))
+	/* A queued COMMIT is not confirmed until its pipeline results are checked. */
+	if (!pgsql_execute(applyPgConn, "COMMIT") ||
+		!pgsql_sync_pipeline(applyPgConn))
 	{
 		/* errors have already been logged */
 		context->transactionInProgress = false;

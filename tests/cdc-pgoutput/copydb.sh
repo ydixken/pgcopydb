@@ -279,3 +279,6 @@ pub_after=$(psql -AtqX -d ${PGCOPYDB_SOURCE_PGURI} \
   -c "select count(*) from pg_publication where pubname = 'pgcopydb'")
 echo "publication rows after cleanup (should be 0): ${pub_after}"
 test "${pub_after}" -eq 0
+
+bash /usr/src/pgcopydb/apply-error.sh commit
+bash /usr/src/pgcopydb/apply-error.sh between
