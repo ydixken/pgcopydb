@@ -107,8 +107,7 @@ jobs:
         #
         # PG17 is intentionally omitted here — it is covered by the nightly
         # full-matrix run.  PG18 (latest) gets every test; PG16 (oldest
-        # supported) gets a representative core subset.  This keeps the PR
-        # gate at ~23 jobs instead of 47.
+        # supported) gets a representative core subset.
         PGVERSION:
           - 16
           - 18
@@ -127,10 +126,13 @@ jobs:
           - cdc-test-decoding
           - cdc-endpos-mid-txn
           - cdc-wal2json
+          - cdc-pgoutput
+          - cdc-pgoutput-resume
           - cdc-partitioned-target
           - cdc-matview
           - cdc-replica-identity-index
           - follow-wal2json
+          - follow-pgoutput
           - follow-9.6
           - follow-data-only
           - follow-filtering
@@ -155,6 +157,10 @@ jobs:
             PGVERSION: 16
           - TEST: cdc-wal2json
             PGVERSION: 16
+          - TEST: cdc-pgoutput
+            PGVERSION: 16
+          - TEST: cdc-pgoutput-resume
+            PGVERSION: 16
           - TEST: cdc-partitioned-target
             PGVERSION: 16
           - TEST: cdc-matview
@@ -162,6 +168,8 @@ jobs:
           - TEST: cdc-replica-identity-index
             PGVERSION: 16
           - TEST: follow-wal2json
+            PGVERSION: 16
+          - TEST: follow-pgoutput
             PGVERSION: 16
           - TEST: follow-9.6
             PGVERSION: 16
