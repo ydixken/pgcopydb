@@ -737,10 +737,10 @@ startLogicalStreaming(StreamSpecs *specs)
 		}
 		else if (cleanExit && context.endpos == InvalidXLogRecPtr)
 		{
-			log_info("Streamed up to write_lsn %X/%X, flush_lsn %X/%X, "
-					 "reconnecting in 1s ",
+			log_info("Streamed up to write_lsn %X/%X, flush_lsn %X/%X, %s",
 					 LSN_FORMAT_ARGS(context.tracking->written_lsn),
-					 LSN_FORMAT_ARGS(context.tracking->flushed_lsn));
+					 LSN_FORMAT_ARGS(context.tracking->flushed_lsn),
+					 retry ? "reconnecting in 1s" : "stopping");
 		}
 		else if (retries > 0 &&
 				 context.tracking->written_lsn == waterMarkLSN)

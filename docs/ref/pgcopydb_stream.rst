@@ -155,9 +155,10 @@ transforms the changes prefetched into the CDC *output* database into replay
 statements (stored in the CDC *replay* database), and applies them to the
 target. Progress is tracked using the Postgres replication origin.
 
-The SQLite apply path pipelines statements within each source transaction and checks the target's COMMIT result before publishing applied progress.
+The SQLite apply path pipelines statements within each source transaction, uses ``synchronous_commit=on``, and checks the target's COMMIT result before publishing applied progress.
 SQL errors fail catchup without advancing progress past the rejected transaction.
-Before reporting successful completion, catchup flushes the replication origin's WAL, including when endpos falls between transactions.
+Acknowledged transactions are durable before either an endpos-triggered stop or a shutdown signal, so stopping between transactions requires no additional target query.
+Interrupted in-flight work may require resuming from the target replication origin; a shutdown request does not guarantee that every received transaction was applied.
 
 .. include:: ../include/stream-catchup.rst
 
