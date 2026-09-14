@@ -282,3 +282,4 @@ test "${pub_after}" -eq 0
 
 bash /usr/src/pgcopydb/apply-error.sh commit
 bash /usr/src/pgcopydb/apply-error.sh between
+bash /usr/src/pgcopydb/shutdown.sh

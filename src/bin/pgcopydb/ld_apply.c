@@ -139,20 +139,6 @@ stream_apply_catchup(StreamSpecs *specs)
 
 	bool success = stream_apply_replaydb(specs, &context);
 
-	/* Endpos may fall after an asynchronously committed transaction. */
-	if (success)
-	{
-		uint64_t durableLSN = InvalidXLogRecPtr;
-
-		if (!stream_apply_find_durable_lsn(&context, &durableLSN) ||
-			durableLSN < context.previousLSN)
-		{
-			log_error("Failed to confirm durable apply progress at %X/%X",
-					  LSN_FORMAT_ARGS(context.previousLSN));
-			success = false;
-		}
-	}
-
 	(void) pipeline_state_end(specs->sourceDB, "apply",
 							  context.previousLSN, success);
 	(void) stream_apply_cleanup(&context);
@@ -774,8 +760,8 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
  * for xid in replay order (starting from begin_id), and commits with the
  * replication origin set to commitLSN.
  *
- * When endpos <= commitLSN, synchronous_commit = on is enabled so the origin
- * position is durably flushed before the caller signals endpos reached.
+ * Every COMMIT confirms durable origin progress, so stopping between
+ * transactions needs no further PostgreSQL query.
  *
  * Returns false on error; on success context->previousLSN = commitLSN.
  */
@@ -788,17 +774,13 @@ stream_apply_transaction(StreamApplyContext *context,
 	PGSQL *applyPgConn = &(context->applyPgConn);
 	DatabaseCatalog *replayDB = context->replayDB;
 
-	bool sync = (context->endpos != InvalidXLogRecPtr &&
-				 context->endpos <= commitLSN);
-
 	if (!pgsql_begin(applyPgConn))
 	{
 		/* errors have already been logged */
 		return false;
 	}
 
-	if (!pgsql_set_gucs(applyPgConn,
-						sync ? applySettingsSync : applySettings))
+	if (!pgsql_set_gucs(applyPgConn, applySettingsSync))
 	{
 		/* errors have already been logged */
 		(void) pgsql_execute(applyPgConn, "ROLLBACK");
