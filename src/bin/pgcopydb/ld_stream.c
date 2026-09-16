@@ -663,6 +663,13 @@ startLogicalStreaming(StreamSpecs *specs)
 	StreamContext *privateContext = &(specs->private);
 	context.private = (void *) privateContext;
 
+	if (!ld_store_read_last_commit_lsn(specs->sourceDB,
+									   &privateContext->lastDurableCommitLSN))
+	{
+		return false;
+	}
+	privateContext->commitLSNInitialized = true;
+
 	log_notice("Connecting to logical decoding replication stream");
 
 	(void) pipeline_state_start(specs->sourceDB, "receive", specs->startpos);
@@ -790,25 +797,13 @@ startLogicalStreaming(StreamSpecs *specs)
 
 
 /*
- * streamCheckResumePosition checks that the resume position on the replication
- * slot on the source database is in-sync with the lastest on-file LSN we have.
+ * Load the requested start position from the sentinel and source slot.
+ * Retained spool accounting is separate: START_REPLICATION may resume at a
+ * higher confirmed_flush_lsn than the requested position.
  */
 bool
 streamCheckResumePosition(StreamSpecs *specs)
 {
-	/*
-	 * We might have specifications for when to start in the pgcopydb sentinel
-	 * table. The sentinel only applies to STREAM_MODE_PREFETCH, in
-	 * STREAM_MODE_RECEIVE we bypass that mechanism entirely.
-	 *
-	 * When STREAM_MODE_PREFETCH is set, it is expected that the pgcopydb
-	 * sentinel table has been setup before starting the logical decoding
-	 * client.
-	 *
-	 * The pgcopydb sentinel table also contains an endpos. The --endpos
-	 * command line option (found in specs->endpos) prevails, but when it's not
-	 * been used, we have a look at the sentinel value.
-	 */
 	CopyDBSentinel sentinel = { 0 };
 
 	if (!sentinel_get(specs->sourceDB, &sentinel))
@@ -878,14 +873,8 @@ streamCheckResumePosition(StreamSpecs *specs)
 			  LSN_FORMAT_ARGS(lsn));
 
 	/*
-	 * After a restart, sentinel.startpos is the original replication slot
-	 * LSN (never updated), while the slot's confirmed_flush has already
-	 * advanced to flush_lsn from the previous run.  startpos < slot_lsn is
-	 * therefore normal and expected: it means the output table already
-	 * contains rows up to flush_lsn and the transform process will consume
-	 * them from transform_lsn independently.  Clamp our streaming start
-	 * position to the slot's current LSN so we begin receiving new WAL from
-	 * there and let PostgreSQL serve what it still has.
+	 * Prefetch may have moved the slot ahead of sentinel.startpos without
+	 * applying the received transactions. Those remain in the output spool.
 	 */
 	if (specs->startpos < lsn)
 	{
@@ -937,24 +926,8 @@ streamWrite(LogicalStreamContext *context)
 		if (context->onRetry)
 		{
 			/*
-			 * After a transient reconnect do NOT delete partial rows for the
-			 * in-progress transaction.
-			 *
-			 * Previously this path deleted partial rows assuming "the slot
-			 * will re-deliver the entire transaction from its BEGIN on the
-			 * new connection."  That assumption fails when flush_lsn (now
-			 * tied to transform_lsn, not written_lsn) has already advanced
-			 * past the transaction's BEGIN lsn: the slot starts from
-			 * confirmed_flush > BEGIN lsn and therefore never re-sends the
-			 * BEGIN, leaving orphaned DML rows without a matching BEGIN in
-			 * the output table.
-			 *
-			 * With flush_lsn = transform_lsn and INSERT OR REPLACE semantics
-			 * on the output table the partial rows from the previous
-			 * connection are safely completed by the re-delivered messages:
-			 * the BEGIN is already in the table (or will be re-inserted
-			 * idempotently if confirmed_flush < BEGIN lsn), and any
-			 * re-delivered DML/COMMIT rows are upserted without duplication.
+			 * Keep durable partial rows: prefetch may have acknowledged them.
+			 * INSERT OR REPLACE handles any messages the slot sends again.
 			 */
 			context->onRetry = false;
 		}
@@ -1023,6 +996,12 @@ streamWrite(LogicalStreamContext *context)
 		if (!ld_store_output_commit(replayDB))
 		{
 			return false;
+		}
+
+		if (!metadata->skipping)
+		{
+			privateContext->lastDurableCommitLSN =
+				Max(privateContext->lastDurableCommitLSN, metadata->lsn);
 		}
 
 		privateContext->transactionInProgress = false;
@@ -1297,20 +1276,8 @@ streamCloseFile(LogicalStreamContext *context, bool time_to_abort)
 	}
 
 	/*
-	 * Do NOT delete partial transaction rows when aborting.
-	 *
-	 * Previously this deleted the in-progress transaction's rows so the
-	 * "slot re-delivers from BEGIN on reconnect" assumption held.  That
-	 * assumption breaks when flush_lsn (= transform_lsn) has already advanced
-	 * past the transaction's BEGIN lsn: the slot starts from confirmed_flush
-	 * and never re-delivers the BEGIN, leaving orphaned DML rows.
-	 *
-	 * With flush_lsn = transform_lsn the slot always re-delivers from
-	 * transform_lsn (a transaction boundary).  Partial rows already in the
-	 * output table are completed by re-delivered messages via INSERT OR
-	 * REPLACE; the BEGIN row is either already present (BEGIN lsn <
-	 * transform_lsn) or will be re-inserted (BEGIN lsn >= transform_lsn).
-	 * No deletion is needed or safe.
+	 * Preserve partial output rows on abort; acknowledged prefetch data may
+	 * not be redelivered by the source slot.
 	 */
 
 	log_debug("streamCloseFile: WAL epoch boundary at LSN %X/%X",
@@ -1550,35 +1517,36 @@ stream_sync_sentinel(LogicalStreamContext *context)
 	}
 
 	context->endpos = sentinel.endpos;
-	context->tracking->applied_lsn = sentinel.replay_lsn;
 
 	/*
-	 * Report replay_lsn as the flushed position in the PostgreSQL replication
-	 * feedback message.
-	 *
-	 * PostgreSQL uses flush_lsn to advance the logical slot's confirmed_flush.
-	 * confirmed_flush is the point from which the slot re-delivers WAL on
-	 * reconnect (max(startlsn, confirmed_flush)).  Using written_lsn (the raw
-	 * WAL receive position) would race ahead of what apply has actually
-	 * committed: if receive is killed mid-segment, confirmed_flush ends up
-	 * beyond the last committed transaction, creating a gap.
-	 *
-	 * Using replay_lsn ensures confirmed_flush advances only when apply has
-	 * fully committed a transaction on the target.  On any restart the slot
-	 * re-delivers from replay_lsn, which is always a transaction boundary
-	 * (we sync replay_lsn only at COMMIT), and INSERT OR REPLACE handles
-	 * idempotent re-insertion of already-present output rows.
-	 *
-	 * write_lsn is still reported as-is (how far receive has received) for
-	 * monitoring; only flush_lsn (which drives confirmed_flush) is changed.
+	 * A primary keepalive can cover WAL with no replicated changes, but only
+	 * after apply has durably caught up with every stored COMMIT. Raw spool
+	 * flush progress can be ahead of the target, especially during prefetch.
 	 */
 	if (sentinel.replay_lsn != InvalidXLogRecPtr)
 	{
-		context->tracking->flushed_lsn = sentinel.replay_lsn;
+		privateContext->feedbackLSN =
+			Max(privateContext->feedbackLSN, sentinel.replay_lsn);
+
+		if (privateContext->commitLSNInitialized &&
+			privateContext->lastDurableCommitLSN <= sentinel.replay_lsn &&
+			!privateContext->transactionInProgress &&
+			context->endpos == InvalidXLogRecPtr &&
+			context->serverKeepaliveLSN != InvalidXLogRecPtr)
+		{
+			privateContext->feedbackLSN =
+				Max(privateContext->feedbackLSN, context->serverKeepaliveLSN);
+		}
+	}
+
+	context->tracking->applied_lsn = privateContext->feedbackLSN;
+	if (privateContext->feedbackLSN != InvalidXLogRecPtr)
+	{
+		context->tracking->flushed_lsn = privateContext->feedbackLSN;
 	}
 
 	log_debug("stream_sync_sentinel: "
-			  "write_lsn %X/%X flush_lsn(=replay_lsn) %X/%X apply_lsn %X/%X "
+			  "write_lsn %X/%X flush_lsn %X/%X apply_lsn %X/%X "
 			  "startpos %X/%X endpos %X/%X apply %s",
 			  LSN_FORMAT_ARGS(context->tracking->written_lsn),
 			  LSN_FORMAT_ARGS(context->tracking->flushed_lsn),

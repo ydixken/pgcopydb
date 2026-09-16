@@ -437,6 +437,7 @@ typedef struct LogicalStreamContext
 	void *private;
 
 	XLogRecPtr cur_record_lsn;
+	XLogRecPtr serverKeepaliveLSN; /* genuine primary keepalive, this connection */
 	int timeline;
 
 	const char *buffer;         /* expose internal buffer */

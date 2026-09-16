@@ -98,11 +98,9 @@ The command ``pgcopydb stream prune`` removes CDC output.db / replay.db file
 pairs that have already been fully applied to the target and are no longer
 needed for resume or restart.
 
-A file pair is safe to delete when its ``endpos`` is strictly less than
-``sentinel.replay_lsn`` (the LSN acknowledged back to the PostgreSQL
-replication slot as ``confirmed_flush``) and its ``done_time_epoch`` is set
-(the receive process has closed it). Those transactions have been durably
-committed on the target; the slot will never re-deliver them.
+A file pair is safe to delete when its ``endpos`` is strictly less than ``sentinel.replay_lsn`` and its ``done_time_epoch`` is set (the receive process has closed it).
+Those transactions have been durably committed on the target.
+Cleanup uses this applied position, not the potentially higher keepalive position acknowledged to the source slot.
 
 The deleted entries are removed from the ``cdc_files`` catalog table in
 ``source.db``. The freed SQLite freelist pages are recycled automatically

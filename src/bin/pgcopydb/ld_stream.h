@@ -404,6 +404,9 @@ typedef struct StreamContext
 	LogicalTransactionStatement *stmt;
 
 	uint64_t maxWrittenLSN;     /* max LSN written so far to the JSON files */
+	uint64_t lastDurableCommitLSN;
+	uint64_t feedbackLSN;       /* certified floor once apply initializes */
+	bool commitLSNInitialized;
 
 	uint64_t lastWriteTime;
 

@@ -310,7 +310,10 @@ __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-S
     In the pgcopydb case, the sentinel field flush_lsn tracks durable progress in the SQLite CDC store.
     The streaming process commits writes at every source COMMIT, at least every 10 seconds, and before closing or rotating the store.
     SQLite synchronous mode remains FULL, and flush_lsn advances only after the batch commits.
-    Replication feedback uses replay_lsn when it is nonzero; otherwise it uses this committed flush position.
+    Until replay_lsn is nonzero, replication feedback uses this committed flush position without claiming target replay progress.
+    Once apply has initialized replay_lsn, feedback reports durable target progress and may acknowledge a primary keepalive when all stored COMMITs have been applied, no transaction is being received, and endpos is unset.
+    The earlier prefetch acknowledgement may exceed this applied position, so wire flush reports can decrease at that transition even though the slot's confirmed_flush_lsn does not.
+    The receiver checks retained CDC files at startup, including rotated files, before allowing this keepalive advancement.
 
   - ``replay_lsn``
 
@@ -321,10 +324,10 @@ __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-S
 
     __ https://www.postgresql.org/docs/current//replication-origins.html
 
-    The replay_lsn is also shared by the pgcopydb streaming process that
-    uses the Postgres logical replication protocol, so the
-    `pg_stat_replication`__ entry associated with the replication slot used
-    by pgcopydb can be used to monitor replication lag.
+    The streaming process uses replay_lsn to certify its feedback to the source.
+    The `pg_stat_replication`__ flush_lsn and replay_lsn may exceed sentinel.replay_lsn after a primary keepalive confirms progress through WAL with no pending replicated changes.
+    This network feedback never advances the target replication origin or the apply cursor.
+    Setting endpos disables new keepalive advancement, while feedback retains its last certified position.
 
     __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STAT-REPLICATION-VIEW
 

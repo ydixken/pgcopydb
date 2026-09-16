@@ -83,54 +83,53 @@ BEGIN).
 Replication feedback and safe restart points
 ---------------------------------------------
 
-The PostgreSQL streaming replication protocol requires the client to send
-periodic standby status updates reporting three LSN positions: bytes received,
-bytes flushed (durable on the client), and bytes applied to a downstream.  For
-logical replication PostgreSQL uses the reported flush LSN to advance the
-slot's ``confirmed_flush_lsn`` via ``LogicalConfirmReceivedLocation``, a value
-that only ever increases.  The slot's ``restart_lsn`` — the oldest WAL
-position the server must retain — is derived from ``confirmed_flush_lsn`` and
-determines how far back WAL segments can be recycled.  On reconnect, WAL
-streaming resumes from the greater of the client's requested start position and
-``confirmed_flush_lsn``, so whatever the client last reported as flushed
-becomes the effective replay starting point.
+The `PostgreSQL streaming replication protocol <https://www.postgresql.org/docs/current/protocol-replication.html>`_ requires periodic standby status updates reporting received, flushed, and applied LSN positions.
+For logical replication, PostgreSQL uses the reported flush LSN to advance the slot's ``confirmed_flush_lsn``, which only increases.
+On reconnect, streaming starts at the greater of the requested start position and ``confirmed_flush_lsn``.
+The receiver must therefore account for changes already stored locally that the server may not send again.
 
-pgcopydb reports ``sentinel.transform_lsn`` as the flush LSN.
-``transform_lsn`` advances only at committed transaction boundaries — to
-``COMMIT.end_lsn``, the byte immediately after a completed COMMIT record,
-which is identical to ``first_lsn`` of the next transaction.  Advancing to any
-position inside an uncommitted transaction (past a BEGIN but before its COMMIT)
-would cause the slot to skip that transaction on reconnect, silently losing
-data.  Because ``confirmed_flush_lsn`` after processing transaction N equals
-``end_lsn_N = first_lsn_{N+1}``, streaming on reconnect resumes exactly at the
-first byte of the next unprocessed transaction, the ``>=`` predicate on BEGIN
-rows in the restart cursor matches it at exactly that LSN, and no message is
-lost or replayed twice.
+``sentinel.replay_lsn`` records durable target progress.
+The SQLite apply path uses ``synchronous_commit=on`` and checks the pipelined COMMIT result before publishing the source COMMIT LSN.
+Before any data commit, apply can publish the initialized replication-origin position without a user write.
+On restart, ``setupReplicationOrigin`` reads ``pg_replication_origin_progress()`` and sets ``context->previousLSN`` from that authoritative target position.
+KEEPALIVE rows have a separate cursor and never advance ``previousLSN``, the target origin, or ``sentinel.replay_lsn``.
 
-pgcopydb also records ``pipeline_state.last_xid`` alongside
-``transform_lsn``.  The pair ``(transform_lsn, last_xid)`` forms a complete
-restart descriptor — the last fully processed transaction was XID X whose
-COMMIT ended at LSN L.  Only ``transform_lsn`` drives the PostgreSQL slot
-position; ``last_xid`` is kept for debugging and cross-process assertions.
+The receiver tracks three positions for feedback:
 
-A separate watermark, ``sentinel.replay_lsn``, tracks progress on the target
-side: it records the LSN of the last transaction successfully committed to the
-target PostgreSQL database by the apply process, and is updated only after
-``pgsql_execute(COMMIT)`` returns successfully.  ``replay_lsn`` is used to
-detect that the user's ``--endpos`` has been reached and to drive the pgcopydb
-progress display; it is not the apply restart point.
+* ``P`` is the durable apply position from ``sentinel.replay_lsn``, zero until initialized.
+* ``C`` is the highest actual COMMIT LSN durably stored in the output spool and still relevant to apply.
+  It uses the same ``metadata->lsn`` representation as output and apply, and excludes skipped empty or filtered transactions.
+* ``K`` is the highest genuine primary keepalive LSN received on this replication connection, whether or not the server requested a reply.
+  Raw XLogData positions and synthetic KEEPALIVE rows do not set ``K``.
 
-On restart, ``setupReplicationOrigin`` reads
-``pg_replication_origin_progress()`` from the durable PostgreSQL origin
-catalog and overwrites ``context->previousLSN`` unconditionally —
-``replay_lsn`` plays no role in that lookup.
+Before receiving, pgcopydb scans the COMMIT rows in every relevant ``cdc_files`` entry, including rotated output files.
+It excludes only closed files whose endpos is strictly below durable apply progress, using the same rule as CDC cleanup.
+A source-catalog write transaction freezes ``P`` during the scan; it does not lock filesystem unlink operations.
+Cleanup using an already captured horizon ``R <= P`` can remove only closed files with ``endpos < R``, which the scan excludes.
+Holding ``P`` fixed prevents other scan candidates from becoming eligible for cleanup.
+An empty spool is valid only after these reads succeed.
+During streaming, ``C`` increases only after the output SQLite transaction containing a non-skipped COMMIT has committed.
 
-During KEEPALIVE processing, pgcopydb commits a ``SELECT txid_current()``
-with ``pg_replication_origin_xact_setup(previousLSN)`` (the last data commit
-LSN, not the KEEPALIVE LSN itself), and only after that commit succeeds does
-it advance ``context->previousLSN`` to the KEEPALIVE LSN and update
-``replay_lsn`` accordingly — so the origin always records the last durable
-data commit while ``replay_lsn`` follows the WAL progress beacon.
+.. warning::
+
+   Invalid filenames, missing or unreadable required spool files, and failed catalog queries stop receiver startup.
+   Required files may contain acknowledged transactions that PostgreSQL will not resend, so disabling keepalive promotion is not a safe fallback.
+   Cleanup-orphaned catalog entries do not block startup when the closed-file ``endpos < P`` rule proves they are already applied.
+
+With initialized ``P > 0``, feedback normally reports ``P``.
+It may also advance the network flush and replay positions to ``K`` when startup accounting is complete, ``C <= P``, no transaction is being received, and endpos is unset.
+This lets feedback cover WAL with no pending replicated changes without claiming that a target data transaction committed at ``K``.
+Once ``P`` is initialized, the receiver retains its last certified replay position as a monotonic floor for the lifetime of the receiver process, including connection retries.
+It never advances that certified position from raw spool flush progress.
+The receiver refreshes the sentinel before constructing a feedback packet.
+A failed sync stops the send because the current flush value may still be raw spool progress rather than certified target progress.
+A failed keepalive spool write also aborts the streaming attempt; existing error handling rolls back any open output batch before retrying or exiting.
+
+Before ``P`` is initialized, receive and prefetch keep their spool-only flush acknowledgements and report no target replay progress.
+A prefetch acknowledgement ``W`` can exceed the later applied ``P``, so wire flush reports may decrease when switching to certified replay feedback.
+This is why startup cannot initialize ``C`` to zero without checking old spool files: PostgreSQL may already have acknowledged those COMMITs while apply was still disabled.
+On a connection retry, the receiver clears ``K`` but retains ``C`` and its certified feedback floor.
+A process restart reconstructs ``C`` from the retained catalogs and requires a new primary keepalive before promoting feedback beyond ``P``.
 
 Why pgcopydb supports endpos mid-transaction
 ---------------------------------------------
@@ -167,21 +166,21 @@ with source workload — impractical.  Instead pgcopydb handles all three cases:
      - apply full txn, stop
      - stays at ``commitLSN`` (> endpos)
 
-For the "between txns" and "mid-transaction" cases the straddling transaction
-is NOT applied to the target.  On the next ``pgcopydb`` run the slot
-re-delivers it from the last safe ``transform_lsn`` position.
+If receive stops before a transaction's COMMIT reaches the spool, apply leaves that transaction unapplied.
+If the complete transaction is already in the spool, apply can commit it in full before stopping.
+Neither path fabricates applied progress at endpos.
 
 Internal model for endpos tracking
 ------------------------------------
 
 pgcopydb tracks two separate concerns:
 
-PostgreSQL-facing LSN (``transform_lsn``, ``flush_lsn``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+PostgreSQL-facing feedback
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Only advances at committed transaction boundaries.  This is the value reported
-to PostgreSQL as ``confirmed_flush_lsn``.  It must never be set to a position
-inside an uncommitted transaction.
+Setting endpos disables new keepalive-based feedback advancement.
+The receiver continues to report durable apply progress with its previous certified feedback position as a floor.
+That network position does not change the target origin or prove that endpos has drained.
 
 Internal endpos-reached signal
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -192,44 +191,30 @@ transaction boundaries.
 
 This signal flows through two mechanisms:
 
-**a.** ``sentinel.replay_lsn >= sentinel.endpos`` — the primary check.  Fires
-when the last applied commit naturally covered ``endpos`` (commit-at-boundary
-or mid-txn cases where the full transaction was committed to target and its
-``commitLSN >= endpos``).
+**a.** ``sentinel.replay_lsn >= sentinel.endpos`` is the primary check.
+It fires when the last durable applied commit covers endpos.
 
-**b.** ``pipeline_state["transform"].run_state = 'done'``
-AND ``pipeline_state["apply"].run_state = 'done'``
-AND ``sentinel.endpos != 0`` — the secondary check.  Fires when endpos fell
-between or inside transactions and apply exited cleanly without advancing
-``replay_lsn`` past ``endpos``.  Both processes mark themselves ``'done'``
-(not ``'error'``) only on a successful, intentional exit.
+**b.** ``pipeline_state["apply"].run_state = 'done'`` with ``sentinel.endpos != 0`` is the secondary check.
+It covers a clean drain when endpos falls between or inside transactions without an applied COMMIT at endpos.
+Apply marks itself ``'done'`` only after a successful, intentional exit; interrupted work is not a successful drain.
 
 ``follow_reached_endpos`` checks (a) first; if (a) misses, it checks (b).
 
 Transform exit for mid-transaction endpos
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When the transform process detects that receive has finished but the current
-XID's COMMIT has never arrived (``pending_xid != 0`` after receive-done):
+When inline transform detects that receive has finished but the current XID's COMMIT has never arrived (``pending_xid != 0`` after receive-done):
 
 1. ``ld_store_iter_output`` sets ``specs->private.midTxnEndpos = true``.
-2. The outer transform loop sees the flag, logs the situation, and exits.
-3. ``transform_lsn`` stays at the last committed transaction boundary — it is
-   NOT advanced to ``endpos``.
-4. ``pipeline_state_end("transform", transform_lsn, true)`` records the clean
-   exit at the last commit boundary.
-5. The apply process is woken over the receive→apply lifecycle pipe (the
-   one-way "done at LSN X" signal modelled on PostgreSQL's postmaster
-   death-watch; see :ref:`pipe_protocol`).
+2. The apply driver sees the flag and stops without advancing ``previousLSN`` to endpos.
+3. Apply publishes its last durable COMMIT position and records a clean exit in ``pipeline_state``.
 
-``sentinel.transform_lsn`` never moves past a committed transaction boundary.
-The slot's ``confirmed_flush_lsn`` is unaffected by the mid-transaction endpos.
+Receive signals completion over the receive-to-apply lifecycle pipe, or through its durable pipeline state when no pipe is available (see :ref:`pipe_protocol`).
 
 Apply exit for mid-transaction and between-transaction endpos
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Guard 2** (``endpos < beginLSN`` — endpos lies between the last commit and
-the next transaction's BEGIN):
+**Guard 2** (``endpos < beginLSN``): endpos lies before the next transaction's BEGIN.
 
 - ``context->previousLSN`` is not advanced to ``endpos``.
 - ``stream_apply_sync_sentinel()`` is called with ``previousLSN = last_commit``.
@@ -237,8 +222,7 @@ the next transaction's BEGIN):
 - ``context->reachedEndPos = true``; loop exits.
 - ``pipeline_state_end("apply", last_commit_lsn, true)`` records the clean exit.
 
-**"No rows + transform done"** (mid-transaction endpos: the straddling
-transaction was never committed to the output table):
+**No rows after receive finishes**: the straddling transaction has no COMMIT in the output table.
 
 - Same as Guard 2: ``previousLSN`` not modified, ``replay_lsn = last_commit``.
 - ``pipeline_state_end("apply", last_commit_lsn, true)``.
@@ -272,14 +256,11 @@ and once more at end of processing, rather than once per transaction.
 Restart safety
 ~~~~~~~~~~~~~~
 
-Because ``transform_lsn`` stays at the last commit boundary, the PostgreSQL
-slot's ``confirmed_flush_lsn`` is never advanced past a completed transaction.
-On the next run:
-
-- The slot re-delivers from ``confirmed_flush_lsn = end_lsn_of_last_commit``.
-- The ``>=`` cursor finds ``BEGIN_next`` (whose LSN equals
-  ``end_lsn_of_last_commit``).
-- Any transaction that straddled the endpos is fully re-delivered and applied.
+Apply restarts from the target replication origin, not a keepalive or endpos marker.
+Receive accounts for every relevant retained output file before certifying new keepalive feedback.
+Transactions already acknowledged during prefetch remain available in that spool even when PostgreSQL does not redeliver them.
+The BEGIN cursor uses ``>=`` so it includes a next transaction beginning exactly at the previous COMMIT LSN.
+An incomplete transaction can be completed by redelivery without advancing the apply cursor past its missing COMMIT.
 
 .. _pipe_protocol:
 
@@ -337,21 +318,17 @@ Invariant summary
      - Advances at
      - Never set to
      - Drives
-   * - ``transform_lsn``
-     - ``COMMIT.end_lsn``
-     - position inside uncommitted txn
-     - ``confirmed_flush_lsn`` on source PG
-   * - ``flush_lsn``
-     - same as ``transform_lsn``
-     - (derived)
-     - replication keepalive feedback
-   * - ``replay_lsn``
-     - target Postgres COMMIT confirmed
-     - position without backing COMMIT
+   * - Network flush/replay LSN (``P > 0``)
+     - durable apply or certified primary keepalive
+     - uncertified raw receive position as replay
+     - source slot feedback
+   * - ``sentinel.replay_lsn``
+     - origin initialization or confirmed target COMMIT
+     - keepalive or fabricated endpos
      - ``follow_reached_endpos`` check (a)
    * - ``pipeline_state["apply"].run_state``
      - process exit (``'done'``/``'error'``)
-     - —
+     - success after interruption
      - ``follow_reached_endpos`` check (b)
    * - ``context->previousLSN``
      - target Postgres COMMIT confirmed

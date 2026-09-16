@@ -10,7 +10,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-wal2json cdc-test-decoding cdc-endpos-mid-txn cdc-low-level \
 	 cdc-replica-identity-index cdc-partitioned-target cdc-matview \
 	 cdc-endpos-in-multi-wal-txn cdc-file-rotation \
-	 cdc-pgoutput cdc-pgoutput-resume cdc-filtering-pgoutput \
+	 cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering;
 
@@ -80,6 +80,9 @@ cdc-pgoutput: build
 cdc-pgoutput-resume: build
 	$(MAKE) -C $@
 
+cdc-keepalive: build
+	$(MAKE) -C $@
+
 cdc-filtering-pgoutput: build
 	$(MAKE) -C $@
 
@@ -126,6 +129,6 @@ clean-images:
 .PHONY: all-databases three-databases
 .PHONY: cdc-wal2json cdc-test-decoding cdc-endpos-mid-txn cdc-low-level cdc-replica-identity-index cdc-partitioned-target
 .PHONY: cdc-endpos-in-multi-wal-txn cdc-file-rotation
-.PHONY: cdc-pgoutput cdc-pgoutput-resume cdc-filtering-pgoutput follow-pgoutput follow-filtering
+.PHONY: cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput follow-pgoutput follow-filtering
 .PHONY: follow-wal2json follow-9.6
 .PHONY: timescaledb citus

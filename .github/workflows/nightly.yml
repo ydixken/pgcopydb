@@ -126,6 +126,7 @@ jobs:
           - cdc-replica-identity-index
           - cdc-file-rotation
           - cdc-pgoutput
+          - cdc-keepalive
           - cdc-filtering-pgoutput
           - follow-wal2json
           - follow-9.6
