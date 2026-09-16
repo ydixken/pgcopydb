@@ -5,12 +5,12 @@ set -euo pipefail
 scenario=${1:-${FEEDBACK_CASE:-all}}
 case "${scenario}" in
     all)
-        for scenario in idle backlog restart empty in-flight; do
+        for scenario in idle backlog restart empty in-flight bootstrap; do
             bash "$0" "${scenario}"
         done
         exit 0
         ;;
-    idle|backlog|restart|empty|in-flight) ;;
+    idle|backlog|restart|empty|in-flight|bootstrap) ;;
     *) echo "Unknown feedback case: ${scenario}" >&2; exit 1 ;;
 esac
 
@@ -276,6 +276,11 @@ spool_commit() {
     fi
     echo "Durable spool: xid=${xid}, COMMIT=${commit_lsn}, file=${commit_file}, files=${#files[@]}"
 }
+
+if test "${scenario}" = bootstrap; then
+    source /usr/src/pgcopydb/bootstrap.sh
+    exit 0
+fi
 
 pgcopydb ping
 source_sql 'drop table if exists feedback_guard; create table feedback_guard(id integer primary key, payload text)'

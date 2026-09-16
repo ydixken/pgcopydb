@@ -1,6 +1,6 @@
-# Keepalive feedback regressions
+# Keepalive feedback and bootstrap regressions
 
-This suite distinguishes network feedback from durable target apply progress using `pgoutput`.
+This suite tests keepalive feedback using `pgoutput` and interrupted CDC bootstrap using all three supported plugins.
 Its self-contained Compose configuration follows `cdc-pgoutput-resume`, with the same debugger capabilities, isolated databases, and no external volumes.
 
 ## Run
@@ -57,10 +57,14 @@ FEEDBACK_CASE=idle PGVERSION=18 make tests/cdc-keepalive
   Require the receive transaction flag to remain set through the flush-generated keepalive and wire flush/replay not to advance beyond durable progress or previously sent feedback.
   Previously acknowledged keepalives remain valid, so this check permits monotonic feedback rather than requiring it to retreat.
   Release the barrier and verify all 10,001 rows by count and ordered digest.
-  This case exercises a synthetic flush keepalive inside a transaction; the other cases exercise genuine server keepalives.
+  This case exercises a synthetic flush keepalive inside a transaction; the other feedback cases exercise genuine server keepalives.
+- **`bootstrap`**: fail `clone --follow --restart` on an empty orphan publication, run guarded orphan cleanup, then retry the same work directory with `clone --follow --resume --not-consistent`.
+  Require the missing sentinel to start at the new slot's LSN and verify a post-clone replicated marker.
+  Exercise `pgoutput`, `test_decoding`, and `wal2json`, stopping completed clones with endpos.
+  Preserve every existing sentinel field, refuse missing retained-slot state and SQL errors, and check initialization of a separately prepared slot.
 
-All cases run without endpos.
-Keep the original snapshot exporter alive through every `follow --resume`, including the initial-zero prefetch restart; follow imports the stored snapshot during setup.
+The five feedback cases run without endpos and use a separate snapshot exporter.
+For these cases, keep the original snapshot exporter alive through every `follow --resume`, including the initial-zero prefetch restart; follow imports the stored snapshot during setup.
 Streaming shutdown and pause target the owned pgcopydb process group, leaving the exporter alive until final cleanup.
 Capture each published transaction's XID and read its unique COMMIT LSN from the stopped spool, checking one BEGIN and the exact INSERT count.
 Use `pg_current_wal_flush_lsn()` only as a receive bound or filtered head, never as an assumed transaction COMMIT.

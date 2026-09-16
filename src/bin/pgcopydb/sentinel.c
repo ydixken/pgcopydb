@@ -21,7 +21,8 @@
  * sentinel_setup registers the sentinel data.
  */
 bool
-sentinel_setup(DatabaseCatalog *catalog, uint64_t startpos, uint64_t endpos)
+sentinel_setup(DatabaseCatalog *catalog, uint64_t startpos, uint64_t endpos,
+			   bool preserveExisting)
 {
 	sqlite3 *db = catalog->db;
 
@@ -35,7 +36,8 @@ sentinel_setup(DatabaseCatalog *catalog, uint64_t startpos, uint64_t endpos)
 		"insert or replace into sentinel("
 		"  id, startpos, endpos, apply, "
 		"  write_lsn, flush_lsn, replay_lsn) "
-		"values($1, $2, $3, $4, '0/0', '0/0', '0/0')";
+		"select $1, $2, $3, $4, '0/0', '0/0', '0/0' "
+		"where not $5 or not exists(select 1 from sentinel where id = 1)";
 
 	if (!semaphore_lock(&(catalog->sema)))
 	{
@@ -63,7 +65,8 @@ sentinel_setup(DatabaseCatalog *catalog, uint64_t startpos, uint64_t endpos)
 		{ BIND_PARAMETER_TYPE_INT64, "id", 1, NULL },
 		{ BIND_PARAMETER_TYPE_TEXT, "startpos", 0, (char *) startLSN },
 		{ BIND_PARAMETER_TYPE_TEXT, "endpos", 0, (char *) endLSN },
-		{ BIND_PARAMETER_TYPE_INT, "apply", 0, NULL }
+		{ BIND_PARAMETER_TYPE_INT, "apply", 0, NULL },
+		{ BIND_PARAMETER_TYPE_INT, "preserveExisting", preserveExisting, NULL }
 	};
 
 	int count = sizeof(params) / sizeof(params[0]);

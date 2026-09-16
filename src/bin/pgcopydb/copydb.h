@@ -579,7 +579,7 @@ bool vacuum_send_stop(CopyDataSpec *specs);
 
 /* sentinel.c */
 bool sentinel_setup(DatabaseCatalog *catalog,
-					uint64_t startpos, uint64_t endpos);
+					uint64_t startpos, uint64_t endpos, bool preserveExisting);
 
 bool sentinel_update_startpos(DatabaseCatalog *catalog, uint64_t startpos);
 bool sentinel_update_endpos(DatabaseCatalog *catalog, uint64_t endpos);

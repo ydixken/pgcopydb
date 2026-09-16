@@ -2392,27 +2392,37 @@ stream_create_origin(CopyDataSpec *copySpecs, char *nodeName, uint64_t startpos)
 
 
 /*
- * stream_create_sentinel creates the pgcopydb sentinel table on the source
- * database and registers the startpos, usually the same as the LSN returned
- * from stream_create_repl_slot.
+ * stream_create_sentinel initializes a missing sentinel on resume only if
+ * this process created the slot. Retained slots need their recovery state.
  */
 bool
 stream_create_sentinel(CopyDataSpec *copySpecs,
 					   uint64_t startpos,
 					   uint64_t endpos)
 {
-	if (copySpecs->resume)
-	{
-		log_info("Skipping creation of pgcopydb.sentinel (--resume)");
-		return true;
-	}
-
 	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
 
-	if (!sentinel_setup(sourceDB, startpos, endpos))
+	if (!copySpecs->resume ||
+		copySpecs->sourceSnapshot.exportedCreateSlotSnapshot)
 	{
-		log_error("Failed to create the sentinel table, see above for details");
-		return false;
+		if (!sentinel_setup(sourceDB, startpos, endpos, copySpecs->resume))
+		{
+			log_error("Failed to create the sentinel table, see above for details");
+			return false;
+		}
+	}
+
+	if (copySpecs->resume)
+	{
+		CopyDBSentinel sentinel = { 0 };
+
+		if (!sentinel_get(sourceDB, &sentinel))
+		{
+			log_error("Could not read a valid sentinel in catalog \"%s\"; "
+					  "retained replication slots require their recovery state",
+					  sourceDB->dbfile);
+			return false;
+		}
 	}
 
 	return true;

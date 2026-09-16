@@ -469,7 +469,7 @@ cli_sentinel_setup(int argc, char **argv)
 
 	DatabaseCatalog *sourceDB = &(copySpecs.catalogs.source);
 
-	if (!sentinel_setup(sourceDB, startpos, endpos))
+	if (!sentinel_setup(sourceDB, startpos, endpos, false))
 	{
 		/* errors have already been logged */
 		exit(EXIT_CODE_INTERNAL_ERROR);

@@ -1279,7 +1279,7 @@ cli_stream_transform(int argc, char **argv)
 	 * startLogicalStreaming; the standalone transform path must seed it here so
 	 * sentinel_sync_transform can update it after each COMMIT.
 	 */
-	if (!sentinel_setup(specs.sourceDB, specs.startpos, specs.endpos))
+	if (!sentinel_setup(specs.sourceDB, specs.startpos, specs.endpos, false))
 	{
 		exit(EXIT_CODE_INTERNAL_ERROR);
 	}
