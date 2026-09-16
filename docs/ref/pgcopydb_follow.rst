@@ -253,6 +253,11 @@ fetch a JSON formatted output, such as the following:
      "replay_lsn": "0/0"
    }
 
+On ``--resume``, setup preserves an existing sentinel, including its endpos, apply mode, and receive/apply positions.
+If this process creates a new replication slot, setup can initialize a missing sentinel from the slot's start LSN.
+A retained slot without a valid sentinel causes an error: its original progress cannot be inferred from the slot's creation LSN.
+Catalog errors are fatal, not evidence of an interrupted initial setup.
+
 The first three fields (startpos, endpos, apply) are specific to pgcopydb,
 then the following three fields (write_lsn, flush_lsn, replay_lsn) follow
 the Postgres replication protocol as visible in the docs for the

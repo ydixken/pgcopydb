@@ -72,6 +72,10 @@ decoding replication slot that must have been created already. See
 :ref:`pgcopydb_snapshot` to create the replication slot and export a
 snapshot.
 
+Without ``--resume``, ``stream setup`` initializes the sentinel from the prepared slot.
+With ``--resume``, it requires an existing valid sentinel and preserves all its fields.
+Unlike ``clone --follow`` and ``follow``, this command does not create a new slot, so it cannot establish that a missing sentinel is safe to initialize during a retry.
+
 .. include:: ../include/stream-setup.rst
 
 .. _pgcopydb_stream_cleanup:

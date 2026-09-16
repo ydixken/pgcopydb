@@ -665,6 +665,11 @@ The following options are available to ``pgcopydb clone``:
 
   Finally, using ``--resume`` requires the use of ``--not-consistent``.
 
+  With ``--follow``, a retry that creates a new replication slot can initialize a missing sentinel at that slot's start LSN.
+  This covers failures before initial slot creation, without discarding the work directory.
+  Existing sentinel positions, endpos, and apply mode are preserved during setup.
+  A retry that reuses a retained slot requires a valid sentinel in its source catalog; missing or unreadable recovery state causes an error rather than reinitialization.
+
 --not-consistent
 
   In order to be consistent, pgcopydb exports a Postgres snapshot by calling
