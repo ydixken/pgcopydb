@@ -5,6 +5,8 @@ COPY ./copydb.sh copydb.sh
 COPY ./apply-error.sh apply-error.sh
 COPY ./shutdown.sh shutdown.sh
 COPY ./apply-kill.gdb apply-kill.gdb
+COPY ./spool.sh spool.sh
+COPY ./spool-test.sh spool-test.sh
 COPY ./dml.sql dml.sql
 COPY ./ddl.sql ddl.sql
 COPY ./special-dml.sql special-dml.sql

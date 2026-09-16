@@ -280,6 +280,7 @@ pub_after=$(psql -AtqX -d ${PGCOPYDB_SOURCE_PGURI} \
 echo "publication rows after cleanup (should be 0): ${pub_after}"
 test "${pub_after}" -eq 0
 
+bash /usr/src/pgcopydb/spool-test.sh
 bash /usr/src/pgcopydb/apply-error.sh commit
 bash /usr/src/pgcopydb/apply-error.sh between
 bash /usr/src/pgcopydb/shutdown.sh

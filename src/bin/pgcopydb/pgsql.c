@@ -4323,6 +4323,7 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 
 	context->timeline = client->system.timeline;
 	context->tracking = &(client->current);
+	context->serverKeepaliveLSN = InvalidXLogRecPtr;
 
 	client->now = feGetCurrentTimestamp();
 
@@ -4505,13 +4506,16 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 			bool replyRequested;
 			bool endposReached = false;
 
-			/*
-			 * Parse the keepalive message, enclosed in the CopyData message.
-			 * We just check if the server requested a reply, and ignore the
-			 * rest.
-			 */
+			if (r < 1 + 8 + 8 + 1)
+			{
+				log_error("streaming header too small: %d", r);
+				goto error;
+			}
+
 			pos = 1;            /* skip msgtype 'k' */
 			cur_record_lsn = fe_recvint64(&copybuf[pos]);
+			context->serverKeepaliveLSN =
+				Max(context->serverKeepaliveLSN, cur_record_lsn);
 
 			/*
 			 * Extract WAL location for keepalive messages in case we call
@@ -4529,11 +4533,6 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 
 			pos += 8;           /* skip sendTime */
 
-			if (r < pos + 1)
-			{
-				log_error("streaming header too small: %d", r);
-				goto error;
-			}
 			replyRequested = copybuf[pos];
 
 			if (client->endpos != InvalidXLogRecPtr && cur_record_lsn >= client->endpos)
@@ -4551,12 +4550,15 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 						  LSN_FORMAT_ARGS(cur_record_lsn));
 			}
 
-			/* call the keepaliveFunction callback now, ignore errors */
 			if (replyRequested)
 			{
 				context->now = client->now;
 
-				(void) (*client->keepaliveFunction)(context);
+				/* Spool-write failures must not be followed by an acknowledgement. */
+				if (!(*client->keepaliveFunction)(context))
+				{
+					goto error;
+				}
 
 				/* the keepalive function may advance written_lsn, update */
 				client->startpos = client->current.written_lsn;
@@ -4803,13 +4805,34 @@ pgsqlSendFeedback(LogicalStreamClient *client,
 	int len = 0;
 
 	/*
+	 * A failed sync can leave raw spool flush progress in current.flushed_lsn.
+	 * Do not send that position as certified target progress.
+	 */
+	context->forceFeedback = force;
+	context->now = client->now;
+
+	if (!(*client->feedbackFunction)(context))
+	{
+		return false;
+	}
+
+	if (context->endpos != InvalidXLogRecPtr &&
+		context->endpos != client->endpos)
+	{
+		client->endpos = context->endpos;
+		log_info("endpos is now set to %X/%X",
+				 LSN_FORMAT_ARGS(client->endpos));
+	}
+
+	/*
 	 * we normally don't want to send superfluous feedback, but if it's
 	 * because of a timeout we need to, otherwise wal_sender_timeout will kill
 	 * us.
 	 */
 	if (!force &&
 		client->feedback.written_lsn == client->current.written_lsn &&
-		client->feedback.flushed_lsn == client->current.flushed_lsn)
+		client->feedback.flushed_lsn == client->current.flushed_lsn &&
+		client->feedback.applied_lsn == client->current.applied_lsn)
 	{
 		return true;
 	}
@@ -4837,21 +4860,6 @@ pgsqlSendFeedback(LogicalStreamClient *client,
 		log_error("could not send feedback packet: %s",
 				  PQerrorMessage(conn));
 		return false;
-	}
-
-	/* call the callback function from the streaming client first */
-	context->forceFeedback = force;
-
-	if ((*client->feedbackFunction)(context))
-	{
-		/* we might have a new endpos from the client callback */
-		if (context->endpos != InvalidXLogRecPtr &&
-			context->endpos != client->endpos)
-		{
-			client->endpos = context->endpos;
-			log_info("endpos is now set to %X/%X",
-					 LSN_FORMAT_ARGS(client->endpos));
-		}
 	}
 
 	if (client->current.written_lsn != InvalidXLogRecPtr ||

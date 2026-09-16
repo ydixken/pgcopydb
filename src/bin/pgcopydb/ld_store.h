@@ -63,6 +63,7 @@ bool ld_store_open_replaydb(StreamSpecs *specs);
 bool ld_store_output_begin(DatabaseCatalog *catalog);
 bool ld_store_output_commit(DatabaseCatalog *catalog);
 bool ld_store_output_rollback(DatabaseCatalog *catalog);
+bool ld_store_read_last_commit_lsn(DatabaseCatalog *sourceDB, uint64_t *lsn);
 
 bool ld_store_set_first_cdc_filename(StreamSpecs *specs);
 bool ld_store_set_current_cdc_filename(StreamSpecs *specs);

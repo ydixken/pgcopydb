@@ -9,8 +9,10 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: h4ckm3
       POSTGRES_HOST_AUTH_METHOD: trust
+    # PostgreSQL requires an explicit allowlist for the wal2json output plugin.
     command: >
       -c wal_level=logical
+      -c output_plugin_libraries=wal2json
       -c ssl=on
       -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
       -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key

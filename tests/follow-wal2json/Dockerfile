@@ -11,6 +11,8 @@ RUN mkdir -p /var/run/pgcopydb && chown -R docker /var/run/pgcopydb
 
 WORKDIR /usr/src/pgcopydb
 COPY ./copydb.sh copydb.sh
+COPY ./copydb-test.sh copydb-test.sh
+RUN bash ./copydb-test.sh
 COPY ./dml.sql dml.sql
 COPY ./ddl.sql ddl.sql
 

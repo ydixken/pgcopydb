@@ -1094,8 +1094,7 @@ ld_store_insert_cdc_filename(StreamSpecs *specs)
 
 /*
  * ld_store_fetch_int64 is a generic SQLiteQuery fetchFunction that reads
- * column 0 as an int64 into a (int64_t *) context.  Used by the count-based
- * queries in this file.
+ * column 0 as an int64 into a (int64_t *) context.
  */
 static bool
 ld_store_fetch_int64(SQLiteQuery *query)
@@ -1104,6 +1103,148 @@ ld_store_fetch_int64(SQLiteQuery *query)
 
 	*result = sqlite3_column_int64(query->ppStmt, 0);
 	return true;
+}
+
+
+/*
+ * Recover COMMIT progress before receive can acknowledge a primary keepalive.
+ * Prefetch may have acknowledged transactions that the slot will not resend.
+ */
+bool
+ld_store_read_last_commit_lsn(DatabaseCatalog *sourceDB, uint64_t *lsn)
+{
+	if (sourceDB->db == NULL)
+	{
+		log_error("BUG: ld_store_read_last_commit_lsn: db is NULL");
+		return false;
+	}
+
+	if (!semaphore_lock(&(sourceDB->sema)))
+	{
+		return false;
+	}
+
+	/*
+	 * BEGIN IMMEDIATE freezes replay_lsn, not filesystem unlink. Cleanup's
+	 * captured horizon is no higher, so its closed files are excluded below.
+	 * Holding replay_lsn fixed keeps scan candidates ineligible for cleanup.
+	 */
+	SQLiteQuery begin = { 0 };
+	SQLiteQuery files = { 0 };
+	DatabaseCatalog outputDB = { 0 };
+	CopyDBSentinel sentinel = { 0 };
+	uint64_t lastCommitLSN = InvalidXLogRecPtr;
+	bool success = false;
+
+	/* catalog_begin retries with plain BEGIN; this must remain IMMEDIATE. */
+	if (!catalog_sql_prepare(sourceDB->db, "BEGIN IMMEDIATE", &begin) ||
+		!catalog_sql_execute_once(&begin))
+	{
+		goto cleanup;
+	}
+
+	if (!sentinel_get(sourceDB, &sentinel))
+	{
+		goto cleanup;
+	}
+
+	char *sql =
+		"select filename from cdc_files "
+		" where done_time_epoch is null or endpos is null or endpos >= $1 "
+		" order by id";
+
+	if (!catalog_sql_prepare(sourceDB->db, sql, &files))
+	{
+		goto cleanup;
+	}
+
+	char replayLSN[PG_LSN_MAXLENGTH] = { 0 };
+	sformat(replayLSN, sizeof(replayLSN), "%08X/%08X",
+			LSN_FORMAT_ARGS(sentinel.replay_lsn));
+
+	BindParam params[] = {
+		{ BIND_PARAMETER_TYPE_TEXT, "replay_lsn", 0, replayLSN }
+	};
+
+	if (!catalog_sql_bind(&files, params, 1))
+	{
+		files.ppStmt = NULL; /* catalog_sql_bind finalized it on failure */
+		goto cleanup;
+	}
+
+	int rc;
+
+	while ((rc = catalog_sql_step(&files)) == SQLITE_ROW)
+	{
+		outputDB.dbfile[0] = '\0';
+		files.context = outputDB.dbfile;
+		if (!ld_store_cdc_filename_fetch(&files) ||
+			IS_EMPTY_STRING_BUFFER(outputDB.dbfile))
+		{
+			log_error("Invalid required CDC filename during COMMIT recovery");
+			goto cleanup;
+		}
+
+		if (!catalog_open_readonly(&outputDB))
+		{
+			goto cleanup;
+		}
+
+		/* Negative SQLite int64 values represent the upper half of unsigned LSNs. */
+		char *commitSQL =
+			"select lsn from output where action = 'C' "
+			"order by lsn < 0 desc, lsn desc limit 1";
+		int64_t commitLSN = 0;
+		SQLiteQuery commit = {
+			.context = &commitLSN,
+			.fetchFunction = &ld_store_fetch_int64
+		};
+
+		if (!catalog_sql_prepare(outputDB.db, commitSQL, &commit) ||
+			!catalog_sql_execute_once(&commit))
+		{
+			goto cleanup;
+		}
+
+		lastCommitLSN = Max(lastCommitLSN, (uint64_t) commitLSN);
+
+		if (!catalog_close(&outputDB))
+		{
+			goto cleanup;
+		}
+	}
+
+	if (rc != SQLITE_DONE)
+	{
+		log_error("Failed to read CDC files for COMMIT recovery: %s",
+				  sqlite3_errmsg(sourceDB->db));
+		goto cleanup;
+	}
+	success = true;
+
+cleanup:
+	if (files.ppStmt != NULL && !catalog_sql_finalize(&files))
+	{
+		success = false;
+	}
+	if (!catalog_close(&outputDB))
+	{
+		success = false;
+	}
+	if (!sqlite3_get_autocommit(sourceDB->db) && !catalog_rollback(sourceDB))
+	{
+		success = false;
+	}
+	if (!semaphore_unlock(&(sourceDB->sema)))
+	{
+		success = false;
+	}
+
+	if (success)
+	{
+		*lsn = lastCommitLSN;
+	}
+	return success;
 }
 
 
@@ -1230,11 +1371,8 @@ ld_store_rotate_outputdb(StreamSpecs *specs, uint64_t commit_lsn)
  * endpos is strictly less than sentinel.replay_lsn AND done_time_epoch is set
  * (i.e. the receive process has closed it).
  *
- * The sentinel.replay_lsn is the LSN through which every transaction has been
- * committed on the target and acknowledged back to the source slot as
- * flush_lsn (confirmed_flush).  The slot will never re-deliver transactions
- * before that point, so the corresponding CDC files are no longer needed for
- * resume/restart.
+ * sentinel.replay_lsn tracks durable target commits, not the primary
+ * keepalive position that receive may acknowledge in network feedback.
  *
  * dry_run=true logs what would be deleted without touching the filesystem.
  * On completion, *filesDeleted and *bytesFreed are updated with counts.
