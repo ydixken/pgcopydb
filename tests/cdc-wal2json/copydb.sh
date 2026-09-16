@@ -3,6 +3,8 @@
 set -x
 set -e
 
+bash /usr/src/pgcopydb/normalize-test.sh
+
 # This script expects the following environment variables to be set:
 #
 #  - PGCOPYDB_SOURCE_PGURI
@@ -55,10 +57,11 @@ ls -la ${SHAREDIR}/
 
 #
 # Validate that the SQLite output table contains the expected messages.
-# Extract the JSON message field from every output row and compare against
-# the golden file (ignoring volatile fields: lsn, xid, timestamp).
+# Normalize XIDs by first appearance in both files, preserving transaction
+# identity and order without depending on cluster-wide XID allocation.
 #
 OUTPUTDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-output.db' -type f | head -1)
+test -s "${OUTPUTDB}"
 
 sqlite3 ${OUTPUTDB} "select count(*) as output_rows from output;"
 
@@ -66,10 +69,14 @@ sqlite3 -init /dev/null -json ${OUTPUTDB} \
   "select action, json(message) as message from output where action not in ('K','X','E') order by id" \
   > /tmp/result.jsonl
 
-diff /usr/src/pgcopydb/output.jsonl /tmp/result.jsonl
+for input in /usr/src/pgcopydb/output.jsonl /tmp/result.jsonl; do
+  sqlite3 -init /dev/null -json :memory: -cmd ".parameter set @input '${input}'" \
+    < /usr/src/pgcopydb/normalize.sql > "/tmp/$(basename "$input").normalized"
+done
+diff /tmp/output.jsonl.normalized /tmp/result.jsonl.normalized
 
 #
-# Run prefetch again — should be a no-op (idempotent).
+# Run prefetch again: should be a no-op (idempotent).
 #
 pgcopydb stream prefetch --resume --endpos "${lsn}" -vv
 
@@ -87,6 +94,7 @@ pgcopydb stream catchup --resume --endpos "${lsn}" -vv
 # written by the transform step.
 #
 REPLAYDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-replay.db' -type f | head -1)
+test -s "${REPLAYDB}"
 
 sqlite3 ${REPLAYDB} "select count(*) as replay_rows from replay;"
 
