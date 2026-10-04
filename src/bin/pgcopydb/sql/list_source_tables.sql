@@ -75,7 +75,7 @@ SELECT c.oid,
        LIMIT 1
   ) AS pkeys ON true
 
- WHERE c.relkind IN ('r', 'm') AND c.relpersistence IN ('p', 'u')
+ WHERE c.relkind::text = ANY($26::text[]) AND c.relpersistence IN ('p', 'u')
    AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
    AND n.nspname !~ 'pgcopydb'
    -- namespace filter: restrict to included schemas

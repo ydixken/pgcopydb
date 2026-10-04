@@ -43,32 +43,43 @@ The command ``pgcopydb compare data`` connects to the source and target
 databases and executes SQL queries using the Postgres catalogs to get a list
 of tables, indexes, constraints and sequences there.
 
-Then it uses a SQL query with the following template to compute the row
-count and a checksum for each table::
+It sums the ``hashtext`` values of the selected columns in each row and hashes that sum together with the row count using SHA256.
+SHA256 allows the query to run where FIPS policy disables ``md5()``.
+The SQL query uses the following template::
 
-    /*
-     * Compute the hashtext of every single row in the table, and aggregate the
-     * results as a sum of bigint numbers. Because the sum of bigint could
-     * overflow to numeric, the aggregated sum is then hashed into an MD5
-     * value: bigint is 64 bits, MD5 is 128 bits.
-     *
-     * Also, to lower the chances of a collision, include the row count in the
-     * computation of the MD5 by appending it to the input string of the MD5
-     * function.
-     */
     select count(1) as cnt,
-           md5(
-             format(
-               '%%s-%%s',
-               sum(hashtext(__COLS__::text)::bigint),
-               count(1)
-             )
-           )::uuid as chksum
+           encode(sha256(format('%s-%s',
+                                sum(hashtext(__COLS__::text)::bigint),
+                                count(1))::bytea), 'hex') as chksum
     from only __TABLE__
 
+For a table with no attributes, the query compares the row count and uses ``0`` as its checksum.
 Running such a query on a large table can take a lot of time.
 
 .. include:: ../include/compare-data.rst
+
+Partitioned tables
+------------------
+
+Both comparison commands read the current source and target partition catalogs before comparing schema definitions or row contents.
+They compare qualified relation identities, immediate parent-child attachment, partition strategies and keys, bounds, and selected family membership in both directions.
+A missing parent or leaf, a detached or reparented leaf, changed partition metadata, or an extra eligible target member fails with exit code 12 and a ``Partition topology mismatch`` diagnostic.
+Unrelated target partition families remain outside the comparison scope.
+
+RANGE, LIST, HASH, nested partitions, DEFAULT partitions, and empty storage leaves are supported.
+Data comparison checksums each selected storage leaf once with ``FROM ONLY``.
+Partitioned parents supply metadata without adding checksum rows or changing the JSON report format.
+Selected foreign partitions are unsupported and fail comparison.
+
+Comparison reuses filters persisted by the clone in the same ``--dir`` work directory.
+Exact or regex include-only table filters select matching names and the ancestor metadata needed to verify their attachment; they do not select nonmatching siblings.
+Schema inclusion admits eligible family members throughout that schema, including additional target members.
+Explicit table exclusions remain excluded, and required ancestor metadata does not expand the copy or checksum selection.
+``exclude-table-data`` does not exclude a relation from partition topology comparison.
+
+A selected parent with no leaves can pass schema comparison.
+A parent-only data selection can produce an empty JSON array because no storage table was selected; callers MUST NOT treat that report as proof that row contents match.
+Partition topology comparison reads current catalogs even when the work directory contains a catalog from an earlier clone.
 
 .. _pgcopydb_compare_all_databases:
 
@@ -85,7 +96,7 @@ Both ``compare schema`` and ``compare data`` support ``--all-databases``
 and share the same concurrency model: up to ``--table-jobs`` subprocesses
 run in parallel, each handling one database at a time.  When there are more
 databases than ``--table-jobs``, the pool is kept at capacity with a
-sliding-window approach — a new worker starts as soon as a running one
+sliding-window approach: a new worker starts as soon as a running one
 finishes.
 
 ``compare schema --all-databases``

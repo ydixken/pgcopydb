@@ -26,6 +26,7 @@ bool pgcopydb_sql_list_schemas(const char **sql);
 
 /* Unified parameterized queries (replace old per-filter-type variants) */
 bool pgcopydb_sql_list_source_tables(const char **sql);
+bool pgcopydb_sql_list_compare_partitions(const char **sql);
 bool pgcopydb_sql_list_filtered_not_incl_tables(const char **sql);
 bool pgcopydb_sql_list_filtered_excl_tables(const char **sql);
 bool pgcopydb_sql_list_source_indexes(const char **sql);

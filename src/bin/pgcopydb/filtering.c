@@ -558,12 +558,6 @@ parse_filters(const char *filename, SourceFilters *filters)
 		return false;
 	}
 
-	/*
-	 * Now assign a proper type to the source filter.
-	 * Pattern lists are counted the same as their exact equivalents because
-	 * filters_validate_and_normalize() expands them into the exact lists before
-	 * the SQL queries run.
-	 */
 	if (filters->includeOnlyTableList.count > 0 ||
 		filters->includeOnlyTablePatternList.count > 0)
 	{
@@ -713,11 +707,6 @@ filters_as_json(SourceFilters *filters, JSON_Value *jsFilter)
 						   "type",
 						   filterTypeToString(filters->type));
 
-	/*
-	 * Schema exact lists.  When patterns have been expanded (countOriginal > 0)
-	 * only serialize the user-supplied entries so the JSON stays stable across
-	 * pre- and post-expansion catalog checks.
-	 */
 	struct schemasection
 	{
 		char name[PG_NAMEDATALEN];
@@ -915,6 +904,384 @@ filters_as_json(SourceFilters *filters, JSON_Value *jsFilter)
 	}
 
 	return true;
+}
+
+
+/* Reject malformed stored rules before any database-dependent normalization. */
+static bool
+filters_json_string(JSON_Value *value, char *dest, size_t size)
+{
+	const char *string = json_value_get_string(value);
+	size_t length = json_value_get_string_len(value);
+
+	if (string == NULL || length == 0 || length >= size ||
+		strlen(string) != length)
+	{
+		return false;
+	}
+
+	strlcpy(dest, string, size);
+	return true;
+}
+
+
+/* Persisted patterns must use the same grammar as the original INI rules. */
+static bool
+filters_json_regex(const char *pattern)
+{
+	regex_t compiled;
+
+	if (regcomp(&compiled, pattern, REG_EXTENDED | REG_NOSUB) != 0)
+	{
+		return false;
+	}
+
+	regfree(&compiled);
+	return true;
+}
+
+
+static bool
+filters_json_array(JSON_Object *object, const char *name, size_t size,
+				   JSON_Array **array, int *count)
+{
+	JSON_Value *value = json_object_get_value(object, name);
+
+	*array = NULL;
+	*count = 0;
+
+	if (value == NULL)
+	{
+		return true;
+	}
+
+	if (json_value_get_type(value) != JSONArray)
+	{
+		return false;
+	}
+
+	*array = json_value_get_array(value);
+	size_t length = json_array_get_count(*array);
+
+	if (length > INT_MAX || length > SIZE_MAX / size)
+	{
+		return false;
+	}
+
+	*count = (int) length;
+	return true;
+}
+
+
+/* Exactly one name representation is allowed for each side of a table rule. */
+static bool
+filters_json_table(JSON_Value *value, SourceFilterTablePattern *table,
+				   bool pattern)
+{
+	JSON_Object *object = json_value_get_object(value);
+
+	if (object == NULL)
+	{
+		return false;
+	}
+
+	struct field
+	{
+		const char *name;
+		const char *re;
+		char *dest;
+		char *reDest;
+	}
+	fields[] = {
+		{ "schema", "schema-re", table->nspname, table->nspname_re },
+		{ "name", "name-re", table->relname, table->relname_re }
+	};
+
+	bool hasPattern = false;
+
+	for (int i = 0; i < 2; i++)
+	{
+		JSON_Value *exact = json_object_get_value(object, fields[i].name);
+		JSON_Value *regex = json_object_get_value(object, fields[i].re);
+
+		if ((exact == NULL) == (regex == NULL) || (!pattern && regex != NULL))
+		{
+			return false;
+		}
+
+		if (!filters_json_string(exact != NULL ? exact : regex,
+								 exact != NULL ? fields[i].dest : fields[i].reDest,
+								 exact != NULL ? PG_NAMEDATALEN : BUFSIZE) ||
+			(regex != NULL && !filters_json_regex(fields[i].reDest)))
+		{
+			return false;
+		}
+
+		hasPattern = hasPattern || regex != NULL;
+	}
+
+	return !pattern || hasPattern;
+}
+
+
+/* Owned rule arrays must remain independent between database discoveries. */
+void
+filters_free(SourceFilters *filters)
+{
+	free(filters->includeOnlySchemaList.array);
+	free(filters->excludeSchemaList.array);
+	free(filters->includeOnlyTableList.array);
+	free(filters->excludeTableList.array);
+	free(filters->excludeTableDataList.array);
+	free(filters->excludeIndexList.array);
+	free(filters->excludeExtensionList.array);
+	free(filters->includeOnlyExtensionList.array);
+	free(filters->includeOnlySchemaPatternList.array);
+	free(filters->excludeSchemaPatternList.array);
+	free(filters->includeOnlyTablePatternList.array);
+	free(filters->excludeTablePatternList.array);
+	free(filters->excludeTableDataPatternList.array);
+	free(filters->excludeIndexPatternList.array);
+	memset(filters, 0, sizeof(*filters));
+}
+
+
+/* Parse into independent storage so an invalid rule cannot partially replace scope. */
+bool
+filters_from_json(SourceFilters *filters, JSON_Value *jsFilter)
+{
+	SourceFilters restored = { 0 };
+	JSON_Object *object = json_value_get_object(jsFilter);
+	const char *type = json_object_get_string(object, "type");
+	bool knownType = false;
+
+	if (object == NULL || type == NULL ||
+		strlen(type) != json_object_get_string_len(object, "type"))
+	{
+		goto invalid;
+	}
+
+	for (int i = SOURCE_FILTER_TYPE_NONE; i <= SOURCE_FILTER_TYPE_LIST_EXCL_INDEX; i++)
+	{
+		if (streq(type, filterTypeToString((SourceFilterType) i)))
+		{
+			restored.type = (SourceFilterType) i;
+			knownType = true;
+			break;
+		}
+	}
+
+	if (!knownType)
+	{
+		goto invalid;
+	}
+
+	struct schemasection
+	{
+		const char *name;
+		const char *patname;
+		SourceFilterSchemaList *list;
+		SourceFilterSchemaPatternList *patterns;
+	}
+	schemas[] = {
+		{ "include-only-schema", "include-only-schema-pattern",
+		  &restored.includeOnlySchemaList, &restored.includeOnlySchemaPatternList },
+		{ "exclude-schema", "exclude-schema-pattern",
+		  &restored.excludeSchemaList, &restored.excludeSchemaPatternList }
+	};
+
+	for (int i = 0; i < 2; i++)
+	{
+		SourceFilterSchemaList *list = schemas[i].list;
+		SourceFilterSchemaPatternList *patterns = schemas[i].patterns;
+		JSON_Array *array = NULL;
+
+		if (!filters_json_array(object, schemas[i].name, sizeof(*list->array),
+								&array, &list->count))
+		{
+			goto invalid;
+		}
+
+		list->countOriginal = list->count;
+		list->array = list->count > 0 ? calloc(list->count, sizeof(*list->array)) : NULL;
+
+		if (list->count > 0 && list->array == NULL)
+		{
+			goto invalid;
+		}
+
+		for (int j = 0; j < list->count; j++)
+		{
+			if (!filters_json_string(json_array_get_value(array, j),
+									 list->array[j].nspname, PG_NAMEDATALEN))
+			{
+				goto invalid;
+			}
+		}
+
+		if (!filters_json_array(object, schemas[i].patname, sizeof(*patterns->array),
+								&array, &patterns->count))
+		{
+			goto invalid;
+		}
+
+		patterns->array = patterns->count > 0 ?
+						  calloc(patterns->count, sizeof(*patterns->array)) : NULL;
+
+		if (patterns->count > 0 && patterns->array == NULL)
+		{
+			goto invalid;
+		}
+
+		for (int j = 0; j < patterns->count; j++)
+		{
+			if (!filters_json_string(json_array_get_value(array, j),
+									 patterns->array[j].nspname_re, BUFSIZE) ||
+				!filters_json_regex(patterns->array[j].nspname_re))
+			{
+				goto invalid;
+			}
+		}
+	}
+
+	struct tablesection
+	{
+		const char *name;
+		const char *patname;
+		SourceFilterTableList *list;
+		SourceFilterTablePatternList *patterns;
+	}
+	tables[] = {
+		{ "include-only-table", "include-only-table-pattern",
+		  &restored.includeOnlyTableList, &restored.includeOnlyTablePatternList },
+		{ "exclude-table", "exclude-table-pattern",
+		  &restored.excludeTableList, &restored.excludeTablePatternList },
+		{ "exclude-table-data", "exclude-table-data-pattern",
+		  &restored.excludeTableDataList, &restored.excludeTableDataPatternList },
+		{ "exclude-index", "exclude-index-pattern",
+		  &restored.excludeIndexList, &restored.excludeIndexPatternList }
+	};
+
+	for (int i = 0; i < 4; i++)
+	{
+		SourceFilterTableList *list = tables[i].list;
+		SourceFilterTablePatternList *patterns = tables[i].patterns;
+		JSON_Array *array = NULL;
+
+		if (!filters_json_array(object, tables[i].name, sizeof(*list->array),
+								&array, &list->count))
+		{
+			goto invalid;
+		}
+
+		list->countOriginal = list->count;
+		list->array = list->count > 0 ? calloc(list->count, sizeof(*list->array)) : NULL;
+
+		if (list->count > 0 && list->array == NULL)
+		{
+			goto invalid;
+		}
+
+		for (int j = 0; j < list->count; j++)
+		{
+			SourceFilterTablePattern table = { 0 };
+
+			if (!filters_json_table(json_array_get_value(array, j), &table, false))
+			{
+				goto invalid;
+			}
+
+			strlcpy(list->array[j].nspname, table.nspname, PG_NAMEDATALEN);
+			strlcpy(list->array[j].relname, table.relname, PG_NAMEDATALEN);
+		}
+
+		if (!filters_json_array(object, tables[i].patname, sizeof(*patterns->array),
+								&array, &patterns->count))
+		{
+			goto invalid;
+		}
+
+		patterns->array = patterns->count > 0 ?
+						  calloc(patterns->count, sizeof(*patterns->array)) : NULL;
+
+		if (patterns->count > 0 && patterns->array == NULL)
+		{
+			goto invalid;
+		}
+
+		for (int j = 0; j < patterns->count; j++)
+		{
+			if (!filters_json_table(json_array_get_value(array, j),
+									&patterns->array[j], true))
+			{
+				goto invalid;
+			}
+		}
+	}
+
+	struct extensionsection
+	{
+		const char *name;
+		SourceFilterExtensionList *list;
+	}
+	extensions[] = {
+		{ "exclude-extension", &restored.excludeExtensionList },
+		{ "include-only-extension", &restored.includeOnlyExtensionList }
+	};
+
+	for (int i = 0; i < 2; i++)
+	{
+		SourceFilterExtensionList *list = extensions[i].list;
+		JSON_Array *array = NULL;
+
+		if (!filters_json_array(object, extensions[i].name, sizeof(*list->array),
+								&array, &list->count))
+		{
+			goto invalid;
+		}
+
+		list->array = list->count > 0 ? calloc(list->count, sizeof(*list->array)) : NULL;
+
+		if (list->count > 0 && list->array == NULL)
+		{
+			goto invalid;
+		}
+
+		for (int j = 0; j < list->count; j++)
+		{
+			if (!filters_json_string(json_array_get_value(array, j),
+									 list->array[j].extname, PG_NAMEDATALEN))
+			{
+				goto invalid;
+			}
+		}
+	}
+
+	if (restored.type == SOURCE_FILTER_TYPE_INCL &&
+		restored.includeOnlyTableList.count == 0 &&
+		restored.includeOnlyTablePatternList.count == 0)
+	{
+		goto invalid;
+	}
+
+	if ((restored.includeOnlySchemaList.count > 0 &&
+		 restored.excludeSchemaList.count > 0) ||
+		(restored.includeOnlyTableList.count > 0 &&
+		 restored.excludeTableList.count > 0) ||
+		(restored.includeOnlyExtensionList.count > 0 &&
+		 restored.excludeExtensionList.count > 0))
+	{
+		goto invalid;
+	}
+
+	filters_free(filters);
+	*filters = restored;
+	return true;
+
+invalid:
+	filters_free(&restored);
+	log_error("Invalid persisted filter rules");
+	return false;
 }
 
 

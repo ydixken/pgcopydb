@@ -96,6 +96,22 @@ typedef struct SourceTableArrayContext
 } SourceTableArrayContext;
 
 
+typedef struct CompareEligibleContext
+{
+	char sqlstate[SQLSTATE_LENGTH];
+	PQExpBuffer oids;
+	bool parsedOk;
+} CompareEligibleContext;
+
+
+typedef struct ComparePartitionContext
+{
+	char sqlstate[SQLSTATE_LENGTH];
+	ComparePartitionArray *partitions;
+	bool parsedOk;
+} ComparePartitionContext;
+
+
 /* Context used when fetching all the table size definitions */
 typedef struct SourceTableSizeArrayContext
 {
@@ -214,6 +230,14 @@ static bool parseCurrentSourceDepend(PGresult *result,
 									 SourceDepend *depend);
 
 static void getTableChecksum(void *ctx, PGresult *result);
+
+static bool schema_list_filtered_tables(PGSQL *pgsql,
+										DatabaseCatalog *catalog,
+										const char *relationKinds,
+										void *context,
+										void (*parseResults)(void *, PGresult *));
+static void getCompareEligible(void *ctx, PGresult *result);
+static void getComparePartitions(void *ctx, PGresult *result);
 
 
 /*
@@ -623,17 +647,7 @@ schema_prepare_pgcopydb_table_size(PGSQL *pgsql,
 }
 
 
-/*
- * schema_list_ordinary_tables grabs the list of tables from the given source
- * Postgres instance and stores the result in the SQLite catalog.
- *
- * For the main sourceDB query (NONE/INCL/EXCL/EXCL_INDEX): uses
- * list_source_tables.sql with 25 parameters ($1 = namespace OIDs from
- * s_namespace; $2-$25 = EE/ER/RE/RR arrays for incl/excl/xdat table filters).
- *
- * For the filtersDB complement queries (LIST_NOT_INCL/LIST_EXCL): uses
- * dedicated SQL files with only the filter arrays needed.
- */
+/* Comparator discovery shares eligibility without adding parents to copy work. */
 bool
 schema_list_ordinary_tables(PGSQL *pgsql,
 							SourceFilters *filters,
@@ -815,99 +829,8 @@ schema_list_ordinary_tables(PGSQL *pgsql,
 		return true;
 	}
 
-	/*
-	 * Main sourceDB query: list_source_tables.sql with 25 parameters.
-	 * $1 = namespace OIDs from s_namespace (populated by schema_list_schemas).
-	 * $2-$9   = include-only-table EE/ER/RE/RR pairs.
-	 * $10-$17 = exclude-table EE/ER/RE/RR pairs.
-	 * $18-$25 = exclude-table-data EE/ER/RE/RR pairs.
-	 */
-	char *nsp_oids = NULL;
-	int nsp_count = 0;
-
-	if (!catalog_s_namespace_oid_array(catalog, &nsp_oids, &nsp_count))
-	{
-		log_error("Failed to build namespace OID array");
-		return false;
-	}
-
-	char *incl_ee_nsp = NULL, *incl_ee_rel = NULL;
-	char *incl_er_nsp = NULL, *incl_er_rel = NULL;
-	char *incl_re_nsp = NULL, *incl_re_rel = NULL;
-	char *incl_rr_nsp = NULL, *incl_rr_rel = NULL;
-
-	char *excl_ee_nsp = NULL, *excl_ee_rel = NULL;
-	char *excl_er_nsp = NULL, *excl_er_rel = NULL;
-	char *excl_re_nsp = NULL, *excl_re_rel = NULL;
-	char *excl_rr_nsp = NULL, *excl_rr_rel = NULL;
-
-	char *xdat_ee_nsp = NULL, *xdat_ee_rel = NULL;
-	char *xdat_er_nsp = NULL, *xdat_er_rel = NULL;
-	char *xdat_re_nsp = NULL, *xdat_re_rel = NULL;
-	char *xdat_rr_nsp = NULL, *xdat_rr_rel = NULL;
-
-	if (!catalog_filter_table_arrays(catalog, "incl_table",
-									 &incl_ee_nsp, &incl_ee_rel,
-									 &incl_er_nsp, &incl_er_rel,
-									 &incl_re_nsp, &incl_re_rel,
-									 &incl_rr_nsp, &incl_rr_rel) ||
-		!catalog_filter_table_arrays(catalog, "excl_table",
-									 &excl_ee_nsp, &excl_ee_rel,
-									 &excl_er_nsp, &excl_er_rel,
-									 &excl_re_nsp, &excl_re_rel,
-									 &excl_rr_nsp, &excl_rr_rel) ||
-		!catalog_filter_table_arrays(catalog, "xdat_table",
-									 &xdat_ee_nsp, &xdat_ee_rel,
-									 &xdat_er_nsp, &xdat_er_rel,
-									 &xdat_re_nsp, &xdat_re_rel,
-									 &xdat_rr_nsp, &xdat_rr_rel))
-	{
-		log_error("Failed to build table filter arrays");
-		return false;
-	}
-
-	const char *sql = NULL;
-
-	if (!pgcopydb_sql_list_source_tables(&sql))
-	{
-		return false;
-	}
-
-	int paramCount = 25;
-	Oid paramTypes[25] = {
-		TEXTOID,                                /* $1  nsp_oids */
-		TEXTOID, TEXTOID,                       /* $2-$3  incl EE */
-		TEXTOID, TEXTOID,                       /* $4-$5  incl ER */
-		TEXTOID, TEXTOID,                       /* $6-$7  incl RE */
-		TEXTOID, TEXTOID,                       /* $8-$9  incl RR */
-		TEXTOID, TEXTOID,                       /* $10-$11 excl EE */
-		TEXTOID, TEXTOID,                       /* $12-$13 excl ER */
-		TEXTOID, TEXTOID,                       /* $14-$15 excl RE */
-		TEXTOID, TEXTOID,                       /* $16-$17 excl RR */
-		TEXTOID, TEXTOID,                       /* $18-$19 xdat EE */
-		TEXTOID, TEXTOID,                       /* $20-$21 xdat ER */
-		TEXTOID, TEXTOID,                       /* $22-$23 xdat RE */
-		TEXTOID, TEXTOID                        /* $24-$25 xdat RR */
-	};
-	const char *paramValues[25] = {
-		nsp_oids,
-		incl_ee_nsp, incl_ee_rel,
-		incl_er_nsp, incl_er_rel,
-		incl_re_nsp, incl_re_rel,
-		incl_rr_nsp, incl_rr_rel,
-		excl_ee_nsp, excl_ee_rel,
-		excl_er_nsp, excl_er_rel,
-		excl_re_nsp, excl_re_rel,
-		excl_rr_nsp, excl_rr_rel,
-		xdat_ee_nsp, xdat_ee_rel,
-		xdat_er_nsp, xdat_er_rel,
-		xdat_re_nsp, xdat_re_rel,
-		xdat_rr_nsp, xdat_rr_rel
-	};
-
-	if (!pgsql_execute_with_params(pgsql, sql,
-								   paramCount, paramTypes, paramValues,
-								   &context, &getTableArray))
+	if (!schema_list_filtered_tables(pgsql, catalog, "{r,m}",
+									 &context, &getTableArray))
 	{
 		log_error("Failed to list tables");
 		return false;
@@ -926,6 +849,334 @@ schema_list_ordinary_tables(PGSQL *pgsql,
 	}
 
 	return true;
+}
+
+
+/* Keep comparison and copy selection on the same filter query. */
+static bool
+schema_list_filtered_tables(PGSQL *pgsql,
+							DatabaseCatalog *catalog,
+							const char *relationKinds,
+							void *context,
+							void (*parseResults)(void *, PGresult *))
+{
+	char *values[25] = { 0 };
+	const char *sections[3] = { "incl_table", "excl_table", "xdat_table" };
+	const char *sql = NULL;
+	int namespaceCount = 0;
+	bool success = false;
+
+	if (!catalog_s_namespace_oid_array(catalog, &values[0], &namespaceCount))
+	{
+		goto cleanup;
+	}
+
+	for (int section = 0; section < 3; section++)
+	{
+		int offset = 1 + section * 8;
+
+		if (!catalog_filter_table_arrays(catalog, sections[section],
+										 &values[offset], &values[offset + 1],
+										 &values[offset + 2], &values[offset + 3],
+										 &values[offset + 4], &values[offset + 5],
+										 &values[offset + 6], &values[offset + 7]))
+		{
+			goto cleanup;
+		}
+	}
+
+	if (!pgcopydb_sql_list_source_tables(&sql))
+	{
+		goto cleanup;
+	}
+
+	Oid paramTypes[26] = { 0 };
+	const char *paramValues[26] = { 0 };
+
+	for (int index = 0; index < 26; index++)
+	{
+		paramTypes[index] = TEXTOID;
+		paramValues[index] = index < 25 ? values[index] : relationKinds;
+	}
+
+	success = pgsql_execute_with_params(pgsql, sql, 26,
+										paramTypes, paramValues, context, parseResults);
+
+cleanup:
+	for (int index = 0; index < 25; index++)
+	{
+		free(values[index]);
+	}
+
+	return success;
+}
+
+
+bool
+schema_list_compare_partitions(PGSQL *pgsql,
+							   SourceFilters *filters,
+							   DatabaseCatalog *namespaceCatalog,
+							   const ComparePartitionArray *sourcePartitions,
+							   ComparePartitionArray *partitions)
+{
+	if (!filters->normalized || partitions->array != NULL || partitions->count != 0)
+	{
+		log_error("Invalid partition inventory context");
+		return false;
+	}
+
+	PQExpBuffer oids = createPQExpBuffer();
+	JSON_Value *names = NULL;
+	JSON_Value *anchors = NULL;
+	char *namesText = NULL;
+	char *anchorsText = NULL;
+	bool success = false;
+	const char *sql = NULL;
+	CompareEligibleContext eligible = { { 0 }, oids, false };
+	ComparePartitionContext context = { { 0 }, partitions, false };
+
+	if (oids == NULL)
+	{
+		log_error("Failed to allocate partition selection buffer");
+		goto cleanup;
+	}
+
+	/* Filter names use normal quoting; topology text must not depend on role defaults. */
+	if (!pgsql_execute(pgsql, "SET LOCAL quote_all_identifiers = off"))
+	{
+		goto cleanup;
+	}
+
+	if (!schema_list_filtered_tables(pgsql, namespaceCatalog, "{r,p,f}",
+									 &eligible, &getCompareEligible) ||
+		!eligible.parsedOk)
+	{
+		log_error("Failed to select partition relations");
+		goto cleanup;
+	}
+
+	if (sourcePartitions != NULL)
+	{
+		names = json_value_init_array();
+		anchors = json_value_init_array();
+
+		if (names == NULL || anchors == NULL)
+		{
+			log_error("Failed to allocate partition identity arrays");
+			goto cleanup;
+		}
+
+		for (int index = 0; index < sourcePartitions->count; index++)
+		{
+			const ComparePartition *partition = &sourcePartitions->array[index];
+
+			if (json_array_append_string(json_value_get_array(names),
+										 partition->qname) != JSONSuccess ||
+				(partition->relkind == 'p' &&
+				 json_array_append_string(json_value_get_array(anchors),
+										  partition->qname) != JSONSuccess))
+			{
+				log_error("Failed to encode partition identities");
+				goto cleanup;
+			}
+		}
+
+		namesText = json_serialize_to_string(names);
+		anchorsText = json_serialize_to_string(anchors);
+
+		if (namesText == NULL || anchorsText == NULL)
+		{
+			log_error("Failed to serialize partition identities");
+			goto cleanup;
+		}
+	}
+
+	if (!pgcopydb_sql_list_compare_partitions(&sql))
+	{
+		goto cleanup;
+	}
+
+	Oid paramTypes[3] = { TEXTOID, TEXTOID, TEXTOID };
+	const char *paramValues[3] = { oids->data, namesText, anchorsText };
+
+	if (!pgsql_execute(pgsql, "SET LOCAL quote_all_identifiers = on"))
+	{
+		goto cleanup;
+	}
+
+	if (!pgsql_execute_with_params(pgsql, sql, 3, paramTypes, paramValues,
+								   &context, &getComparePartitions) ||
+		!context.parsedOk)
+	{
+		log_error("Failed to read partition inventory");
+		goto cleanup;
+	}
+
+	if (!pgsql_execute(pgsql, "SET LOCAL quote_all_identifiers = off"))
+	{
+		goto cleanup;
+	}
+
+	success = true;
+
+cleanup:
+	destroyPQExpBuffer(oids);
+	json_free_serialized_string(namesText);
+	json_free_serialized_string(anchorsText);
+	json_value_free(names);
+	json_value_free(anchors);
+
+	if (!success)
+	{
+		schema_free_compare_partitions(partitions);
+	}
+
+	return success;
+}
+
+
+void
+schema_free_compare_partitions(ComparePartitionArray *partitions)
+{
+	for (int index = 0; index < partitions->count; index++)
+	{
+		ComparePartition *partition = &partitions->array[index];
+
+		free(partition->qname);
+		free(partition->parentQName);
+		free(partition->partkey);
+		free(partition->bound);
+	}
+
+	free(partitions->array);
+	partitions->array = NULL;
+	partitions->count = 0;
+}
+
+
+static void
+getCompareEligible(void *ctx, PGresult *result)
+{
+	CompareEligibleContext *context = (CompareEligibleContext *) ctx;
+
+	if (PQnfields(result) != 12)
+	{
+		log_error("Partition selection returned %d columns, expected 12",
+				  PQnfields(result));
+		return;
+	}
+
+	appendPQExpBufferChar(context->oids, '{');
+
+	for (int row = 0; row < PQntuples(result); row++)
+	{
+		uint32_t oid = 0;
+
+		if (PQgetisnull(result, row, 0) ||
+			!stringToUInt32(PQgetvalue(result, row, 0), &oid) || oid == 0)
+		{
+			log_error("Invalid selected partition OID");
+			return;
+		}
+
+		appendPQExpBuffer(context->oids, "%s%u", row == 0 ? "" : ",", oid);
+	}
+
+	appendPQExpBufferChar(context->oids, '}');
+	context->parsedOk = !PQExpBufferBroken(context->oids);
+}
+
+
+static void
+getComparePartitions(void *ctx, PGresult *result)
+{
+	ComparePartitionContext *context = (ComparePartitionContext *) ctx;
+	ComparePartitionArray *partitions = context->partitions;
+	int count = PQntuples(result);
+
+	if (PQnfields(result) != 8)
+	{
+		log_error("Partition inventory returned %d columns, expected 8",
+				  PQnfields(result));
+		return;
+	}
+
+	if (count == 0)
+	{
+		context->parsedOk = true;
+		return;
+	}
+
+	partitions->array = (ComparePartition *) calloc(count, sizeof(ComparePartition));
+
+	if (partitions->array == NULL)
+	{
+		log_error("Failed to allocate partition inventory");
+		return;
+	}
+
+	partitions->count = count;
+
+	for (int row = 0; row < count; row++)
+	{
+		for (int column = 0; column < 8; column++)
+		{
+			if (PQgetisnull(result, row, column))
+			{
+				log_error("Partition inventory contains a NULL field");
+				return;
+			}
+		}
+
+		ComparePartition *partition = &partitions->array[row];
+		char *kind = PQgetvalue(result, row, 1);
+		char *strategy = PQgetvalue(result, row, 3);
+		char *eligible = PQgetvalue(result, row, 6);
+
+		if (!stringToUInt32(PQgetvalue(result, row, 7), &partition->oid) ||
+			partition->oid == 0)
+		{
+			log_error("Invalid partition inventory OID");
+			return;
+		}
+
+		if (PQgetlength(result, row, 0) == 0 || strlen(kind) != 1 ||
+			strlen(strategy) > 1 ||
+			(strategy[0] != '\0' && strategy[0] != 'r' &&
+			 strategy[0] != 'l' && strategy[0] != 'h') ||
+			(strcmp(eligible, "t") != 0 && strcmp(eligible, "f") != 0))
+		{
+			log_error("Invalid partition inventory metadata");
+			return;
+		}
+
+		if ((kind[0] == 'p' &&
+			 (strategy[0] == '\0' || PQgetlength(result, row, 4) == 0)) ||
+			(kind[0] != 'p' &&
+			 (strategy[0] != '\0' || PQgetlength(result, row, 4) != 0)) ||
+			((PQgetlength(result, row, 2) == 0) != (PQgetlength(result, row, 5) == 0)))
+		{
+			log_error("Inconsistent partition inventory metadata");
+			return;
+		}
+
+		partition->qname = strdup(PQgetvalue(result, row, 0));
+		partition->relkind = kind[0];
+		partition->parentQName = strdup(PQgetvalue(result, row, 2));
+		partition->strategy = strategy[0];
+		partition->partkey = strdup(PQgetvalue(result, row, 4));
+		partition->bound = strdup(PQgetvalue(result, row, 5));
+		partition->eligible = strcmp(eligible, "t") == 0;
+
+		if (partition->qname == NULL || partition->parentQName == NULL ||
+			partition->partkey == NULL || partition->bound == NULL)
+		{
+			log_error("Failed to allocate partition metadata strings");
+			return;
+		}
+	}
+
+	context->parsedOk = true;
 }
 
 
