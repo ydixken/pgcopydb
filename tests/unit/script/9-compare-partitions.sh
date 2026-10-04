@@ -195,7 +195,7 @@ cp -R "$workroot/base-clone" "$workroot/invalid-checksum-name"
 test "$(sqlite3 -init /dev/null "$workroot/invalid-checksum-name/schema/source.db" \
     "UPDATE s_table SET qname = char(34) || 'unterminated' WHERE qname = 'part.range_low'; SELECT changes();")" = 1
 compare 'malformed cached checksum name fails closed without a crash' data 12 \
-    'Failed to validate cached checksum relation identities' \
+    'Partition topology mismatch.*selected leaf is missing from checksum inventory' \
     "$workroot/invalid-checksum-name"
 
 target_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_low'
