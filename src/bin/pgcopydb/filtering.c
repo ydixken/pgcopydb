@@ -558,12 +558,6 @@ parse_filters(const char *filename, SourceFilters *filters)
 		return false;
 	}
 
-	/*
-	 * Now assign a proper type to the source filter.
-	 * Pattern lists are counted the same as their exact equivalents because
-	 * filters_validate_and_normalize() expands them into the exact lists before
-	 * the SQL queries run.
-	 */
 	if (filters->includeOnlyTableList.count > 0 ||
 		filters->includeOnlyTablePatternList.count > 0)
 	{
@@ -713,11 +707,6 @@ filters_as_json(SourceFilters *filters, JSON_Value *jsFilter)
 						   "type",
 						   filterTypeToString(filters->type));
 
-	/*
-	 * Schema exact lists.  When patterns have been expanded (countOriginal > 0)
-	 * only serialize the user-supplied entries so the JSON stays stable across
-	 * pre- and post-expansion catalog checks.
-	 */
 	struct schemasection
 	{
 		char name[PG_NAMEDATALEN];

@@ -38,8 +38,6 @@ key differs beyond 1024 bytes: data exit 12
 leaf payload corruption: data exit 12
 unrelated target table and partition family: schema exit 0
 unrelated target table and partition family: data exit 0
-ordinary inheritance is outside partition topology: schema exit 0
-ordinary inheritance is outside partition topology: data exit 0
 different timezone datestyle and search path defaults: schema exit 0
 different timezone datestyle and search path defaults: data exit 0
 matching bounds with different numeric quoting and string defaults: schema exit 0
@@ -86,6 +84,8 @@ explicitly excluded foreign sibling ignored: data exit 0
 parent-only inclusion preserves empty row selection: schema exit 0
 parent-only inclusion preserves empty row selection: data exit 0
 parent-only inclusion: empty data report
+ordinary inheritance is outside partition topology: schema exit 0
+ordinary inheritance is outside partition topology: data exit 0
 selected foreign partition fails closed: schema exit 12
 selected foreign partition fails closed: data exit 12
 identical parent-only databases: schema exit 0

@@ -86,9 +86,17 @@ clone()
         --skip-extensions --skip-collations --skip-large-objects \
         --skip-db-properties --not-consistent --fail-fast --quiet "$@" \
         >"$workroot/clone.log" 2>&1 || {
+        echo "clone ${directory##*/} failed" >&2
         cat "$workroot/clone.log" >&2
         exit 1
     }
+}
+
+prepare_quoted_schema()
+{
+    # Filtered clones can omit the quoted schema's partition ancestry.
+    pg_dump --schema-only --strict-names --schema='"Quoted Schema"' "$source_uri" |
+        psql -Xq -v ON_ERROR_STOP=1 -d "$target_uri" >/dev/null
 }
 
 reset_target()
@@ -145,11 +153,6 @@ INSERT INTO part.cross_leaf VALUES (1);
 
 CREATE TABLE part.time_parent (ts timestamptz) PARTITION BY RANGE (ts);
 CREATE TABLE part.time_leaf PARTITION OF part.time_parent FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2021-01-01 00:00+00');
-
-CREATE TABLE part.inherit_parent (id integer);
-CREATE TABLE "Quoted Schema".inherit_child () INHERITS (part.inherit_parent);
-INSERT INTO part.inherit_parent VALUES (10);
-INSERT INTO "Quoted Schema".inherit_child VALUES (20);
 
 CREATE TABLE part.long_bound_parent (value text) PARTITION BY LIST (value);
 DO $body$
@@ -265,9 +268,6 @@ compare 'leaf payload corruption' data 12 'Data on source and target database di
 target_sql -c 'UPDATE part.range_low SET payload = '\''one'\'' WHERE id = 1'
 target_sql -c 'CREATE TABLE outside.target_only (id integer); CREATE TABLE outside.target_family (id integer) PARTITION BY LIST (id); CREATE TABLE outside.target_leaf PARTITION OF outside.target_family FOR VALUES IN (1); INSERT INTO outside.target_leaf VALUES (1)'
 compare_both 'unrelated target table and partition family'
-target_sql -c 'ALTER TABLE "Quoted Schema".inherit_child NO INHERIT part.inherit_parent'
-compare_both 'ordinary inheritance is outside partition topology'
-target_sql -c 'ALTER TABLE "Quoted Schema".inherit_child INHERIT part.inherit_parent'
 psql -Xq -v ON_ERROR_STOP=1 -d "$PGCOPYDB_TARGET_PGURI" -c "ALTER DATABASE ${fixture_db} SET timezone = 'Pacific/Auckland'; ALTER DATABASE ${fixture_db} SET datestyle = 'SQL, DMY'; ALTER DATABASE ${fixture_db} SET search_path = outside, public" >/dev/null
 compare_both 'different timezone datestyle and search path defaults'
 
@@ -289,8 +289,10 @@ cat >"$workroot/schema.ini" <<'FILTER'
 part
 ~/^Quoted Schema$/
 FILTER
+prepare_quoted_schema
 clone "$workroot/schema-filter" --filters "$workroot/schema.ini"
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.range_low')" = 2
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM "Quoted Schema"."Leaf with space"')" = 1
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT to_regclass('\''outside.unselected'\'') IS NULL')" = t
 compare_both 'stored exact and regex schema inclusions' 0 '' "$workroot/schema-filter"
 target_sql -c 'CREATE TABLE part.range_extra PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40)'
@@ -363,8 +365,10 @@ part.~/^list_/
 part.cross_leaf
 part.~/^foreign_/
 FILTER
+prepare_quoted_schema
 clone "$workroot/exclude-filter" --filters "$workroot/exclude.ini"
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.range_low')" = 2
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM "Quoted Schema"."Leaf with space"')" = 0
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT to_regclass('\''part.range_empty'\'') IS NULL AND to_regclass('\''part.list_one'\'') IS NULL')" = t
 compare_both 'stored exact and regex schema and table exclusions' 0 '' "$workroot/exclude-filter"
 source_sql -c 'CREATE EXTENSION postgres_fdw; CREATE SERVER fixture_foreign FOREIGN DATA WRAPPER postgres_fdw; CREATE FOREIGN TABLE part.foreign_leaf PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40) SERVER fixture_foreign'
@@ -381,8 +385,17 @@ compare_both 'parent-only inclusion preserves empty row selection' 0 '' "$workro
 jq -e 'type == "array" and length == 0' "$workroot/report.json" >/dev/null
 echo 'parent-only inclusion: empty data report'
 
+source_sql <<'SQL'
+CREATE TABLE part.inherit_parent (id integer);
+CREATE TABLE "Quoted Schema".inherit_child () INHERITS (part.inherit_parent);
+INSERT INTO part.inherit_parent VALUES (10);
+INSERT INTO "Quoted Schema".inherit_child VALUES (20);
+SQL
 reset_target
 clone "$workroot/foreign-clone"
+target_sql -c 'ALTER TABLE "Quoted Schema".inherit_child NO INHERIT part.inherit_parent'
+compare_both 'ordinary inheritance is outside partition topology'
+target_sql -c 'ALTER TABLE "Quoted Schema".inherit_child INHERIT part.inherit_parent'
 source_sql -c 'CREATE EXTENSION postgres_fdw; CREATE SERVER fixture_foreign FOREIGN DATA WRAPPER postgres_fdw; CREATE FOREIGN TABLE part.foreign_leaf PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40) SERVER fixture_foreign'
 target_sql -c 'CREATE EXTENSION postgres_fdw; CREATE SERVER fixture_foreign FOREIGN DATA WRAPPER postgres_fdw; CREATE FOREIGN TABLE part.foreign_leaf PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40) SERVER fixture_foreign'
 compare_both 'selected foreign partition fails closed' 12 'unsupported.*foreign|foreign.*unsupported'
