@@ -364,6 +364,26 @@ do
 done
 
 reset_target
+cat >"$workroot/pattern.ini" <<'FILTER'
+[include-only-table]
+part.~/^cross_leaf/
+FILTER
+copy_fixture_data "$workroot/pattern-filter" --filters "$workroot/pattern.ini"
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.cross_leaf')" = 1
+compare_both 'stored broad regex leaf inclusion' 0 '' "$workroot/pattern-filter"
+target_sql -c 'CREATE TABLE part.cross_ignored PARTITION OF "Quoted Schema"."Cross Parent" FOR VALUES FROM (20) TO (30); INSERT INTO part.cross_ignored VALUES (21)'
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.cross_ignored')" = 1
+compare_both 'broad regex inclusion ignores nonmatching target sibling' 0 '' "$workroot/pattern-filter"
+target_sql -c 'CREATE TABLE part.cross_leaf_extra PARTITION OF "Quoted Schema"."Cross Parent" FOR VALUES FROM (10) TO (20)'
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.cross_leaf_extra')" = 0
+compare_both 'broad regex inclusion checks extra empty matching target leaf' 12 \
+    "${topology}.*extra relation on target" "$workroot/pattern-filter"
+target_sql -c 'INSERT INTO part.cross_leaf_extra VALUES (11)'
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.cross_leaf_extra')" = 1
+compare_both 'broad regex inclusion checks extra populated matching target leaf' 12 \
+    "${topology}.*extra relation on target" "$workroot/pattern-filter"
+
+reset_target
 cat >"$workroot/exclude.ini" <<'FILTER'
 [exclude-schema]
 outside
@@ -385,6 +405,25 @@ compare_both 'stored exact and regex schema and table exclusions' 0 '' "$workroo
 source_sql -c 'CREATE EXTENSION postgres_fdw; CREATE SERVER fixture_foreign FOREIGN DATA WRAPPER postgres_fdw; CREATE FOREIGN TABLE part.foreign_leaf PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40) SERVER fixture_foreign'
 compare_both 'explicitly excluded foreign sibling ignored' 0 '' "$workroot/exclude-filter"
 source_sql -c 'DROP FOREIGN TABLE part.foreign_leaf; DROP SERVER fixture_foreign; DROP EXTENSION postgres_fdw'
+
+reset_target
+cat >"$workroot/exclude-data.ini" <<'FILTER'
+[exclude-table-data]
+part.range_empty
+FILTER
+copy_fixture_data "$workroot/exclude-data-filter" --filters "$workroot/exclude-data.ini"
+# An empty excluded leaf keeps this case independent of row filtering.
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$source_uri" -c 'SELECT count(*) FROM part.range_empty')" = 0
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.range_empty')" = 0
+compare_both 'stored empty leaf data exclusion' 0 '' "$workroot/exclude-data-filter"
+target_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_empty; ALTER TABLE part.range_parent ATTACH PARTITION part.range_empty FOR VALUES FROM (10) TO (21)'
+compare_both 'data exclusion still checks empty leaf bounds' 12 \
+    "${topology}.*partition bounds differ" "$workroot/exclude-data-filter"
+target_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_empty; ALTER TABLE part.range_parent ATTACH PARTITION part.range_empty FOR VALUES FROM (10) TO (20)'
+target_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_empty'
+compare_both 'data exclusion still checks empty leaf attachment' 12 \
+    "${topology}.*immediate partition parent differs" "$workroot/exclude-data-filter"
+target_sql -c 'ALTER TABLE part.range_parent ATTACH PARTITION part.range_empty FOR VALUES FROM (10) TO (20)'
 
 reset_target
 cat >"$workroot/parent.ini" <<'FILTER'

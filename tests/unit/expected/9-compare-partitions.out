@@ -77,10 +77,24 @@ invalid persisted filters empty-pattern-inclusion: schema exit 12
 invalid persisted filters empty-pattern-inclusion: data exit 12
 invalid persisted filters missing-inclusion: schema exit 12
 invalid persisted filters missing-inclusion: data exit 12
+stored broad regex leaf inclusion: schema exit 0
+stored broad regex leaf inclusion: data exit 0
+broad regex inclusion ignores nonmatching target sibling: schema exit 0
+broad regex inclusion ignores nonmatching target sibling: data exit 0
+broad regex inclusion checks extra empty matching target leaf: schema exit 12
+broad regex inclusion checks extra empty matching target leaf: data exit 12
+broad regex inclusion checks extra populated matching target leaf: schema exit 12
+broad regex inclusion checks extra populated matching target leaf: data exit 12
 stored exact and regex schema and table exclusions: schema exit 0
 stored exact and regex schema and table exclusions: data exit 0
 explicitly excluded foreign sibling ignored: schema exit 0
 explicitly excluded foreign sibling ignored: data exit 0
+stored empty leaf data exclusion: schema exit 0
+stored empty leaf data exclusion: data exit 0
+data exclusion still checks empty leaf bounds: schema exit 12
+data exclusion still checks empty leaf bounds: data exit 12
+data exclusion still checks empty leaf attachment: schema exit 12
+data exclusion still checks empty leaf attachment: data exit 12
 parent-only inclusion preserves empty row selection: schema exit 0
 parent-only inclusion preserves empty row selection: data exit 0
 parent-only inclusion: empty data report
