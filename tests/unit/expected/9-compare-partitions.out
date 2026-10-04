@@ -57,8 +57,8 @@ strict leaf inclusion ignores unselected target sibling: schema exit 0
 strict leaf inclusion ignores unselected target sibling: data exit 0
 strict leaf inclusion checks selected leaf ancestry: schema exit 12
 strict leaf inclusion checks selected leaf ancestry: data exit 12
-strict leaf inclusion detects source-only detach after clone: schema exit 12
-strict leaf inclusion detects source-only detach after clone: data exit 12
+strict leaf inclusion detects source-only detach after data copy: schema exit 12
+strict leaf inclusion detects source-only detach after data copy: data exit 12
 invalid persisted filters wrong-type: schema exit 12
 invalid persisted filters wrong-type: data exit 12
 invalid persisted filters null: schema exit 12

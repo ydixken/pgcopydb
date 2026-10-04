@@ -99,6 +99,24 @@ prepare_quoted_schema()
         psql -Xq -v ON_ERROR_STOP=1 -d "$target_uri" >/dev/null
 }
 
+copy_fixture_data()
+{
+    local directory=$1
+    shift
+    # Keep filter comparison coverage separate from pg_dump's schema selection.
+    pg_dump --schema-only --strict-names --schema=part --schema=outside \
+        --schema='"Quoted Schema"' "$source_uri" |
+        psql -Xq -v ON_ERROR_STOP=1 -d "$target_uri" >/dev/null
+    pgcopydb copy data --source "$source_uri" --target "$target_uri" \
+        --dir "$directory" --table-jobs 1 --index-jobs 1 \
+        --skip-large-objects --not-consistent --fail-fast --quiet "$@" \
+        >"$workroot/copy.log" 2>&1 || {
+        echo "copy data ${directory##*/} failed" >&2
+        cat "$workroot/copy.log" >&2
+        exit 1
+    }
+}
+
 reset_target()
 {
     psql -Xq -v ON_ERROR_STOP=1 -d "$PGCOPYDB_TARGET_PGURI" \
@@ -307,19 +325,10 @@ outside.unselected
 [exclude-schema]
 outside
 FILTER
-# Leaf-only filters can omit ancestor restore entries, so prepare that topology.
-target_sql <<'SQL'
-CREATE SCHEMA part;
-CREATE SCHEMA "Quoted Schema";
-CREATE TABLE part.range_parent (id integer, payload text) PARTITION BY RANGE (id);
-CREATE TABLE part.range_low PARTITION OF part.range_parent FOR VALUES FROM (0) TO (10);
-CREATE TABLE "Quoted Schema"."Cross Parent" (id integer) PARTITION BY RANGE (id);
-CREATE TABLE part.cross_leaf PARTITION OF "Quoted Schema"."Cross Parent" FOR VALUES FROM (0) TO (10);
-SQL
-clone "$workroot/table-filter" --filters "$workroot/tables.ini" --drop-if-exists
+copy_fixture_data "$workroot/table-filter" --filters "$workroot/tables.ini"
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.range_low')" = 2
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.cross_leaf')" = 1
-test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT to_regclass('\''outside.unselected'\'') IS NULL')" = t
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM outside.unselected')" = 0
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT inhparent = '\''"Quoted Schema"."Cross Parent"'\''::regclass FROM pg_inherits WHERE inhrelid = '\''part.cross_leaf'\''::regclass')" = t
 compare_both 'stored exact and regex leaf inclusions with cross-schema ancestor' 0 '' "$workroot/table-filter"
 echo 'schema exclusion overrides exact table inclusion'
@@ -330,7 +339,7 @@ compare_both 'strict leaf inclusion checks selected leaf ancestry' 12 "$topology
 target_sql -c 'ALTER TABLE part.range_parent ATTACH PARTITION part.range_low FOR VALUES FROM (0) TO (10)'
 
 source_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_low'
-compare_both 'strict leaf inclusion detects source-only detach after clone' 12 "$topology" "$workroot/table-filter"
+compare_both 'strict leaf inclusion detects source-only detach after data copy' 12 "$topology" "$workroot/table-filter"
 source_sql -c 'ALTER TABLE part.range_parent ATTACH PARTITION part.range_low FOR VALUES FROM (0) TO (10)'
 
 for invalid in wrong-type null missing-name absent-schema-regex excluded-schema-regex conflicting-schema empty-inclusion empty-pattern-inclusion missing-inclusion
@@ -365,11 +374,13 @@ part.~/^list_/
 part.cross_leaf
 part.~/^foreign_/
 FILTER
-prepare_quoted_schema
-clone "$workroot/exclude-filter" --filters "$workroot/exclude.ini"
+copy_fixture_data "$workroot/exclude-filter" --filters "$workroot/exclude.ini"
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.range_low')" = 2
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM "Quoted Schema"."Leaf with space"')" = 0
-test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT to_regclass('\''part.range_empty'\'') IS NULL AND to_regclass('\''part.list_one'\'') IS NULL')" = t
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.range_empty')" = 0
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.list_one')" = 0
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM outside.unselected')" = 0
+test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.cross_leaf')" = 0
 compare_both 'stored exact and regex schema and table exclusions' 0 '' "$workroot/exclude-filter"
 source_sql -c 'CREATE EXTENSION postgres_fdw; CREATE SERVER fixture_foreign FOREIGN DATA WRAPPER postgres_fdw; CREATE FOREIGN TABLE part.foreign_leaf PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40) SERVER fixture_foreign'
 compare_both 'explicitly excluded foreign sibling ignored' 0 '' "$workroot/exclude-filter"
@@ -380,7 +391,7 @@ cat >"$workroot/parent.ini" <<'FILTER'
 [include-only-table]
 part.range_parent
 FILTER
-clone "$workroot/parent-filter" --filters "$workroot/parent.ini"
+copy_fixture_data "$workroot/parent-filter" --filters "$workroot/parent.ini"
 compare_both 'parent-only inclusion preserves empty row selection' 0 '' "$workroot/parent-filter"
 jq -e 'type == "array" and length == 0' "$workroot/report.json" >/dev/null
 echo 'parent-only inclusion: empty data report'
