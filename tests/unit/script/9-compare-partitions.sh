@@ -120,6 +120,10 @@ CREATE TABLE part.list_parent (id integer, payload text) PARTITION BY LIST (id);
 CREATE TABLE part.list_one PARTITION OF part.list_parent FOR VALUES IN (1);
 CREATE TABLE part.list_two PARTITION OF part.list_parent FOR VALUES IN (2);
 INSERT INTO part.list_parent VALUES (1, 'list');
+CREATE TABLE part.float_parent (value double precision) PARTITION BY LIST (value);
+CREATE TABLE part.float_leaf PARTITION OF part.float_parent FOR VALUES IN (1.1);
+CREATE TABLE part.string_parent (value text) PARTITION BY LIST (value);
+CREATE TABLE part.string_leaf PARTITION OF part.string_parent FOR VALUES IN (E'back\\slash');
 
 CREATE TABLE part.hash_parent (id integer) PARTITION BY HASH (id);
 CREATE TABLE part.hash_zero PARTITION OF part.hash_parent FOR VALUES WITH (MODULUS 2, REMAINDER 0);
@@ -141,7 +145,6 @@ INSERT INTO part.cross_leaf VALUES (1);
 
 CREATE TABLE part.time_parent (ts timestamptz) PARTITION BY RANGE (ts);
 CREATE TABLE part.time_leaf PARTITION OF part.time_parent FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2021-01-01 00:00+00');
-INSERT INTO part.time_parent VALUES ('2020-06-01 00:00+00');
 
 CREATE TABLE part.inherit_parent (id integer);
 CREATE TABLE "Quoted Schema".inherit_child () INHERITS (part.inherit_parent);
@@ -169,6 +172,31 @@ test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$source_uri" -c 'SELECT count(*) FROM p
 test "$(psql -XAt -v ON_ERROR_STOP=1 -d "$target_uri" -c 'SELECT count(*) FROM part.range_parent')" = 4
 compare_both 'extra populated target leaf with 3 versus 4 parent rows' 12 "$topology"
 target_sql -c 'DROP TABLE part.range_extra'
+
+source_sql -c 'CREATE TABLE part.range_cached PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40); INSERT INTO part.range_cached VALUES (31, '\''source'\'')'
+target_sql -c 'CREATE TABLE part.range_cached PARTITION OF part.range_parent FOR VALUES FROM (30) TO (40); INSERT INTO part.range_cached VALUES (31, '\''target'\'')'
+compare 'new matching leaf after clone' schema 0 '' "$workroot/base-clone"
+compare 'new leaf absent from cached checksum inventory' data 12 \
+    'Partition topology mismatch.*selected leaf is missing from checksum inventory' \
+    "$workroot/base-clone"
+source_sql -c 'DROP TABLE part.range_cached'
+target_sql -c 'DROP TABLE part.range_cached'
+
+source_sql -c 'ALTER TABLE part.range_low RENAME TO range_renamed; CREATE TABLE part.range_low (id integer, payload text); INSERT INTO part.range_low VALUES (1, '\''one'\''), (2, '\''two'\'')'
+target_sql -c 'ALTER TABLE part.range_low RENAME TO range_renamed; CREATE TABLE part.range_low (id integer, payload text); INSERT INTO part.range_low VALUES (1, '\''one'\''), (2, '\''two'\''); UPDATE part.range_renamed SET payload = '\''corrupted'\'' WHERE id = 1'
+compare 'renamed partitions with matching cached-name shadows' schema 0 '' "$workroot/base-clone"
+compare 'renamed partition absent from cached checksum inventory' data 12 \
+    'Partition topology mismatch.*selected leaf is missing from checksum inventory' \
+    "$workroot/base-clone"
+source_sql -c 'DROP TABLE part.range_low; ALTER TABLE part.range_renamed RENAME TO range_low'
+target_sql -c 'DROP TABLE part.range_low; ALTER TABLE part.range_renamed RENAME TO range_low; UPDATE part.range_low SET payload = '\''one'\'' WHERE id = 1'
+
+cp -R "$workroot/base-clone" "$workroot/invalid-checksum-name"
+test "$(sqlite3 -init /dev/null "$workroot/invalid-checksum-name/schema/source.db" \
+    "UPDATE s_table SET qname = char(34) || 'unterminated' WHERE qname = 'part.range_low'; SELECT changes();")" = 1
+compare 'malformed cached checksum name fails closed without a crash' data 12 \
+    'Failed to validate cached checksum relation identities' \
+    "$workroot/invalid-checksum-name"
 
 target_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_low'
 compare_both 'detached populated leaf with unchanged payload' 12 "$topology"
@@ -243,6 +271,18 @@ target_sql -c 'ALTER TABLE "Quoted Schema".inherit_child INHERIT part.inherit_pa
 psql -Xq -v ON_ERROR_STOP=1 -d "$PGCOPYDB_TARGET_PGURI" -c "ALTER DATABASE ${fixture_db} SET timezone = 'Pacific/Auckland'; ALTER DATABASE ${fixture_db} SET datestyle = 'SQL, DMY'; ALTER DATABASE ${fixture_db} SET search_path = outside, public" >/dev/null
 compare_both 'different timezone datestyle and search path defaults'
 
+source_sql -c "ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} SET extra_float_digits = -15; ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} SET quote_all_identifiers = on; ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} SET standard_conforming_strings = off"
+target_sql -c "ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} SET extra_float_digits = 3; ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} SET quote_all_identifiers = off; ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} SET standard_conforming_strings = on"
+compare_both 'matching bounds with different numeric quoting and string defaults'
+target_sql -c 'DROP TABLE part.float_leaf; CREATE TABLE part.float_leaf PARTITION OF part.float_parent FOR VALUES IN (1.2)'
+compare_both 'different empty floating LIST bounds with asymmetric defaults' 12 "$topology"
+target_sql -c 'DROP TABLE part.float_leaf; CREATE TABLE part.float_leaf PARTITION OF part.float_parent FOR VALUES IN (1.1)'
+
+reset_target
+clone "$workroot/quoted-clone"
+compare_both 'quoted clone catalog compared with canonical identifiers' 0 '' "$workroot/quoted-clone"
+source_sql -c "ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} RESET extra_float_digits; ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} RESET quote_all_identifiers; ALTER ROLE CURRENT_USER IN DATABASE ${fixture_db} RESET standard_conforming_strings"
+
 reset_target
 cat >"$workroot/schema.ini" <<'FILTER'
 [include-only-schema]
@@ -285,6 +325,32 @@ target_sql -c 'CREATE TABLE part.range_extra PARTITION OF part.range_parent FOR 
 compare_both 'strict leaf inclusion ignores unselected target sibling' 0 '' "$workroot/table-filter"
 target_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_low'
 compare_both 'strict leaf inclusion checks selected leaf ancestry' 12 "$topology" "$workroot/table-filter"
+target_sql -c 'ALTER TABLE part.range_parent ATTACH PARTITION part.range_low FOR VALUES FROM (0) TO (10)'
+
+source_sql -c 'ALTER TABLE part.range_parent DETACH PARTITION part.range_low'
+compare_both 'strict leaf inclusion detects source-only detach after clone' 12 "$topology" "$workroot/table-filter"
+source_sql -c 'ALTER TABLE part.range_parent ATTACH PARTITION part.range_low FOR VALUES FROM (0) TO (10)'
+
+for invalid in wrong-type null missing-name absent-schema-regex excluded-schema-regex conflicting-schema empty-inclusion empty-pattern-inclusion missing-inclusion
+do
+    case "$invalid" in
+        wrong-type) rules='{"type":"SOURCE_FILTER_TYPE_INCL","include-only-table":"part.range_low"}' ;;
+        null) rules='{"type":"SOURCE_FILTER_TYPE_INCL","include-only-table":null}' ;;
+        missing-name) rules='{"type":"SOURCE_FILTER_TYPE_INCL","include-only-table":[{"schema":"part"}]}' ;;
+        absent-schema-regex) rules='{"type":"SOURCE_FILTER_TYPE_INCL","include-only-table-pattern":[{"schema":"absent_schema","name-re":"["}]}' ;;
+        excluded-schema-regex) rules='{"type":"SOURCE_FILTER_TYPE_INCL","exclude-schema":["part"],"include-only-table-pattern":[{"schema":"part","name-re":"["}]}' ;;
+        conflicting-schema) rules='{"type":"SOURCE_FILTER_TYPE_EXCL","include-only-schema":["part"],"exclude-schema":["part"]}' ;;
+        empty-inclusion) rules='{"type":"SOURCE_FILTER_TYPE_INCL","include-only-table":[]}' ;;
+        empty-pattern-inclusion) rules='{"type":"SOURCE_FILTER_TYPE_INCL","include-only-table-pattern":[]}' ;;
+        missing-inclusion) rules='{"type":"SOURCE_FILTER_TYPE_INCL"}' ;;
+    esac
+    directory="$workroot/invalid-filter-$invalid"
+    cp -R "$workroot/table-filter" "$directory"
+    test "$(sqlite3 -init /dev/null "$directory/schema/source.db" \
+        "UPDATE setup SET filters = '$rules' WHERE id = 1; SELECT changes();")" = 1
+    compare_both "invalid persisted filters $invalid" 12 \
+        'Invalid persisted filter rules' "$directory"
+done
 
 reset_target
 cat >"$workroot/exclude.ini" <<'FILTER'

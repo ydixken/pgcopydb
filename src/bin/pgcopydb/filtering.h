@@ -184,6 +184,8 @@ bool parse_filters(const char *filebname, SourceFilters *filters);
 bool filters_validate_and_normalize(PGSQL *pgsql, SourceFilters *filters);
 
 bool filters_as_json(SourceFilters *filters, JSON_Value *jsFilter);
+bool filters_from_json(SourceFilters *filters, JSON_Value *jsFilter);
+void filters_free(SourceFilters *filters);
 
 bool filter_entry_is_pattern(const char *entry);
 bool parse_filter_table_pattern(SourceFilterTablePattern *pattern,

@@ -4,6 +4,11 @@ extra empty target leaf: schema exit 12
 extra empty target leaf: data exit 12
 extra populated target leaf with 3 versus 4 parent rows: schema exit 12
 extra populated target leaf with 3 versus 4 parent rows: data exit 12
+new matching leaf after clone: schema exit 0
+new leaf absent from cached checksum inventory: data exit 12
+renamed partitions with matching cached-name shadows: schema exit 0
+renamed partition absent from cached checksum inventory: data exit 12
+malformed cached checksum name fails closed without a crash: data exit 12
 detached populated leaf with unchanged payload: schema exit 12
 detached populated leaf with unchanged payload: data exit 12
 leaf attached to wrong parent: schema exit 12
@@ -37,6 +42,12 @@ ordinary inheritance is outside partition topology: schema exit 0
 ordinary inheritance is outside partition topology: data exit 0
 different timezone datestyle and search path defaults: schema exit 0
 different timezone datestyle and search path defaults: data exit 0
+matching bounds with different numeric quoting and string defaults: schema exit 0
+matching bounds with different numeric quoting and string defaults: data exit 0
+different empty floating LIST bounds with asymmetric defaults: schema exit 12
+different empty floating LIST bounds with asymmetric defaults: data exit 12
+quoted clone catalog compared with canonical identifiers: schema exit 0
+quoted clone catalog compared with canonical identifiers: data exit 0
 stored exact and regex schema inclusions: schema exit 0
 stored exact and regex schema inclusions: data exit 0
 schema inclusion checks extra target sibling: schema exit 12
@@ -48,6 +59,26 @@ strict leaf inclusion ignores unselected target sibling: schema exit 0
 strict leaf inclusion ignores unselected target sibling: data exit 0
 strict leaf inclusion checks selected leaf ancestry: schema exit 12
 strict leaf inclusion checks selected leaf ancestry: data exit 12
+strict leaf inclusion detects source-only detach after clone: schema exit 12
+strict leaf inclusion detects source-only detach after clone: data exit 12
+invalid persisted filters wrong-type: schema exit 12
+invalid persisted filters wrong-type: data exit 12
+invalid persisted filters null: schema exit 12
+invalid persisted filters null: data exit 12
+invalid persisted filters missing-name: schema exit 12
+invalid persisted filters missing-name: data exit 12
+invalid persisted filters absent-schema-regex: schema exit 12
+invalid persisted filters absent-schema-regex: data exit 12
+invalid persisted filters excluded-schema-regex: schema exit 12
+invalid persisted filters excluded-schema-regex: data exit 12
+invalid persisted filters conflicting-schema: schema exit 12
+invalid persisted filters conflicting-schema: data exit 12
+invalid persisted filters empty-inclusion: schema exit 12
+invalid persisted filters empty-inclusion: data exit 12
+invalid persisted filters empty-pattern-inclusion: schema exit 12
+invalid persisted filters empty-pattern-inclusion: data exit 12
+invalid persisted filters missing-inclusion: schema exit 12
+invalid persisted filters missing-inclusion: data exit 12
 stored exact and regex schema and table exclusions: schema exit 0
 stored exact and regex schema and table exclusions: data exit 0
 explicitly excluded foreign sibling ignored: schema exit 0

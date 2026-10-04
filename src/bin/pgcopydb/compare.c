@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -15,17 +16,43 @@
 #include "lock_utils.h"
 #include "log.h"
 #include "multi_db.h"
+#include "parsing_utils.h"
 #include "progress.h"
 #include "schema.h"
 #include "signals.h"
 #include "summary.h"
 
 
+static bool compare_prepare_filters(CopyDataSpec *copySpecs,
+									JSON_Value **filtersJson);
+static bool compare_fetch_target_schema(CopyDataSpec *copySpecs,
+										CopyDataSpec *targetSpecs,
+										JSON_Value *filtersJson);
+static bool compare_close_catalogs(CopyDataSpec *specs);
+static bool compare_open_catalog_session(PGSQL *pgsql, char *pguri,
+										 ConnectionType connectionType);
+static bool compare_checksum_inventory(PGSQL *pgsql, DatabaseCatalog *catalog,
+									   const ComparePartitionArray *partitions);
+static bool compare_checksum_selection_hook(void *ctx, SourceTable *table);
+static void compare_checksum_oids(void *ctx, PGresult *result);
+static bool compare_partition_topology(CopyDataSpec *sourceSpecs,
+									   CopyDataSpec *targetSpecs);
+static bool compare_read_partitions(CopyDataSpec *specs,
+									ConnectionType connectionType,
+									const ComparePartitionArray *sourcePartitions,
+									ComparePartitionArray *partitions);
+
 static bool compare_queue_table_hook(void *ctx, SourceTable *sourceTable);
 static bool compare_schemas_table_hook(void *ctx, SourceTable *sourceTable);
 static bool compare_schemas_index_hook(void *ctx, SourceIndex *sourceIndex);
 static bool compare_schemas_seq_hook(void *ctx, SourceSequence *sourceSeq);
 static bool compare_alldb_chksum_hook(void *ctx, SourceTable *table);
+
+
+static GUC compareSchemaSettings[] = {
+	{ "quote_all_identifiers", "off" },
+	{ NULL, NULL }
+};
 
 
 /*
@@ -36,101 +63,96 @@ bool
 compare_data(CopyDataSpec *copySpecs)
 {
 	Queue compareQueue = { 0 };
+	JSON_Value *filtersJson = NULL;
+	CopyDataSpec targetSpecs = { 0 };
+	bool success = false;
 
-	/* use a queue to share the workload */
 	if (!queue_create(&compareQueue, "compare"))
 	{
 		log_error("Failed to create the compare data process queue");
 		return false;
 	}
 
-	/*
-	 * Retrieve catalogs from the source database, the target is
-	 * supposed to have the same objects.
-	 */
+	if (!compare_prepare_filters(copySpecs, &filtersJson))
+	{
+		goto cleanup;
+	}
+
 	ConnStrings *dsn = &(copySpecs->connStrings);
+	char *target_pguri = dsn->target_pguri;
 
 	log_info("SOURCE: Connecting to \"%s\"", dsn->safeSourcePGURI.pguri);
 
-	/*
-	 * Reduce the catalog queries to the section we need here, and make sure we
-	 * don't prepare the target catalogs.
-	 */
 	copySpecs->section = DATA_SECTION_TABLE_DATA;
+	dsn->target_pguri = NULL;
 
-	char *target_pguri = copySpecs->connStrings.target_pguri;
-	copySpecs->connStrings.target_pguri = NULL;
+	bool fetched = copydb_fetch_schema_and_prepare_specs(copySpecs);
+	dsn->target_pguri = target_pguri;
 
-	if (!copydb_fetch_schema_and_prepare_specs(copySpecs))
+	if (!fetched)
 	{
 		log_fatal("Failed to retrieve source database schema, "
 				  "see above for details.");
-
-		(void) queue_unlink(&compareQueue);
-		return false;
+		goto cleanup;
 	}
 
-	/* cache invalidation for the computed checksums */
+	if (!compare_fetch_target_schema(copySpecs, &targetSpecs, filtersJson) ||
+		!compare_partition_topology(copySpecs, &targetSpecs))
+	{
+		goto cleanup;
+	}
+
+	if (!compare_close_catalogs(&targetSpecs))
+	{
+		goto cleanup;
+	}
+
 	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
 
-	if (!catalog_init(sourceDB))
+	if (!catalog_init(sourceDB) || !catalog_delete_s_table_chksum_all(sourceDB))
 	{
-		log_error("Failed to open internal catalogs in COPY worker process, "
-				  "see above for details");
-		return false;
+		goto cleanup;
 	}
 
-	if (!catalog_delete_s_table_chksum_all(sourceDB))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	/* restore the target_pguri, we will need it later */
-	copySpecs->connStrings.target_pguri = target_pguri;
-
-	/* we start copySpecs->tableJobs workers to share the workload */
 	if (!compare_start_workers(copySpecs, &compareQueue))
 	{
-		log_fatal("Failed to start %d compare data workers",
-				  copySpecs->tableJobs);
-
-		(void) queue_unlink(&compareQueue);
-		return false;
+		log_fatal("Failed to start %d compare data workers", copySpecs->tableJobs);
+		goto cleanup;
 	}
 
-	/* now, add the tables to compare to the queue */
 	if (!compare_queue_tables(copySpecs, &compareQueue))
 	{
 		log_fatal("Failed to queue tables to compare");
-
-		(void) queue_unlink(&compareQueue);
-		return false;
+		goto cleanup;
 	}
 
-	/* and wait until the compare data workers are done */
 	if (!copydb_wait_for_subprocesses(copySpecs->failFast))
 	{
 		log_fatal("Some compare data worker process have failed, "
 				  "see above for details");
-
-		(void) queue_unlink(&compareQueue);
-		return false;
+		goto cleanup;
 	}
 
+	success = true;
+
+cleanup:
+	json_value_free(filtersJson);
+	filters_free(&(targetSpecs.filters));
+	filters_free(&(copySpecs->filters));
+	if (!compare_close_catalogs(&targetSpecs))
+	{
+		success = false;
+	}
+	if (!compare_close_catalogs(copySpecs))
+	{
+		success = false;
+	}
 	if (!queue_unlink(&compareQueue))
 	{
-		/* errors have already been logged */
-		return false;
+		success = false;
 	}
 
-	if (!catalog_close(sourceDB))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	return true;
+	return success;
 }
 
 
@@ -550,27 +572,27 @@ typedef struct CompareSchemaContext
 
 
 /*
- * compare_schemas compares the schemas between source and target instance, in
- * the context and scope of pgcopydb: conpare only the selected tables,
- * indexes, constraints and sequences from the source.
+ * compare_schemas checks partition families and the selected tables,
+ * indexes, constraints and sequences.
  */
 bool
 compare_schemas(CopyDataSpec *copySpecs)
 {
-	/*
-	 * Now prepare two specifications with only the source uri.
-	 *
-	 * going to share pointers to memory allocated in the main copySpecs
-	 * instance.
-	 */
+	/* Filter rules are shared; comparison catalogs have independent handles. */
 	CopyDataSpec sourceSpecs = { 0 };
 	CopyDataSpec targetSpecs = { 0 };
+	bool success = false;
 
 	if (!compare_fetch_schemas(copySpecs, &sourceSpecs, &targetSpecs))
 	{
 		log_fatal("Failed to fetch source and target schemas, "
 				  "see above for details");
-		exit(EXIT_CODE_INTERNAL_ERROR);
+		goto cleanup;
+	}
+
+	if (!compare_partition_topology(&sourceSpecs, &targetSpecs))
+	{
+		goto cleanup;
 	}
 
 	CatalogCounts sCount = { 0 };
@@ -583,7 +605,7 @@ compare_schemas(CopyDataSpec *copySpecs)
 		!catalog_count_objects(targetDB, &tCount))
 	{
 		log_error("Failed to count indexes and constraints in our catalogs");
-		return false;
+		goto cleanup;
 	}
 
 	log_info("[SOURCE] table: %lld, index: %lld, constraint: %lld, sequence: %lld",
@@ -607,30 +629,49 @@ compare_schemas(CopyDataSpec *copySpecs)
 	if (!catalog_iter_s_table(sourceDB, &context, &compare_schemas_table_hook))
 	{
 		log_error("Failed to compare tables, see above for details");
-		return false;
+		goto cleanup;
 	}
 
 	if (!catalog_iter_s_index(sourceDB, &context, &compare_schemas_index_hook))
 	{
 		log_error("Failed to compare indexes, see above for details");
-		return false;
+		goto cleanup;
 	}
 
 	if (!catalog_iter_s_seq(sourceDB, &context, &compare_schemas_seq_hook))
 	{
 		log_error("Failed to compare sequences, see above for details");
-		return false;
+		goto cleanup;
 	}
 
 	if (context.diffCount > 0)
 	{
 		log_fatal("Schemas on source and target database differ");
-		exit(EXIT_CODE_INTERNAL_ERROR);
+		goto cleanup;
 	}
 
 	log_info("pgcopydb schema inspection is successful");
 
-	return true;
+	success = true;
+
+cleanup:
+	filters_free(&(sourceSpecs.filters));
+	filters_free(&(targetSpecs.filters));
+	filters_free(&(copySpecs->filters));
+	if (!compare_close_catalogs(copySpecs))
+	{
+		success = false;
+	}
+	if (!compare_close_catalogs(&sourceSpecs))
+	{
+		success = false;
+	}
+	if (!compare_close_catalogs(&targetSpecs))
+	{
+		success = false;
+	}
+
+	return success;
 }
 
 
@@ -966,9 +1007,31 @@ compare_fetch_schemas(CopyDataSpec *copySpecs,
 					  CopyDataSpec *sourceSpecs,
 					  CopyDataSpec *targetSpecs)
 {
+	JSON_Value *filtersJson = NULL;
+	bool success = false;
+
+	if (!compare_prepare_filters(copySpecs, &filtersJson) ||
+		!compare_close_catalogs(copySpecs))
+	{
+		goto cleanup;
+	}
+
 	/* copy the structure instances over */
 	*sourceSpecs = *copySpecs;
-	*targetSpecs = *copySpecs;
+	sourceSpecs->catalogs = (Catalogs) {
+		0
+	};
+	sourceSpecs->filters = (SourceFilters) {
+		0
+	};
+
+	if (!filters_from_json(&(sourceSpecs->filters), filtersJson))
+	{
+		goto cleanup;
+	}
+	sourceSpecs->catalogs.source.type = DATABASE_CATALOG_TYPE_SOURCE;
+	sourceSpecs->catalogs.filter.type = DATABASE_CATALOG_TYPE_FILTER;
+	sourceSpecs->catalogs.target.type = DATABASE_CATALOG_TYPE_TARGET;
 
 	/*
 	 * Tweak the sourceSpecs so that we bypass retrieving catalog information
@@ -987,7 +1050,7 @@ compare_fetch_schemas(CopyDataSpec *copySpecs,
 	if (!copydb_rmdir_or_mkdir(sourceDir, true))
 	{
 		/* errors have already been logged */
-		return false;
+		goto cleanup;
 	}
 
 	struct db
@@ -1020,17 +1083,72 @@ compare_fetch_schemas(CopyDataSpec *copySpecs,
 	log_info("SOURCE: Connecting to \"%s\"",
 			 sourceConnStrings->safeSourcePGURI.pguri);
 
-	if (!copydb_fetch_schema_and_prepare_specs(sourceSpecs))
+	if (!copydb_fetch_schema_and_prepare_specs_with_settings(sourceSpecs,
+															 compareSchemaSettings))
 	{
 		log_fatal("Failed to retrieve source database schema, "
 				  "see above for details.");
+		goto cleanup;
+	}
+
+	sourceSpecs->connStrings.target_pguri = copySpecs->connStrings.target_pguri;
+	success = compare_fetch_target_schema(sourceSpecs, targetSpecs, filtersJson);
+	sourceSpecs->connStrings.target_pguri = NULL;
+
+cleanup:
+	json_value_free(filtersJson);
+	return success;
+}
+
+
+/*
+ * Separate catalogs prevent target discovery from replacing source checksums.
+ */
+static bool
+compare_fetch_target_schema(CopyDataSpec *copySpecs,
+							CopyDataSpec *targetSpecs,
+							JSON_Value *filtersJson)
+{
+	*targetSpecs = *copySpecs;
+	targetSpecs->catalogs = (Catalogs) {
+		0
+	};
+	targetSpecs->filters = (SourceFilters) {
+		0
+	};
+
+	if (!filters_from_json(&(targetSpecs->filters), filtersJson))
+	{
+		return false;
+	}
+	PGSQL source = { 0 };
+	bool normalized =
+		compare_open_catalog_session(&source, copySpecs->connStrings.source_pguri,
+									 PGSQL_CONN_SOURCE) &&
+		filters_validate_and_normalize(&source, &(targetSpecs->filters)) &&
+		pgsql_commit(&source);
+
+	pgsql_finish(&source);
+
+	if (!normalized)
+	{
 		return false;
 	}
 
-	/*
-	 * Tweak the targetSpecs so that we fetch catalogs using the same code as
-	 * for the source database, but target the target catalog database instead.
-	 */
+	targetSpecs->catalogs.source.type = DATABASE_CATALOG_TYPE_SOURCE;
+	targetSpecs->catalogs.filter.type = DATABASE_CATALOG_TYPE_FILTER;
+	targetSpecs->catalogs.target.type = DATABASE_CATALOG_TYPE_TARGET;
+	targetSpecs->sourceSnapshot = (TransactionSnapshot) {
+		0
+	};
+	targetSpecs->consistent = false;
+
+	if (copySpecs->section == DATA_SECTION_TABLE_DATA)
+	{
+		targetSpecs->section = DATA_SECTION_NAMESPACES;
+	}
+
+	/* Target namespace selection must use target OIDs and a source catalog. */
 	ConnStrings *targetConnStrings = &(targetSpecs->connStrings);
 
 	targetConnStrings->source_pguri = targetConnStrings->target_pguri;
@@ -1050,7 +1168,12 @@ compare_fetch_schemas(CopyDataSpec *copySpecs,
 		return false;
 	}
 
-	struct db dbt[] =
+	struct db
+	{
+		char *name;
+		DatabaseCatalog *db;
+	}
+	dbt[] =
 	{
 		{ .name = "source", .db = &(targetSpecs->catalogs.source) },
 		{ .name = "filter", .db = &(targetSpecs->catalogs.filter) },
@@ -1071,14 +1194,384 @@ compare_fetch_schemas(CopyDataSpec *copySpecs,
 	log_info("TARGET: Connecting to \"%s\"",
 			 targetConnStrings->safeSourcePGURI.pguri);
 
-	if (!copydb_fetch_schema_and_prepare_specs(targetSpecs))
+	if (!copydb_fetch_schema_and_prepare_specs_with_settings(targetSpecs,
+															 compareSchemaSettings))
 	{
-		log_fatal("Failed to retrieve source database schema, "
+		log_fatal("Failed to retrieve target database schema, "
 				  "see above for details.");
 		return false;
 	}
 
 	return true;
+}
+
+
+/* Stored original rules must be restored before either database expands them. */
+static bool
+compare_prepare_filters(CopyDataSpec *copySpecs, JSON_Value **filtersJson)
+{
+	if (!catalog_init_from_specs(copySpecs))
+	{
+		return false;
+	}
+
+	const char *stored = copySpecs->catalogs.source.setup.filters;
+
+	if (stored == NULL)
+	{
+		*filtersJson = json_value_init_object();
+
+		if (*filtersJson == NULL || !filters_as_json(&(copySpecs->filters), *filtersJson))
+		{
+			log_error("Failed to preserve comparison filter rules");
+			return false;
+		}
+	}
+	else
+	{
+		*filtersJson = json_parse_string(stored);
+
+		if (*filtersJson == NULL)
+		{
+			log_error("Failed to parse stored comparison filter rules");
+			return false;
+		}
+	}
+
+	return filters_from_json(&(copySpecs->filters), *filtersJson);
+}
+
+
+static bool
+compare_close_catalogs(CopyDataSpec *specs)
+{
+	bool sourceClosed = catalog_close(&(specs->catalogs.source));
+	bool filterClosed = catalog_close(&(specs->catalogs.filter));
+	bool targetClosed = catalog_close(&(specs->catalogs.target));
+
+	return sourceClosed && filterClosed && targetClosed;
+}
+
+
+static bool
+compare_open_catalog_session(PGSQL *pgsql, char *pguri, ConnectionType connectionType)
+{
+	return pgsql_init(pgsql, pguri, connectionType) &&
+		   pgsql_begin(pgsql) &&
+		   pgsql_set_transaction(pgsql, ISOLATION_REPEATABLE_READ, true, false) &&
+		   pgsql_execute(pgsql, "SET LOCAL search_path = pg_catalog") &&
+		   pgsql_execute(pgsql, "SET LOCAL quote_all_identifiers = off") &&
+		   pgsql_execute(pgsql, "SET LOCAL standard_conforming_strings = on") &&
+		   pgsql_execute(pgsql, "SET LOCAL extra_float_digits = 3") &&
+		   pgsql_execute(pgsql, "SET LOCAL IntervalStyle = postgres") &&
+		   pgsql_execute(pgsql, "SET LOCAL bytea_output = hex") &&
+		   pgsql_execute(pgsql, "SET LOCAL TimeZone = 'UTC'") &&
+		   pgsql_execute(pgsql, "SET LOCAL DateStyle = 'ISO, YMD'");
+}
+
+
+typedef struct CompareChecksumOid
+{
+	uint32_t oid;
+	UT_hash_handle hh;
+} CompareChecksumOid;
+
+
+typedef struct CompareChecksumContext
+{
+	char sqlstate[SQLSTATE_LENGTH];
+	CompareChecksumOid *oids;
+	CompareChecksumOid *array;
+	bool parsedOk;
+} CompareChecksumContext;
+
+
+/* A cached name must still resolve to the object the checksum worker selected. */
+static bool
+compare_checksum_inventory(PGSQL *pgsql, DatabaseCatalog *catalog,
+						   const ComparePartitionArray *partitions)
+{
+	JSON_Value *selection = json_value_init_array();
+	char *selectionText = NULL;
+	CompareChecksumContext context = { 0 };
+	bool success = false;
+
+	if (selection == NULL ||
+		!catalog_iter_s_table(catalog, json_value_get_array(selection),
+							  &compare_checksum_selection_hook))
+	{
+		log_error("Failed to read cached checksum selection");
+		goto cleanup;
+	}
+
+	selectionText = json_serialize_to_string(selection);
+	if (selectionText == NULL)
+	{
+		log_error("Failed to serialize cached checksum selection");
+		goto cleanup;
+	}
+
+	const char *sql =
+		"SELECT cached.oid FROM json_to_recordset($1::json) "
+		"AS cached(oid oid, qname text) "
+		"WHERE pg_catalog.to_regclass(cached.qname)::oid = cached.oid";
+	Oid paramTypes[1] = { TEXTOID };
+	const char *paramValues[1] = { selectionText };
+
+	if (!pgsql_execute_with_params(pgsql, sql, 1, paramTypes, paramValues,
+								   &context, &compare_checksum_oids) ||
+		!context.parsedOk)
+	{
+		log_error("Failed to validate cached checksum relation identities");
+		goto cleanup;
+	}
+
+	for (int index = 0; index < partitions->count; index++)
+	{
+		const ComparePartition *partition = &(partitions->array[index]);
+
+		if (!partition->eligible || partition->relkind != 'r' ||
+			IS_EMPTY_STRING_BUFFER(partition->parentQName))
+		{
+			continue;
+		}
+
+		CompareChecksumOid *selected = NULL;
+		HASH_FIND(hh, context.oids, &(partition->oid), sizeof(partition->oid), selected);
+		if (selected == NULL)
+		{
+			log_error("Partition topology mismatch for %s: "
+					  "selected leaf is missing from checksum inventory",
+					  partition->qname);
+			goto cleanup;
+		}
+	}
+
+	success = true;
+
+cleanup:
+	HASH_CLEAR(hh, context.oids);
+	free(context.array);
+	json_free_serialized_string(selectionText);
+	json_value_free(selection);
+	return success;
+}
+
+
+static bool
+compare_checksum_selection_hook(void *ctx, SourceTable *table)
+{
+	JSON_Array *selection = (JSON_Array *) ctx;
+	JSON_Value *entry = json_value_init_object();
+	JSON_Object *object = json_value_get_object(entry);
+
+	if (entry == NULL ||
+		json_object_set_number(object, "oid", table->oid) != JSONSuccess ||
+		json_object_set_string(object, "qname", table->qname) != JSONSuccess ||
+		json_array_append_value(selection, entry) != JSONSuccess)
+	{
+		json_value_free(entry);
+		log_error("Failed to encode cached checksum relation identity");
+		return false;
+	}
+
+	return true;
+}
+
+
+static void
+compare_checksum_oids(void *ctx, PGresult *result)
+{
+	CompareChecksumContext *context = (CompareChecksumContext *) ctx;
+	int count = PQntuples(result);
+
+	if (PQnfields(result) != 1)
+	{
+		log_error("Checksum identity query returned %d columns, expected 1",
+				  PQnfields(result));
+		return;
+	}
+
+	if (count > 0)
+	{
+		context->array = calloc(count, sizeof(*context->array));
+		if (context->array == NULL)
+		{
+			log_error("Failed to allocate checksum relation identities");
+			return;
+		}
+	}
+
+	for (int row = 0; row < count; row++)
+	{
+		CompareChecksumOid *entry = &(context->array[row]);
+		if (PQgetisnull(result, row, 0) ||
+			!stringToUInt32(PQgetvalue(result, row, 0), &(entry->oid)) ||
+			entry->oid == 0)
+		{
+			log_error("Invalid checksum relation OID");
+			return;
+		}
+
+		HASH_ADD(hh, context->oids, oid, sizeof(entry->oid), entry);
+	}
+
+	context->parsedOk = true;
+}
+
+
+/*
+ * Use current catalog reads without changing any imported snapshot transaction.
+ */
+static bool
+compare_read_partitions(CopyDataSpec *specs,
+						ConnectionType connectionType,
+						const ComparePartitionArray *sourcePartitions,
+						ComparePartitionArray *partitions)
+{
+	PGSQL pgsql = { 0 };
+	DatabaseCatalog *catalog = &(specs->catalogs.source);
+	bool success = false;
+
+	if (!compare_open_catalog_session(&pgsql, specs->connStrings.source_pguri,
+									  connectionType))
+	{
+		goto cleanup;
+	}
+
+	/* A reused clone catalog may contain namespace OIDs from an older schema. */
+	if (!catalog_execute(catalog, "DELETE FROM s_namespace") ||
+		!schema_list_schemas(&pgsql, &(specs->filters), catalog) ||
+		!schema_list_compare_partitions(&pgsql, &(specs->filters), catalog,
+										sourcePartitions, partitions))
+	{
+		goto cleanup;
+	}
+
+	if (sourcePartitions == NULL && specs->section == DATA_SECTION_TABLE_DATA &&
+		!compare_checksum_inventory(&pgsql, catalog, partitions))
+	{
+		goto cleanup;
+	}
+
+	if (!pgsql_commit(&pgsql))
+	{
+		goto cleanup;
+	}
+
+	success = true;
+
+cleanup:
+	pgsql_finish(&pgsql);
+	return success;
+}
+
+
+static bool
+compare_partition_topology(CopyDataSpec *sourceSpecs, CopyDataSpec *targetSpecs)
+{
+	ComparePartitionArray source = { 0 };
+	ComparePartitionArray target = { 0 };
+	bool success = false;
+
+	if (!compare_read_partitions(sourceSpecs, PGSQL_CONN_SOURCE, NULL, &source) ||
+		!compare_read_partitions(targetSpecs, PGSQL_CONN_TARGET, &source, &target))
+	{
+		goto cleanup;
+	}
+
+	int s = 0;
+	int t = 0;
+
+	while (s < source.count || t < target.count)
+	{
+		ComparePartition *src = s < source.count ? &(source.array[s]) : NULL;
+		ComparePartition *dst = t < target.count ? &(target.array[t]) : NULL;
+		int order = src == NULL ? 1 : dst == NULL ? -1
+					: strcmp(src->qname, dst->qname);
+		bool sourcePartition = src != NULL && order <= 0 &&
+							   (src->relkind == 'p' || !IS_EMPTY_STRING_BUFFER(
+									src->parentQName));
+		bool targetPartition = dst != NULL && order >= 0 &&
+							   (dst->relkind == 'p' || !IS_EMPTY_STRING_BUFFER(
+									dst->parentQName));
+
+		/* Flat endpoints retain the ordinary table comparator's existing scope. */
+		if (!sourcePartition && !targetPartition)
+		{
+			if (order <= 0)
+			{
+				s++;
+			}
+			if (order >= 0)
+			{
+				t++;
+			}
+			continue;
+		}
+
+		if ((sourcePartition && src->eligible && src->relkind == 'f') ||
+			(targetPartition && dst->eligible && dst->relkind == 'f'))
+		{
+			log_error("Partition topology mismatch for %s: "
+					  "selected foreign partition is unsupported",
+					  sourcePartition && src->eligible && src->relkind == 'f'
+					  ? src->qname : dst->qname);
+			goto cleanup;
+		}
+
+		if (order < 0)
+		{
+			log_error("Partition topology mismatch for %s: "
+					  "relation is missing on target", src->qname);
+			goto cleanup;
+		}
+		if (order > 0)
+		{
+			log_error("Partition topology mismatch for %s: "
+					  "extra relation on target", dst->qname);
+			goto cleanup;
+		}
+
+		const char *reason = NULL;
+
+		if (src->relkind != dst->relkind)
+		{
+			reason = "relation kind differs";
+		}
+		else if (!streq(src->parentQName, dst->parentQName))
+		{
+			reason = "immediate partition parent differs";
+		}
+		else if (src->strategy != dst->strategy)
+		{
+			reason = "partition strategy differs";
+		}
+		else if (!streq(src->partkey, dst->partkey))
+		{
+			reason = "partition key differs";
+		}
+		else if (!streq(src->bound, dst->bound))
+		{
+			reason = "partition bounds differ";
+		}
+
+		if (reason != NULL)
+		{
+			log_error("Partition topology mismatch for %s: %s", src->qname, reason);
+			goto cleanup;
+		}
+
+		s++;
+		t++;
+	}
+
+	success = true;
+
+cleanup:
+	schema_free_compare_partitions(&source);
+	schema_free_compare_partitions(&target);
+	return success;
 }
 
 

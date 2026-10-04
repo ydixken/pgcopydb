@@ -98,6 +98,14 @@ pgcopydb_sql_list_source_tables(const char **sql)
 
 
 bool
+pgcopydb_sql_list_compare_partitions(const char **sql)
+{
+	*sql = sql_list_compare_partitions;
+	return true;
+}
+
+
+bool
 pgcopydb_sql_list_filtered_not_incl_tables(const char **sql)
 {
 	*sql = sql_list_filtered_not_incl_tables;

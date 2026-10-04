@@ -28,16 +28,16 @@ static bool copydb_fetch_source_schema(CopyDataSpec *specs, PGSQL *src);
 static bool copydb_prepare_table_specs_hook(void *ctx, SourceTable *source);
 
 
-/*
- * copydb_fetch_schema_and_prepare_specs fetches the list of tables from the
- * source database, and then fetches the list of objects that are filtered-out
- * (schemas, tables, indexes, constraints, then objects that depend on those).
- *
- * Then the per-table CopyTableDataSpec are initialized in preparation of the
- * rest of the work.
- */
 bool
 copydb_fetch_schema_and_prepare_specs(CopyDataSpec *specs)
+{
+	return copydb_fetch_schema_and_prepare_specs_with_settings(specs, NULL);
+}
+
+
+/* Comparison discovery needs stable quoting without changing clone sessions. */
+bool
+copydb_fetch_schema_and_prepare_specs_with_settings(CopyDataSpec *specs, GUC *settings)
 {
 	if (!copydb_fetch_source_catalog_setup(specs))
 	{
@@ -124,6 +124,15 @@ copydb_fetch_schema_and_prepare_specs(CopyDataSpec *specs)
 			/* errors have already been logged */
 			return false;
 		}
+	}
+
+	if (settings != NULL && !pgsql_set_gucs(src, settings))
+	{
+		if (src == &pgsql)
+		{
+			pgsql_finish(src);
+		}
+		return false;
 	}
 
 	/* make sure we receive only one row at a time in-memory */

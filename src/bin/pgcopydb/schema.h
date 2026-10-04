@@ -214,6 +214,27 @@ typedef struct SourceTableArray
 } SourceTableArray;
 
 
+/* Comparator inventory owns its strings and never enters the copy catalog. */
+typedef struct ComparePartition
+{
+	uint32_t oid;              /* Instance-local checksum coverage, never cross-database equality. */
+	char *qname;
+	char relkind;
+	char *parentQName;
+	char strategy;
+	char *partkey;
+	char *bound;
+	bool eligible;
+} ComparePartition;
+
+
+typedef struct ComparePartitionArray
+{
+	int count;
+	ComparePartition *array;
+} ComparePartitionArray;
+
+
 /*
  * SourceSequence caches the information we need about all the sequences found
  * in the source database.
@@ -449,6 +470,15 @@ bool schema_list_ordinary_tables(PGSQL *pgsql,
 								 SourceFilters *filters,
 								 bool estimateTableSizes,
 								 DatabaseCatalog *catalog);
+
+/* The caller owns canonical read sessions and frees both resulting inventories. */
+bool schema_list_compare_partitions(PGSQL *pgsql,
+									SourceFilters *filters,
+									DatabaseCatalog *namespaceCatalog,
+									const ComparePartitionArray *sourcePartitions,
+									ComparePartitionArray *partitions);
+
+void schema_free_compare_partitions(ComparePartitionArray *partitions);
 
 bool schema_list_partitions(PGSQL *pgsql,
 							DatabaseCatalog *catalog,
