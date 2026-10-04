@@ -1210,7 +1210,13 @@ compare_fetch_target_schema(CopyDataSpec *copySpecs,
 static bool
 compare_prepare_filters(CopyDataSpec *copySpecs, JSON_Value **filtersJson)
 {
-	if (!catalog_init_from_specs(copySpecs))
+	/* Filter adoption does not depend on the clone's COPY partition settings. */
+	CopyDataSection section = copySpecs->section;
+	copySpecs->section = DATA_SECTION_NAMESPACES;
+	bool initialized = catalog_init_from_specs(copySpecs);
+	copySpecs->section = section;
+
+	if (!initialized)
 	{
 		return false;
 	}
@@ -1677,6 +1683,13 @@ compare_one_database_schema(CopyDataSpec *parentSpecs, const char *datname)
 		}
 		return false;
 	}
+
+	strlcpy(dbSpecs.catalogs.source.dbfile, dbSpecs.cfPaths.sdbfile,
+			sizeof(dbSpecs.catalogs.source.dbfile));
+	strlcpy(dbSpecs.catalogs.filter.dbfile, dbSpecs.cfPaths.fdbfile,
+			sizeof(dbSpecs.catalogs.filter.dbfile));
+	strlcpy(dbSpecs.catalogs.target.dbfile, dbSpecs.cfPaths.tdbfile,
+			sizeof(dbSpecs.catalogs.target.dbfile));
 
 	bool ok = compare_schemas(&dbSpecs);
 
