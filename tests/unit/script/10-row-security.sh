@@ -37,8 +37,10 @@ expect_rls_error()
 {
     local label=$1 status=$2 log=$3
 
-    if [ "$status" -eq 0 ] || ! grep -qF "$rls_error" "$log"; then
-        echo "${label}: expected the row-level security error, got exit ${status}" >&2
+    if [ "$status" -eq 0 ] ||
+        ! awk -v e="$rls_error" 'index($0, "[SOURCE ") && index($0, e) { f = 1 }
+            END { exit !f }' "$log"; then
+        echo "${label}: expected the source row-level security error, got exit ${status}" >&2
         cat "$log" >&2
         failures=$((failures + 1))
         return 1
@@ -69,11 +71,16 @@ expect_rls_error clone "$status" "$workroot/clone.log" ||
     psql -XAt -d "${PGCOPYDB_TARGET_PGURI%/*}/${fixture_db}" \
         -c "SELECT 'clone: target docs holds ' || count(*) || ' of 30 rows' FROM docs" >&2
 
-# Give the target all 30 rows behind the same policy; superusers bypass RLS.
+# Load the target as superuser, which bypasses RLS, then leave it the rows the
+# source policy shows with no policy on the owner: compare data can then only
+# agree if the source session reads through its policy.
 psql -Xq -v ON_ERROR_STOP=1 -d "$PGCOPYDB_TARGET_PGURI" -c "DROP DATABASE ${fixture_db}"
 create_fixture_db "$PGCOPYDB_TARGET_PGURI"
 pg_dump "${PGCOPYDB_SOURCE_PGURI%/*}/${fixture_db}" |
     psql -Xq -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI%/*}/${fixture_db}" >/dev/null
+psql -Xq -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI%/*}/${fixture_db}" \
+    -c "DELETE FROM docs WHERE tenant <> 'tenant0'" \
+    -c "ALTER TABLE docs NO FORCE ROW LEVEL SECURITY" >/dev/null
 
 status=0
 pgcopydb compare data --source "$source_uri" --target "$target_uri" \
