@@ -2429,6 +2429,17 @@ stream_write_delete(ReplayDBStmt *replayStmt, LogicalMessageDelete *delete)
 		int rowCount = old->values.count;
 		int colCount = old->attributes.count;
 
+		/* LIMIT 1 over a batch would delete one row and drop the rest */
+		if (delete->rowsMayRepeat && rowCount > 1)
+		{
+			log_error("BUG: DELETE on %s.%s without a key carries %d rows, "
+					  "expected 1",
+					  delete->table.nspname,
+					  delete->table.relname,
+					  rowCount);
+			return false;
+		}
+
 		PQExpBuffer buf = createPQExpBuffer();
 		JSON_Value *js = json_value_init_array();
 		JSON_Array *jsArray = json_value_get_array(js);
