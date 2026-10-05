@@ -437,9 +437,14 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 		return false;
 	}
 
-	if (!pgsql_begin(&src))
+	/* see srcSettings; row_security exists from Postgres 9.5 */
+	if (!pgsql_begin(&src) ||
+		!pgsql_server_version(&src) ||
+		(src.pgversion_num >= 90500 &&
+		 !pgsql_execute(&src, "SET LOCAL row_security TO off")))
 	{
 		/* errors have already been logged */
+		(void) pgsql_finish(&src);
 		return false;
 	}
 
@@ -450,10 +455,12 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 		return false;
 	}
 
-	if (!pgsql_begin(&dst))
+	if (!pgsql_begin(&dst) ||
+		!pgsql_execute(&dst, "SET LOCAL row_security TO off"))
 	{
 		/* errors have already been logged */
 		(void) pgsql_finish(&src);
+		(void) pgsql_finish(&dst);
 		return false;
 	}
 

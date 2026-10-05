@@ -34,6 +34,9 @@ GUC srcSettings95[] = {
 GUC srcSettings[] = {
 	COMMON_GUC_SETTINGS,
 	{ "idle_in_transaction_session_timeout", "0" },
+
+	/* like pg_dump: a policy that applies to us errors out, never filters */
+	{ "row_security", "off" },
 	{ NULL, NULL },
 };
 
@@ -49,6 +52,7 @@ GUC dstSettings[] = {
 	{ "statement_timeout", "0" },
 	{ "lock_timeout", "0" },
 	{ "idle_in_transaction_session_timeout", "0" },
+	{ "row_security", "off" },
 	{ NULL, NULL },
 };
 

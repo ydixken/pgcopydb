@@ -38,6 +38,7 @@ GUC applySettingsSync[] = {
 	COMMON_GUC_SETTINGS,
 	{ "synchronous_commit", "on" },
 	{ "session_replication_role", "'replica'" },
+	{ "row_security", "off" },
 	{ NULL, NULL },
 };
 
@@ -45,6 +46,7 @@ GUC applySettings[] = {
 	COMMON_GUC_SETTINGS,
 	{ "synchronous_commit", "off" },
 	{ "session_replication_role", "'replica'" },
+	{ "row_security", "off" },
 	{ NULL, NULL },
 };
 
