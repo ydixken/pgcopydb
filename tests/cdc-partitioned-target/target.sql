@@ -21,3 +21,14 @@ create table partitioned_target.events_a
 
 create table partitioned_target.events_b
     partition of partitioned_target.events for values in (1);
+
+create table partitioned_target.keyless (
+    bucket smallint not null,
+    payload text
+) partition by list (bucket);
+
+create table partitioned_target.keyless_a
+    partition of partitioned_target.keyless for values in (0);
+
+create table partitioned_target.keyless_b
+    partition of partitioned_target.keyless for values in (1);

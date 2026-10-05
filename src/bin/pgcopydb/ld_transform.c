@@ -54,6 +54,9 @@ static bool markGeneratedColumnsFromStatement(GeneratedColumnsCache *cache,
 static bool prepareGeneratedColumnsCache_hook(void *ctx, SourceTable *table);
 
 static bool prepareGeneratedColumnsCache(StreamSpecs *specs);
+static bool prepareKeylessTables(StreamSpecs *specs);
+static void markRowsMayRepeat(StreamContext *privateContext,
+							  LogicalTransactionStatement *stmt);
 
 static GeneratedColumnSet * lookupGeneratedColumnsForTable(GeneratedColumnsCache *cache,
 														   const char *nspname,
@@ -152,6 +155,12 @@ stream_transform_context_init(StreamSpecs *specs)
 	 */
 
 	if (!prepareGeneratedColumnsCache(specs))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!prepareKeylessTables(specs))
 	{
 		/* errors have already been logged */
 		return false;
@@ -371,6 +380,7 @@ stream_transform_prepare_message(StreamSpecs *specs,
 				log_error("pgoutput DML received outside of transaction");
 				return false;
 			}
+			markRowsMayRepeat(privateContext, pgstmt);
 			(void) streamLogicalTransactionAppendStatement(
 				&(mesg->command.tx), pgstmt);
 		}
@@ -1425,6 +1435,7 @@ parseMessage(StreamContext *privateContext, char *message, JSON_Value *json)
 				}
 			}
 
+			markRowsMayRepeat(privateContext, stmt);
 			(void) streamLogicalTransactionAppendStatement(txn, stmt);
 
 			break;
@@ -1600,6 +1611,12 @@ canCoalesceLogicalTransactionStatement(LogicalTransaction *txn,
 	{
 		LogicalMessageDelete *lastDelete = &last->stmt.delete;
 		LogicalMessageDelete *newDelete = &new->stmt.delete;
+
+		/* an IN list cannot count duplicates: one statement per row */
+		if (newDelete->rowsMayRepeat)
+		{
+			return false;
+		}
 
 		/* Both must target the same relation */
 		if (!streq(lastDelete->table.nspname, newDelete->table.nspname) ||
@@ -2268,7 +2285,19 @@ stream_write_update(bool replayNoOpUpdates,
 			}
 		}
 
-		appendPQExpBufferStr(buf, " WHERE ");
+		/* ctid is unique per partition only, hence the tableoid */
+		if (update->rowsMayRepeat)
+		{
+			appendPQExpBuffer(buf,
+							  " WHERE (tableoid, ctid) = "
+							  "(SELECT tableoid, ctid FROM %s.%s WHERE ",
+							  update->table.nspname,
+							  update->table.relname);
+		}
+		else
+		{
+			appendPQExpBufferStr(buf, " WHERE ");
+		}
 
 		for (int r = 0; r < old->values.count; r++)
 		{
@@ -2315,6 +2344,11 @@ stream_write_update(bool replayNoOpUpdates,
 					}
 				}
 			}
+		}
+
+		if (update->rowsMayRepeat)
+		{
+			appendPQExpBufferStr(buf, " LIMIT 1)");
 		}
 
 		if (PQExpBufferBroken(buf))
@@ -2402,6 +2436,15 @@ stream_write_delete(ReplayDBStmt *replayStmt, LogicalMessageDelete *delete)
 		appendPQExpBuffer(buf, "DELETE FROM %s.%s WHERE ",
 						  delete->table.nspname,
 						  delete->table.relname);
+
+		if (delete->rowsMayRepeat)
+		{
+			appendPQExpBuffer(buf,
+							  "(tableoid, ctid) = "
+							  "(SELECT tableoid, ctid FROM %s.%s WHERE ",
+							  delete->table.nspname,
+							  delete->table.relname);
+		}
 
 		if (rowCount == 1)
 		{
@@ -2514,6 +2557,11 @@ stream_write_delete(ReplayDBStmt *replayStmt, LogicalMessageDelete *delete)
 
 				appendPQExpBuffer(buf, ")");
 			}
+		}
+
+		if (delete->rowsMayRepeat)
+		{
+			appendPQExpBufferStr(buf, " LIMIT 1)");
 		}
 
 		if (PQExpBufferBroken(buf))
@@ -2999,4 +3047,91 @@ markGeneratedColumnsFromStatement(GeneratedColumnsCache *cache,
 	}
 
 	return true;
+}
+
+
+/*
+ * prepareKeylessTables_hook adds a table that has neither a primary key nor a
+ * replica identity index to the keyless tables set.
+ */
+static bool
+prepareKeylessTables_hook(void *ctx, SourceTable *table)
+{
+	StreamContext *privateContext = (StreamContext *) ctx;
+
+	KeylessTable *item = (KeylessTable *) calloc(1, sizeof(KeylessTable));
+
+	if (item == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	NORMALIZED_PG_NAMEDATA_COPY(item->nspname, table->nspname);
+	NORMALIZED_PG_NAMEDATA_COPY(item->relname, table->relname);
+
+	/* the key spans the adjacent nspname and relname arrays */
+	HASH_ADD(hh, privateContext->keylessTables, nspname,
+			 sizeof(item->nspname) + sizeof(item->relname), item);
+
+	return true;
+}
+
+
+/*
+ * prepareKeylessTables fills-in the set of tables where identical rows are
+ * legal, so that their UPDATE and DELETE statements touch one row each.
+ */
+static bool
+prepareKeylessTables(StreamSpecs *specs)
+{
+	if (!catalog_iter_s_table_keyless(specs->sourceDB,
+									  &(specs->private),
+									  &prepareKeylessTables_hook))
+	{
+		log_error("Failed to prepare the set of tables without a key, "
+				  "see above for details");
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * markRowsMayRepeat flags an UPDATE or DELETE on a keyless table. A WHERE
+ * clause over all of its columns matches every identical row, while
+ * PostgreSQL's own apply worker changes exactly one.
+ */
+static void
+markRowsMayRepeat(StreamContext *privateContext, LogicalTransactionStatement *stmt)
+{
+	LogicalMessageRelation *table = NULL;
+	bool *rowsMayRepeat = NULL;
+
+	if (stmt->action == STREAM_ACTION_UPDATE)
+	{
+		table = &(stmt->stmt.update.table);
+		rowsMayRepeat = &(stmt->stmt.update.rowsMayRepeat);
+	}
+	else if (stmt->action == STREAM_ACTION_DELETE)
+	{
+		table = &(stmt->stmt.delete.table);
+		rowsMayRepeat = &(stmt->stmt.delete.rowsMayRepeat);
+	}
+	else
+	{
+		return;
+	}
+
+	KeylessTable key = { 0 };
+	KeylessTable *item = NULL;
+
+	NORMALIZED_PG_NAMEDATA_COPY(key.nspname, table->nspname);
+	NORMALIZED_PG_NAMEDATA_COPY(key.relname, table->relname);
+
+	HASH_FIND(hh, privateContext->keylessTables, key.nspname,
+			  sizeof(key.nspname) + sizeof(key.relname), item);
+
+	*rowsMayRepeat = item != NULL;
 }

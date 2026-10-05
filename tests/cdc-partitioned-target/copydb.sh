@@ -76,6 +76,16 @@ if [ "${after_inserts_a}" != "3" ] || [ "${after_inserts_b}" != "2" ]; then
     exit 1
 fi
 
+# The keyless DELETE must not remove the row at the same ctid in the other
+# partition.
+keyless=$(psql -At -d "${PGCOPYDB_TARGET_PGURI}" \
+               -c 'select bucket, payload from partitioned_target.keyless')
+
+if [ "${keyless}" != "1|b" ]; then
+    echo "FAIL: keyless rows after CDC delete: '${keyless}'; expected '1|b'"
+    exit 1
+fi
+
 # Phase 2: drive a TRUNCATE through CDC. Without fix #2 catchup errors
 # here; with the fix the target ends up empty.
 psql -a -d "${PGCOPYDB_SOURCE_PGURI}" -f /usr/src/pgcopydb/dml-truncate.sql

@@ -124,6 +124,7 @@ jobs:
           - cdc-partitioned-target
           - cdc-matview
           - cdc-replica-identity-index
+          - cdc-replica-identity-full
           - cdc-file-rotation
           - cdc-pgoutput
           - cdc-keepalive

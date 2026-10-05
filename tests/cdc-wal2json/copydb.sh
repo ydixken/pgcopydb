@@ -126,5 +126,18 @@ psql -AtqX -d ${PGCOPYDB_TARGET_PGURI} \
      > /tmp/tgt_float8.txt
 diff /tmp/src_float8.txt /tmp/tgt_float8.txt
 
+#
+# REPLICA IDENTITY FULL keyless tables: each change touched one of several
+# identical rows. Every table keeps rows on the source.
+#
+for t in ri_full_del ri_full_upd ri_full_nulldup ri_full_three ri_full_keyed
+do
+    sql="select * from ${t} order by 1, 2"
+    psql -AtqX -d ${PGCOPYDB_SOURCE_PGURI} -c "${sql}" > /tmp/src_${t}.txt
+    psql -AtqX -d ${PGCOPYDB_TARGET_PGURI} -c "${sql}" > /tmp/tgt_${t}.txt
+    test -s /tmp/src_${t}.txt
+    diff /tmp/src_${t}.txt /tmp/tgt_${t}.txt
+done
+
 # cleanup
 pgcopydb stream cleanup

@@ -20,3 +20,16 @@ insert into partitioned_target.events (id, bucket, payload)
      values (1, 0, 'a'),
             (2, 1, 'b'),
             (3, 0, 'c');
+
+-- Keyless REPLICA IDENTITY FULL table: a replayed change finds its row by
+-- (tableoid, ctid), because ctid alone repeats across the target partitions.
+create table partitioned_target.keyless (
+    bucket smallint not null,
+    payload text
+);
+
+alter table partitioned_target.keyless replica identity full;
+
+insert into partitioned_target.keyless (bucket, payload)
+     values (0, 'a'),
+            (1, 'b');
