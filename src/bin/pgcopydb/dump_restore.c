@@ -33,6 +33,8 @@ static bool copydb_copy_database_properties_hook(void *ctx,
 static bool copydb_write_restore_list_hook(void *ctx,
 										   ArchiveContentItem *item);
 
+static bool copydb_restore_replica_identity(CopyDataSpec *specs);
+
 
 /*
  * copydb_objectid_has_been_processed_already returns true when the given
@@ -619,6 +621,13 @@ copydb_target_finalize_schema(CopyDataSpec *specs)
 		return false;
 	}
 
+	if (!copydb_restore_replica_identity(specs))
+	{
+		log_error("Failed to restore REPLICA IDENTITY USING INDEX, "
+				  "see above for details");
+		return false;
+	}
+
 	/*
 	 * Some extensions such as timescaledb need a post restore step.
 	 */
@@ -636,6 +645,59 @@ copydb_target_finalize_schema(CopyDataSpec *specs)
 	}
 
 	return true;
+}
+
+
+/*
+ * pg_dump attaches REPLICA IDENTITY USING INDEX to the INDEX or CONSTRAINT
+ * archive entry, which we skip when we built that index ourselves.
+ */
+static bool
+copydb_restore_replica_identity_hook(void *ctx, SourceIndex *index)
+{
+	PGSQL *dst = (PGSQL *) ctx;
+
+	if (!index->isReplicaIdentity)
+	{
+		return true;
+	}
+
+	char sql[BUFSIZE] = { 0 };
+
+	sformat(sql, sizeof(sql),
+			"ALTER TABLE ONLY %s REPLICA IDENTITY USING INDEX %s",
+			index->tableQname,
+			index->indexRelname);
+
+	log_notice("%s", sql);
+
+	return pgsql_execute(dst, sql);
+}
+
+
+/*
+ * copydb_restore_replica_identity runs once after post-data rather than in the
+ * index workers, because the ALTER TABLE takes an AccessExclusiveLock. It is
+ * idempotent, so a resumed run may repeat it.
+ */
+static bool
+copydb_restore_replica_identity(CopyDataSpec *specs)
+{
+	PGSQL dst = { 0 };
+
+	if (!pgsql_init(&dst, specs->connStrings.target_pguri, PGSQL_CONN_TARGET))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	bool success = catalog_iter_s_index(&(specs->catalogs.source),
+										&dst,
+										&copydb_restore_replica_identity_hook);
+
+	(void) pgsql_finish(&dst);
+
+	return success;
 }
 
 

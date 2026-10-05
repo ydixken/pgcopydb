@@ -33,6 +33,26 @@ pgcopydb clone
 kill -TERM ${COPROC_PID}
 wait ${COPROC_PID}
 
+# the clone must keep REPLICA IDENTITY USING INDEX, on the same index
+ri_sql="select c.relname, c.relreplident, coalesce(i.relname, '-')
+          from pg_class c
+               left join pg_index x on x.indrelid = c.oid and x.indisreplident
+               left join pg_class i on i.oid = x.indexrelid
+         where c.relnamespace = 'public'::regnamespace and c.relkind = 'r'
+      order by c.relname"
+
+cat > /tmp/ri.expected <<EOF
+event_matches|i|event_matches_ri
+event_matches_pk|i|event_matches_pk_pkey
+event_matches_uc|i|event_matches_uc_id_key
+EOF
+
+psql -At -F '|' -d ${PGCOPYDB_SOURCE_PGURI} -c "${ri_sql}" > /tmp/ri.s.out
+psql -At -F '|' -d ${PGCOPYDB_TARGET_PGURI} -c "${ri_sql}" > /tmp/ri.t.out
+
+diff /tmp/ri.expected /tmp/ri.s.out
+diff /tmp/ri.expected /tmp/ri.t.out
+
 # produce CDC traffic on the source: INSERT, UPDATE, DELETE
 psql -d ${PGCOPYDB_SOURCE_PGURI} -f /usr/src/pgcopydb/dml.sql
 
@@ -63,3 +83,22 @@ psql -At -F '|' -d ${PGCOPYDB_SOURCE_PGURI} -c "${sql}" > /tmp/s.out
 psql -At -F '|' -d ${PGCOPYDB_TARGET_PGURI} -c "${sql}" > /tmp/t.out
 
 diff /tmp/s.out /tmp/t.out
+
+# A work directory written before s_index.isreplident existed must still
+# resume, as when a failed clone is resumed by an upgraded pgcopydb.
+olddir=/tmp/pgcopydb-old
+resume_pguri=postgres://postgres:h4ckm3@target/resume
+
+psql -d ${PGCOPYDB_TARGET_PGURI} -c 'create database resume'
+
+# the catalogs record the target, and --resume must find the same one
+PGCOPYDB_TARGET_PGURI="${resume_pguri}" pgcopydb dump schema --dir "${olddir}"
+
+for db in source filter target
+do
+    sqlite3 -init /dev/null "${olddir}/schema/${db}.db" \
+            'alter table s_index drop column isreplident'
+done
+
+pgcopydb clone --dir "${olddir}" --target "${resume_pguri}" \
+         --resume --not-consistent --notice

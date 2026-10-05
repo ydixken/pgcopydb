@@ -20,6 +20,23 @@ create table event_matches
 create unique index event_matches_ri on event_matches (id, created_at);
 alter table event_matches replica identity using index event_matches_ri;
 
+-- pg_dump attaches these to a CONSTRAINT entry rather than an INDEX entry.
+create table event_matches_pk
+(
+    id   bigserial not null primary key,
+    name text      not null
+);
+
+alter table event_matches_pk replica identity using index event_matches_pk_pkey;
+
+create table event_matches_uc
+(
+    id   bigint not null unique,
+    name text   not null
+);
+
+alter table event_matches_uc replica identity using index event_matches_uc_id_key;
+
 commit;
 
 -- Seed rows that exist before the clone snapshot.
