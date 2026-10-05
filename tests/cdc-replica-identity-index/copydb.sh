@@ -33,6 +33,26 @@ pgcopydb clone
 kill -TERM ${COPROC_PID}
 wait ${COPROC_PID}
 
+# the clone must keep REPLICA IDENTITY USING INDEX, on the same index
+ri_sql="select c.relname, c.relreplident, coalesce(i.relname, '-')
+          from pg_class c
+               left join pg_index x on x.indrelid = c.oid and x.indisreplident
+               left join pg_class i on i.oid = x.indexrelid
+         where c.relnamespace = 'public'::regnamespace and c.relkind = 'r'
+      order by c.relname"
+
+cat > /tmp/ri.expected <<EOF
+event_matches|i|event_matches_ri
+event_matches_pk|i|event_matches_pk_pkey
+event_matches_uc|i|event_matches_uc_id_key
+EOF
+
+psql -At -F '|' -d ${PGCOPYDB_SOURCE_PGURI} -c "${ri_sql}" > /tmp/ri.s.out
+psql -At -F '|' -d ${PGCOPYDB_TARGET_PGURI} -c "${ri_sql}" > /tmp/ri.t.out
+
+diff /tmp/ri.expected /tmp/ri.s.out
+diff /tmp/ri.expected /tmp/ri.t.out
+
 # produce CDC traffic on the source: INSERT, UPDATE, DELETE
 psql -d ${PGCOPYDB_SOURCE_PGURI} -f /usr/src/pgcopydb/dml.sql
 
