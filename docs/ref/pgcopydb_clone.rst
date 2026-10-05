@@ -169,6 +169,17 @@ non-exclusive list:
 
     __ https://www.postgresql.org/docs/current/extend-extensions.html#EXTEND-EXTENSIONS-CONFIG-TABLES
 
+  - Reading every row of a table whose `row security policies`__ apply to
+    the connecting role. Like ``pg_dump``, pgcopydb sets ``row_security``
+    to ``off``, so such a table makes the data copy and ``pgcopydb compare
+    data`` fail with *query would be affected by row-level security policy*
+    instead of silently skipping the rows the policy hides.
+
+    __ https://www.postgresql.org/docs/current/ddl-rowsecurity.html
+
+    Use a superuser, a role with ``BYPASSRLS``, or the table owner when the
+    table does not use ``FORCE ROW LEVEL SECURITY``.
+
 When using pgcopydb it is possible to split your migration in privileged and
 non-privileged parts, like in the following examples:
 
