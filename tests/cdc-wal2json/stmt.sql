@@ -18,6 +18,12 @@ INSERT INTO "public"."multi_column_table" ("id", "name", "email") overriding sys
 INSERT INTO "public"."float8_precision_test" ("id", "val") overriding system value VALUES ($1, $2), ($3, $4), ($5, $6)
 UPDATE "public"."float8_precision_test" SET "val" = $1 WHERE "id" = $2
 DELETE FROM "public"."float8_precision_test" WHERE "id" = $1
+DELETE FROM "public"."ri_full_del" WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "public"."ri_full_del" WHERE "a" = $1 and "b" = $2 LIMIT 1)
+UPDATE "public"."ri_full_upd" SET "b" = $1 WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "public"."ri_full_upd" WHERE "a" = $2 and "b" = $3 LIMIT 1)
+DELETE FROM "public"."ri_full_nulldup" WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "public"."ri_full_nulldup" WHERE "a" = $1 and "b" IS NULL LIMIT 1)
+DELETE FROM "public"."ri_full_three" WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "public"."ri_full_three" WHERE "a" = $1 and "b" = $2 LIMIT 1)
+UPDATE "public"."ri_full_keyed" SET "b" = $1 WHERE "id" = $2 and "b" = $3
+DELETE FROM "public"."ri_full_keyed" WHERE "id" = $1 and "b" = $2
 TRUNCATE ONLY "Sp1eCial .Char"."source1testing"
 
 INSERT INTO "Sp1eCial .Char"."source1testing" ("s0", "s""1") overriding system value VALUES ($1, $2), ($3, $4), ($5, $6), ($7, $8), ($9, $10)

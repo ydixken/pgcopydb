@@ -13,4 +13,7 @@ insert into partitioned_target.events (id, bucket, payload)
      values (4, 1, 'd'),
             (5, 0, 'e');
 
+-- both keyless rows sit at ctid (0,1) of their own target partition
+delete from partitioned_target.keyless where payload = 'a';
+
 commit;

@@ -156,6 +156,7 @@ typedef struct LogicalMessageInsert
 typedef struct LogicalMessageUpdate
 {
 	LogicalMessageRelation table;
+	bool rowsMayRepeat;             /* no PK or RI index: touch one row */
 	LogicalMessageTupleArray old;   /* {"identity": ...} */
 	LogicalMessageTupleArray new;   /* {"columns": ...} */
 } LogicalMessageUpdate;
@@ -163,6 +164,7 @@ typedef struct LogicalMessageUpdate
 typedef struct LogicalMessageDelete
 {
 	LogicalMessageRelation table;
+	bool rowsMayRepeat;             /* no PK or RI index: touch one row */
 	LogicalMessageTupleArray old;   /* {"identity": ...} */
 } LogicalMessageDelete;
 
@@ -332,6 +334,19 @@ typedef struct GeneratedColumnsCache
 
 
 /*
+ * KeylessTable is a table with neither a primary key nor a replica identity
+ * index, so identical rows are legal. Keyed by (nspname, relname).
+ */
+typedef struct KeylessTable
+{
+	char nspname[PG_NAMEDATALEN];
+	char relname[PG_NAMEDATALEN];
+
+	UT_hash_handle hh;           /* makes this structure hashable */
+} KeylessTable;
+
+
+/*
  * TestDecodingAttrCache caches per-column attributes needed by the
  * test_decoding parser hot path (replica-identity classification of each
  * column on UPDATE messages).
@@ -417,6 +432,9 @@ typedef struct StreamContext
 
 	/* hash table acts as a cache for tables with generated columns */
 	GeneratedColumnsCache *generatedColumnsCache;
+
+	/* tables without PK or RI index: UPDATE and DELETE touch one row */
+	KeylessTable *keylessTables;
 
 	/* per-table cache for the test_decoding parser hot path */
 	TestDecodingTableCache *testDecodingTableCache;

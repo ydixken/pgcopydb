@@ -131,3 +131,17 @@ begin;
 delete from float8_precision_test where id = 2;
 
 commit;
+
+--
+-- REPLICA IDENTITY FULL keyless tables: change one of several identical rows.
+--
+begin;
+
+delete from ri_full_del where ctid = (select ctid from ri_full_del limit 1);
+update ri_full_upd set b = 'y' where ctid = (select ctid from ri_full_upd limit 1);
+delete from ri_full_nulldup where ctid = (select ctid from ri_full_nulldup limit 1);
+delete from ri_full_three where ctid in (select ctid from ri_full_three limit 2);
+update ri_full_keyed set b = 'y' where id = 1;
+delete from ri_full_keyed where id = 2;
+
+commit;
