@@ -83,3 +83,22 @@ psql -At -F '|' -d ${PGCOPYDB_SOURCE_PGURI} -c "${sql}" > /tmp/s.out
 psql -At -F '|' -d ${PGCOPYDB_TARGET_PGURI} -c "${sql}" > /tmp/t.out
 
 diff /tmp/s.out /tmp/t.out
+
+# A work directory written before s_index.isreplident existed must still
+# resume, as when a failed clone is resumed by an upgraded pgcopydb.
+olddir=/tmp/pgcopydb-old
+resume_pguri=postgres://postgres:h4ckm3@target/resume
+
+psql -d ${PGCOPYDB_TARGET_PGURI} -c 'create database resume'
+
+# the catalogs record the target, and --resume must find the same one
+PGCOPYDB_TARGET_PGURI="${resume_pguri}" pgcopydb dump schema --dir "${olddir}"
+
+for db in source filter target
+do
+    sqlite3 -init /dev/null "${olddir}/schema/${db}.db" \
+            'alter table s_index drop column isreplident'
+done
+
+pgcopydb clone --dir "${olddir}" --target "${resume_pguri}" \
+         --resume --not-consistent --notice

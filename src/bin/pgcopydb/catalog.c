@@ -742,6 +742,8 @@ static char *replayDBdropDDLs[] = {
 	"drop table if exists stmt"
 };
 
+static bool catalog_upgrade_schema(DatabaseCatalog *catalog);
+
 
 /*
  * catalog_init_from_specs initializes our internal catalog database file from
@@ -1601,6 +1603,88 @@ catalog_init(DatabaseCatalog *catalog)
 
 		return true;
 	}
+
+	if (!catalog_upgrade_schema(catalog))
+	{
+		/* errors have already been logged */
+		sqlite3_close(catalog->db);
+		catalog->db = NULL;
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * catalog_upgrade_schema adds the columns that a catalog written by an older
+ * pgcopydb lacks, so that --resume works across a pgcopydb upgrade.
+ */
+static bool
+catalog_upgrade_schema(DatabaseCatalog *catalog)
+{
+	if (catalog->type != DATABASE_CATALOG_TYPE_SOURCE &&
+		catalog->type != DATABASE_CATALOG_TYPE_FILTER &&
+		catalog->type != DATABASE_CATALOG_TYPE_TARGET)
+	{
+		return true;
+	}
+
+	char *checkSql =
+		"select exists(select 1 from pragma_table_info('s_index')) "
+		"   and not exists(select 1 from pragma_table_info('s_index') "
+		"                   where name = 'isreplident')";
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	SQLiteQuery query = { 0 };
+
+	if (!catalog_sql_prepare(catalog->db, checkSql, &query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	if (catalog_sql_step(&query) != SQLITE_ROW)
+	{
+		log_error("Failed to check catalog \"%s\" for upgrades: %s",
+				  catalog->dbfile,
+				  sqlite3_errmsg(catalog->db));
+		(void) catalog_sql_finalize(&query);
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	bool addReplIdent = sqlite3_column_int(query.ppStmt, 0) == 1;
+
+	if (!catalog_sql_finalize(&query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	if (addReplIdent)
+	{
+		log_notice("Adding column s_index.isreplident to catalog \"%s\"",
+				   catalog->dbfile);
+
+		if (!catalog_execute(catalog,
+							 "alter table s_index "
+							 "add column isreplident bool default false"))
+		{
+			/* errors have already been logged */
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
+	}
+
+	(void) semaphore_unlock(&(catalog->sema));
 
 	return true;
 }
