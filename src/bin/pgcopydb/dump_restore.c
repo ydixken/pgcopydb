@@ -33,6 +33,8 @@ static bool copydb_copy_database_properties_hook(void *ctx,
 static bool copydb_write_restore_list_hook(void *ctx,
 										   ArchiveContentItem *item);
 
+static bool copydb_restore_replica_identity(CopyDataSpec *specs);
+
 
 /*
  * copydb_objectid_has_been_processed_already returns true when the given
@@ -678,7 +680,7 @@ copydb_restore_replica_identity_hook(void *ctx, SourceIndex *index)
  * index workers, because the ALTER TABLE takes an AccessExclusiveLock. It is
  * idempotent, so a resumed run may repeat it.
  */
-bool
+static bool
 copydb_restore_replica_identity(CopyDataSpec *specs)
 {
 	PGSQL dst = { 0 };

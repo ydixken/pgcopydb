@@ -482,7 +482,6 @@ bool copydb_target_prepare_schema(CopyDataSpec *specs);
 bool copydb_copy_database_properties(CopyDataSpec *specs);
 bool copydb_target_drop_tables(CopyDataSpec *specs);
 bool copydb_target_finalize_schema(CopyDataSpec *specs);
-bool copydb_restore_replica_identity(CopyDataSpec *specs);
 
 bool copydb_objectid_has_been_processed_already(CopyDataSpec *specs,
 												ArchiveContentItem *item);
