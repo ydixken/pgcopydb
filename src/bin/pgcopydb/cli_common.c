@@ -1301,7 +1301,8 @@ cli_copy_db_getopts(int argc, char **argv)
 
 	if (!cli_copydb_is_consistent(&options))
 	{
-		log_fatal("Option --resume requires option --not-consistent");
+		log_fatal("Failed to check options against the previous run, "
+				  "see above for details");
 		exit(EXIT_CODE_BAD_ARGS);
 	}
 

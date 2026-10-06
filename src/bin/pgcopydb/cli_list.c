@@ -2172,7 +2172,8 @@ copydb_init_specs_from_listdboptions(CopyDataSpec *copySpecs,
 
 	if (!cli_copydb_is_consistent(&options))
 	{
-		log_fatal("Option --resume requires option --not-consistent");
+		log_fatal("Failed to check options against the previous run, "
+				  "see above for details");
 		exit(EXIT_CODE_BAD_ARGS);
 	}
 
