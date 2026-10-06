@@ -308,5 +308,15 @@ delete from ri_full_keyed where id = 2;
 delete from ri_full_keyed where id = 3;
 delete from ri_full_nulldel where b is null;
 update ri_full_nullupd set a = 2 where b is null;
+delete from ri_full_allnulldel where a is null;
+update ri_full_allnullupd set b = 'z' where a is null;
+
+do $$
+begin
+    if current_setting('server_version_num')::int >= 180000 then
+        delete from ri_full_virt where b is null;
+    end if;
+end
+$$;
 
 commit;

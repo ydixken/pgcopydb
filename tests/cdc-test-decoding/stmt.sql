@@ -48,3 +48,5 @@ DELETE FROM public.ri_full_keyed WHERE id = $1 and b = $2
 DELETE FROM public.ri_full_keyed WHERE id = $1
 DELETE FROM public.ri_full_nulldel WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM public.ri_full_nulldel WHERE a = $1 and b IS NULL LIMIT 1)
 UPDATE public.ri_full_nullupd SET a = $1 WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM public.ri_full_nullupd WHERE a = $2 and b IS NULL LIMIT 1)
+DELETE FROM public.ri_full_allnulldel WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM public.ri_full_allnulldel WHERE a IS NULL and b IS NULL LIMIT 1)
+UPDATE public.ri_full_allnullupd SET b = $1 WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM public.ri_full_allnullupd WHERE a IS NULL and b IS NULL LIMIT 1)

@@ -1196,10 +1196,12 @@ stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s)
 		JSON_Array *jsArray = json_value_get_array(js);
 		int count = json_array_get_count(jsArray);
 
+		/* an all-NULL old row has no parameters, it must still run */
+		const char **paramValues = NULL;
+
 		if (count > 0)
 		{
-			const char **paramValues =
-				(const char **) calloc(count, sizeof(char *));
+			paramValues = (const char **) calloc(count, sizeof(char *));
 
 			if (paramValues == NULL)
 			{
@@ -1212,20 +1214,19 @@ stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s)
 			{
 				paramValues[i] = json_array_get_string(jsArray, i);
 			}
-
-			if (!pgsql_execute_prepared(applyPgConn, name,
-										count, paramValues,
-										NULL, NULL))
-			{
-				/* errors have already been logged */
-				free(paramValues);
-				json_value_free(js);
-				return false;
-			}
-
-			free(paramValues);
 		}
 
+		if (!pgsql_execute_prepared(applyPgConn, name,
+									count, paramValues,
+									NULL, NULL))
+		{
+			/* errors have already been logged */
+			free(paramValues);
+			json_value_free(js);
+			return false;
+		}
+
+		free(paramValues);
 		json_value_free(js);
 	}
 
@@ -2161,10 +2162,12 @@ stream_apply_sql(StreamApplyContext *context,
 				JSON_Array *jsArray = json_value_get_array(js);
 				int count = json_array_get_count(jsArray);
 
+				/* an all-NULL old row has no parameters, it must still run */
+				const char **paramValues = NULL;
+
 				if (0 < count)
 				{
-					const char **paramValues =
-						(const char **) calloc(count, sizeof(char *));
+					paramValues = (const char **) calloc(count, sizeof(char *));
 
 					if (paramValues == NULL)
 					{
@@ -2176,18 +2179,17 @@ stream_apply_sql(StreamApplyContext *context,
 					{
 						paramValues[i] = json_array_get_string(jsArray, i);
 					}
-
-					if (!pgsql_execute_prepared(applyPgConn, name,
-												count, paramValues,
-												NULL, NULL))
-					{
-						/* errors have already been logged */
-						return false;
-					}
-
-					free(paramValues);
 				}
 
+				if (!pgsql_execute_prepared(applyPgConn, name,
+											count, paramValues,
+											NULL, NULL))
+				{
+					/* errors have already been logged */
+					return false;
+				}
+
+				free(paramValues);
 				json_value_free(js);
 			}
 
@@ -2233,10 +2235,12 @@ stream_apply_sql(StreamApplyContext *context,
 
 			int count = json_array_get_count(jsArray);
 
+			/* an all-NULL old row has no parameters, it must still run */
+			const char **paramValues = NULL;
+
 			if (0 < count)
 			{
-				const char **paramValues =
-					(const char **) calloc(count, sizeof(char *));
+				paramValues = (const char **) calloc(count, sizeof(char *));
 
 				if (paramValues == NULL)
 				{
@@ -2249,14 +2253,14 @@ stream_apply_sql(StreamApplyContext *context,
 					const char *value = json_array_get_string(jsArray, i);
 					paramValues[i] = value;
 				}
+			}
 
-				if (!pgsql_execute_prepared(applyPgConn, name,
-											count, paramValues,
-											NULL, NULL))
-				{
-					/* errors have already been logged */
-					return false;
-				}
+			if (!pgsql_execute_prepared(applyPgConn, name,
+										count, paramValues,
+										NULL, NULL))
+			{
+				/* errors have already been logged */
+				return false;
 			}
 
 
@@ -3240,7 +3244,8 @@ stream_apply_to_stdout(StreamSpecs *specs, FILE *out)
 				JSON_Array *jsArray = json_value_get_array(js);
 				int count = json_array_get_count(jsArray);
 
-				fformat(out, "EXECUTE %s (", name);
+				/* EXECUTE name () is a syntax error */
+				fformat(out, count > 0 ? "EXECUTE %s (" : "EXECUTE %s", name);
 
 				for (int i = 0; i < count; i++)
 				{
@@ -3261,7 +3266,7 @@ stream_apply_to_stdout(StreamSpecs *specs, FILE *out)
 					}
 				}
 
-				fformat(out, ")\n");
+				fformat(out, count > 0 ? ")\n" : "\n");
 
 				json_value_free(js);
 				break;

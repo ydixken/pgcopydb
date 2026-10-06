@@ -81,6 +81,8 @@
 {"action":"D","message":"{\"action\":\"D\",\"xid\":760,\"schema\":\"public\",\"table\":\"ri_full_three\",\"identity\":[{\"name\":\"a\",\"type\":\"integer\",\"value\":1},{\"name\":\"b\",\"type\":\"text\",\"value\":\"x\"}]}"},
 {"action":"U","message":"{\"action\":\"U\",\"xid\":760,\"schema\":\"public\",\"table\":\"ri_full_keyed\",\"columns\":[{\"name\":\"id\",\"type\":\"integer\",\"value\":1},{\"name\":\"b\",\"type\":\"text\",\"value\":\"y\"}],\"identity\":[{\"name\":\"id\",\"type\":\"integer\",\"value\":1},{\"name\":\"b\",\"type\":\"text\",\"value\":\"x\"}]}"},
 {"action":"D","message":"{\"action\":\"D\",\"xid\":760,\"schema\":\"public\",\"table\":\"ri_full_keyed\",\"identity\":[{\"name\":\"id\",\"type\":\"integer\",\"value\":2},{\"name\":\"b\",\"type\":\"text\",\"value\":\"x\"}]}"},
+{"action":"D","message":"{\"action\":\"D\",\"xid\":760,\"schema\":\"public\",\"table\":\"ri_full_allnulldel\",\"identity\":[{\"name\":\"a\",\"type\":\"integer\",\"value\":null},{\"name\":\"b\",\"type\":\"text\",\"value\":null}]}"},
+{"action":"U","message":"{\"action\":\"U\",\"xid\":760,\"schema\":\"public\",\"table\":\"ri_full_allnullupd\",\"columns\":[{\"name\":\"a\",\"type\":\"integer\",\"value\":null},{\"name\":\"b\",\"type\":\"text\",\"value\":\"z\"}],\"identity\":[{\"name\":\"a\",\"type\":\"integer\",\"value\":null},{\"name\":\"b\",\"type\":\"text\",\"value\":null}]}"},
 {"action":"C","message":"{\"action\":\"C\",\"xid\":760}"},
 {"action":"B","message":"{\"action\":\"B\",\"xid\":761}"},
 {"action":"T","message":"{\"action\":\"T\",\"xid\":761,\"schema\":\"Sp1eCial .Char\",\"table\":\"source1testing\"}"},
