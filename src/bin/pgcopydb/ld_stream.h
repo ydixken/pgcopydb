@@ -349,7 +349,7 @@ typedef struct KeylessTable
 /*
  * TestDecodingAttrCache caches per-column attributes needed by the
  * test_decoding parser hot path (replica-identity classification of each
- * column on UPDATE messages).
+ * column on UPDATE messages, and the columns of a keyless table's old row).
  */
 typedef struct TestDecodingAttrCache
 {
@@ -358,6 +358,7 @@ typedef struct TestDecodingAttrCache
 	int attnum;
 	bool attisprimary;
 	bool attisreplident;
+	bool attisgenerated;
 
 	UT_hash_handle hh;           /* hashable by attname */
 } TestDecodingAttrCache;
@@ -847,6 +848,9 @@ bool parseTestDecodingMessageActionAndXid(LogicalStreamContext *context);
 bool parseTestDecodingMessage(StreamContext *privateContext,
 							  char *message,
 							  JSON_Value *json);
+
+bool testDecodingAddNullOldColumns(StreamContext *privateContext,
+								   LogicalTransactionStatement *stmt);
 
 /* ld_wal2json.c */
 bool prepareWal2jsonMessage(LogicalStreamContext *context);

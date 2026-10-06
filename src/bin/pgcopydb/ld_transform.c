@@ -1436,6 +1436,15 @@ parseMessage(StreamContext *privateContext, char *message, JSON_Value *json)
 			}
 
 			markRowsMayRepeat(privateContext, stmt);
+
+			if (privateContext->plugin == STREAM_PLUGIN_TEST_DECODING &&
+				!testDecodingAddNullOldColumns(privateContext, stmt))
+			{
+				log_error("Failed to complete the old row of a test_decoding "
+						  "message, see above for details");
+				return false;
+			}
+
 			(void) streamLogicalTransactionAppendStatement(txn, stmt);
 
 			break;

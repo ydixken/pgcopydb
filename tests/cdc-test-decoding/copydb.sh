@@ -156,7 +156,8 @@ test "${tgt_comp}" -eq 0
 # REPLICA IDENTITY FULL keyless tables: each change touched one of several
 # identical rows. Every table keeps rows on the source.
 #
-for t in ri_full_del ri_full_upd ri_full_nulldup ri_full_three ri_full_keyed
+for t in ri_full_del ri_full_upd ri_full_nulldup ri_full_three ri_full_keyed \
+         ri_full_nulldel ri_full_nullupd
 do
     sql="select * from ${t} order by 1, 2"
     psql -AtqX -d ${PGCOPYDB_SOURCE_PGURI} -c "${sql}" > /tmp/src_${t}.txt
