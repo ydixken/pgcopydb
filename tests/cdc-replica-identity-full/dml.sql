@@ -16,5 +16,7 @@ delete from ri_full_three where ctid in (select ctid from ri_full_three limit 2)
 
 update ri_full_keyed set b = 'y' where id = 1;
 delete from ri_full_keyed where id = 2;
+delete from ri_full_allnulldel where a is null;
+update ri_full_allnullupd set b = 'z' where a is null;
 
 commit;

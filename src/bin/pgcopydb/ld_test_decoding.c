@@ -88,6 +88,9 @@ static TestDecodingTableCache * lookupOrCacheSourceTable(StreamContext *privateC
 														 const char *relname);
 
 
+static bool oldTupleLacksColumn(LogicalMessageTuple *old,
+								TestDecodingAttrCache *attr);
+
 static bool findIdentifierEndPos(const char *message, char separator, int *position);
 
 /*
@@ -685,6 +688,138 @@ parseTestDecodingDeleteMessage(StreamContext *privateContext,
 				  "message %s",
 				  header->message);
 		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * testDecodingAddNullOldColumns adds the columns missing from the old row of a
+ * keyless table back as NULL: test_decoding skips NULL columns there, and a
+ * WHERE clause without them can match a row that differs only in those.
+ */
+bool
+testDecodingAddNullOldColumns(StreamContext *privateContext,
+							  LogicalTransactionStatement *stmt)
+{
+	LogicalMessageRelation *table = NULL;
+	LogicalMessageTuple *old = NULL;
+
+	/* without new values the UPDATE is a no-op that is never written */
+	if (stmt->action == STREAM_ACTION_UPDATE &&
+		stmt->stmt.update.rowsMayRepeat &&
+		stmt->stmt.update.new.array[0].values.count > 0)
+	{
+		table = &(stmt->stmt.update.table);
+		old = &(stmt->stmt.update.old.array[0]);
+	}
+	else if (stmt->action == STREAM_ACTION_DELETE &&
+			 stmt->stmt.delete.rowsMayRepeat)
+	{
+		table = &(stmt->stmt.delete.table);
+		old = &(stmt->stmt.delete.old.array[0]);
+	}
+	else
+	{
+		return true;
+	}
+
+	TestDecodingTableCache *cached =
+		lookupOrCacheSourceTable(privateContext, table->nspname, table->relname);
+
+	if (cached == NULL)
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	TestDecodingAttrCache *attr = NULL;
+	TestDecodingAttrCache *tmp = NULL;
+	int missing = 0;
+
+	HASH_ITER(hh, cached->attrs, attr, tmp)
+	{
+		if (oldTupleLacksColumn(old, attr))
+		{
+			++missing;
+		}
+	}
+
+	if (missing == 0)
+	{
+		return true;
+	}
+
+	int count = old->attributes.count;
+	LogicalMessageTuple full = { 0 };
+
+	if (!AllocateLogicalMessageTuple(&full, count + missing))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	for (int i = 0; i < count; i++)
+	{
+		full.attributes.array[i] = old->attributes.array[i];
+		full.values.array[0].array[i] = old->values.array[0].array[i];
+	}
+
+	int pos = count;
+
+	HASH_ITER(hh, cached->attrs, attr, tmp)
+	{
+		if (oldTupleLacksColumn(old, attr))
+		{
+			full.attributes.array[pos].attname = strdup(attr->attname);
+			full.values.array[0].array[pos].oid = TEXTOID;
+			full.values.array[0].array[pos].isNull = true;
+
+			if (full.attributes.array[pos].attname == NULL)
+			{
+				log_error(ALLOCATION_FAILED_ERROR);
+				return false;
+			}
+
+			++pos;
+		}
+	}
+
+	/* the attribute names and values moved over to the new arrays */
+	free(old->attributes.array);
+
+	if (old->values.array != NULL)
+	{
+		free(old->values.array[0].array);
+		free(old->values.array);
+	}
+
+	*old = full;
+
+	return true;
+}
+
+
+/*
+ * oldTupleLacksColumn is true for a table column the old row does not name.
+ * Generated columns never count: a virtual one is always NULL in the old row
+ * while the target computes its value.
+ */
+static bool
+oldTupleLacksColumn(LogicalMessageTuple *old, TestDecodingAttrCache *attr)
+{
+	if (attr->attnum <= 0 || attr->attisgenerated)
+	{
+		return false;
+	}
+
+	for (int i = 0; i < old->attributes.count; i++)
+	{
+		if (streq(old->attributes.array[i].attname, attr->attname))
+		{
+			return false;
+		}
 	}
 
 	return true;
@@ -1410,6 +1545,7 @@ lookupOrCacheSourceTable(StreamContext *privateContext,
 		attr->attnum = src->attnum;
 		attr->attisprimary = src->attisprimary;
 		attr->attisreplident = src->attisreplident;
+		attr->attisgenerated = src->attisgenerated;
 
 		HASH_ADD_STR(item->attrs, attname, attr);
 	}

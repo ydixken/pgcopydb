@@ -325,7 +325,9 @@ commit;
 --
 -- REPLICA IDENTITY FULL without a primary key or replica identity index:
 -- identical rows are legal, and each UPDATE or DELETE must change one of them.
--- Same tables as tests/cdc-replica-identity-full.
+-- Same tables as tests/cdc-replica-identity-full, plus rows that differ only
+-- in a NULL column, and all-NULL rows that leave the old row empty:
+-- test_decoding leaves NULL columns out of the old row.
 --
 begin;
 
@@ -334,17 +336,41 @@ create table ri_full_upd (a int, b text);
 create table ri_full_nulldup (a int, b text);
 create table ri_full_three (a int, b text);
 create table ri_full_keyed (id int primary key, b text);
+create table ri_full_nulldel (a int, b text);
+create table ri_full_nullupd (a int, b text);
+create table ri_full_allnulldel (a int, b text);
+create table ri_full_allnullupd (a int, b text);
 
 alter table ri_full_del replica identity full;
 alter table ri_full_upd replica identity full;
 alter table ri_full_nulldup replica identity full;
 alter table ri_full_three replica identity full;
 alter table ri_full_keyed replica identity full;
+alter table ri_full_nulldel replica identity full;
+alter table ri_full_nullupd replica identity full;
+alter table ri_full_allnulldel replica identity full;
+alter table ri_full_allnullupd replica identity full;
 
 insert into ri_full_del values (1, 'x'), (1, 'x');
 insert into ri_full_upd values (1, 'x'), (1, 'x');
 insert into ri_full_nulldup values (1, null), (1, null);
 insert into ri_full_three values (1, 'x'), (1, 'x'), (1, 'x');
-insert into ri_full_keyed values (1, 'x'), (2, 'x');
+insert into ri_full_keyed values (1, 'x'), (2, 'x'), (3, null);
+insert into ri_full_nulldel values (1, 'q'), (1, null);
+insert into ri_full_nullupd values (1, 'q'), (1, null);
+insert into ri_full_allnulldel values (null, null), (1, 'x');
+insert into ri_full_allnullupd values (null, null), (1, 'x');
 
 commit;
+
+-- PostgreSQL 18: the old row has no virtual generated column to match
+do $$
+begin
+    if current_setting('server_version_num')::int >= 180000 then
+        execute 'create table ri_full_virt '
+             || '(a int, b text, g text generated always as (''g'' || a) virtual)';
+        alter table ri_full_virt replica identity full;
+        insert into ri_full_virt (a, b) values (1, null), (1, 'x');
+    end if;
+end
+$$;

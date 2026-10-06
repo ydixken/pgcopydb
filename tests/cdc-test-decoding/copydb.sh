@@ -76,7 +76,7 @@ REPLAYDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-replay.db' -type f | head -1)
 
 sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
   "select s.sql from stmt s join replay r on r.stmt_hash = s.hash where r.action not in ('B','C','R','K','X','E') group by s.hash order by min(r.id)" \
-  > /tmp/stmt-actual.sql
+  | grep -v ri_full_virt > /tmp/stmt-actual.sql
 diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
 
 sqlite3 ${REPLAYDB} "select count(*) as replay_rows from replay;"
@@ -156,7 +156,19 @@ test "${tgt_comp}" -eq 0
 # REPLICA IDENTITY FULL keyless tables: each change touched one of several
 # identical rows. Every table keeps rows on the source.
 #
-for t in ri_full_del ri_full_upd ri_full_nulldup ri_full_three ri_full_keyed
+ri_full_tables="ri_full_del ri_full_upd ri_full_nulldup ri_full_three
+                ri_full_keyed ri_full_nulldel ri_full_nullupd
+                ri_full_allnulldel ri_full_allnullupd"
+
+# ri_full_virt needs virtual generated columns, new in PostgreSQL 18
+pgnum=`psql -AtqX -d ${PGCOPYDB_SOURCE_PGURI} -c "show server_version_num"`
+
+if [ "${pgnum}" -ge 180000 ]
+then
+    ri_full_tables="${ri_full_tables} ri_full_virt"
+fi
+
+for t in ${ri_full_tables}
 do
     sql="select * from ${t} order by 1, 2"
     psql -AtqX -d ${PGCOPYDB_SOURCE_PGURI} -c "${sql}" > /tmp/src_${t}.txt
@@ -164,6 +176,15 @@ do
     test -s /tmp/src_${t}.txt
     diff /tmp/src_${t}.txt /tmp/tgt_${t}.txt
 done
+
+# stdout apply: the all-NULL DELETE has no parameters, "EXECUTE name ()" fails
+pgcopydb stream apply --target - > /tmp/apply-stdout.sql
+
+allnull=$(sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
+    "select hash from stmt where sql like 'DELETE FROM public.ri_full_allnulldel %'")
+
+test -n "${allnull}"
+grep -x "EXECUTE ${allnull}" /tmp/apply-stdout.sql
 
 #
 # Stream prune between rounds: remove already-applied CDC file pairs.

@@ -24,6 +24,8 @@ DELETE FROM "public"."ri_full_nulldup" WHERE (tableoid, ctid) = (SELECT tableoid
 DELETE FROM "public"."ri_full_three" WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "public"."ri_full_three" WHERE "a" = $1 and "b" = $2 LIMIT 1)
 UPDATE "public"."ri_full_keyed" SET "b" = $1 WHERE "id" = $2 and "b" = $3
 DELETE FROM "public"."ri_full_keyed" WHERE "id" = $1 and "b" = $2
+DELETE FROM "public"."ri_full_allnulldel" WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "public"."ri_full_allnulldel" WHERE "a" IS NULL and "b" IS NULL LIMIT 1)
+UPDATE "public"."ri_full_allnullupd" SET "b" = $1 WHERE (tableoid, ctid) = (SELECT tableoid, ctid FROM "public"."ri_full_allnullupd" WHERE "a" IS NULL and "b" IS NULL LIMIT 1)
 TRUNCATE ONLY "Sp1eCial .Char"."source1testing"
 
 INSERT INTO "Sp1eCial .Char"."source1testing" ("s0", "s""1") overriding system value VALUES ($1, $2), ($3, $4), ($5, $6), ($7, $8), ($9, $10)
