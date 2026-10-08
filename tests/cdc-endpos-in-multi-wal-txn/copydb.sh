@@ -26,9 +26,16 @@ slot=pgcopydb
 
 # create the replication slot that captures all the changes
 # PGCOPYDB_OUTPUT_PLUGIN is set to wal2json in docker-compose.yml
-coproc ( pgcopydb snapshot --follow --slot-name ${slot})
+pgcopydb snapshot --follow --slot-name ${slot} >/tmp/snapshot.out &
+snapshot_pid=$!
 
-sleep 1
+# the snapshot is printed once the slot exists and the snapshot file is written
+deadline=$((SECONDS + 60))
+while ! test -s /tmp/snapshot.out; do
+    kill -0 "${snapshot_pid}"
+    test "${SECONDS}" -lt "${deadline}"
+    sleep 0.1
+done
 
 # now setup the replication origin (target) and the pgcopydb.sentinel (source)
 pgcopydb stream setup
@@ -121,8 +128,8 @@ pgcopydb follow --resume --trace
 sql="select count(*) from table_a"
 test 24 -eq `psql -AtqX -d ${PGCOPYDB_TARGET_PGURI} -c "${sql}"`
 
-kill -TERM ${COPROC_PID}
-wait ${COPROC_PID}
+kill -TERM "${snapshot_pid}"
+wait "${snapshot_pid}"
 
 # cleanup
 pgcopydb stream cleanup

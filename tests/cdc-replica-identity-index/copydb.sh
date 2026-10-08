@@ -23,15 +23,22 @@ pgcopydb ping
 psql -d ${PGCOPYDB_SOURCE_PGURI} -f /usr/src/pgcopydb/ddl.sql
 
 # create replication slot + snapshot, then clone the initial data
-coproc ( pgcopydb snapshot --follow --plugin test_decoding )
+pgcopydb snapshot --follow --plugin test_decoding >/tmp/snapshot.out &
+snapshot_pid=$!
 
-sleep 1
+# the snapshot is printed once the slot exists and the snapshot file is written
+deadline=$((SECONDS + 60))
+while ! test -s /tmp/snapshot.out; do
+    kill -0 "${snapshot_pid}"
+    test "${SECONDS}" -lt "${deadline}"
+    sleep 0.1
+done
 
 pgcopydb stream setup
 pgcopydb clone
 
-kill -TERM ${COPROC_PID}
-wait ${COPROC_PID}
+kill -TERM "${snapshot_pid}"
+wait "${snapshot_pid}"
 
 # the clone must keep REPLICA IDENTITY USING INDEX, on the same index
 ri_sql="select c.relname, c.relreplident, coalesce(i.relname, '-')
