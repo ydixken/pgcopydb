@@ -6,11 +6,25 @@
 
 set -euo pipefail
 
+# plugin:mode; resume kills pgcopydb where reconnect only ends the walsender,
+# endpos stops the run at A's COMMIT while A is being sent again
+if test -z "${RESEND_CASE:-}"; then
+    for c in pgoutput:reconnect pgoutput:resume pgoutput:endpos test_decoding:reconnect; do
+        RESEND_CASE=${c} bash "$0"
+    done
+    exit 0
+fi
+plugin=${RESEND_CASE%%:*}
+mode=${RESEND_CASE#*:}
+echo "=== ${plugin} ${mode}"
+
 rows=${RESEND_ROWS:-500000}
-export TMPDIR=/tmp/resend
+db=resend_${plugin}_${mode}
+export PGCOPYDB_OUTPUT_PLUGIN=${plugin}
+export TMPDIR=/tmp/resend-${plugin}-${mode}
 export XDG_DATA_HOME=${TMPDIR}/cdc
 mkdir -p "${TMPDIR}"
-snapshot_pid= follow_pid= lock_pid= receive_pid=
+snapshot_pid= follow_pid= lock_pid= receive_pid= catchup_pid=
 
 cleanup() {
     local status=$?
@@ -18,6 +32,7 @@ cleanup() {
     test -z "${receive_pid}" || kill -CONT "${receive_pid}" 2>/dev/null || true
     test -z "${lock_pid}" || kill "${lock_pid}" 2>/dev/null || true
     test -z "${follow_pid}" || kill -KILL -- "-${follow_pid}" 2>/dev/null || true
+    test -z "${catchup_pid}" || kill -KILL -- "-${catchup_pid}" 2>/dev/null || true
     test -z "${snapshot_pid}" || kill -TERM "${snapshot_pid}" 2>/dev/null || true
     if test "${status}" -ne 0; then
         tail -n 40 "${TMPDIR}/follow.log" 2>/dev/null || true
@@ -55,13 +70,17 @@ poll() {
     local what=$1 deadline=$((SECONDS + $2))
     shift 2
     until "$@"; do
-        kill -0 "${follow_pid}" 2>/dev/null || fail "follow exited while waiting for ${what}"
+        kill -0 "${follow_pid:-${catchup_pid}}" 2>/dev/null || fail "pgcopydb exited while waiting for ${what}"
         test "${SECONDS}" -lt "${deadline}" || fail "timed out waiting for ${what}"
         sleep 0.2
     done
 }
 
 pgcopydb ping
+psql -X -q -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" -c "create database ${db}"
+psql -X -q -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI}" -c "create database ${db}"
+export PGCOPYDB_SOURCE_PGURI=${PGCOPYDB_SOURCE_PGURI%/*}/${db}
+export PGCOPYDB_TARGET_PGURI=${PGCOPYDB_TARGET_PGURI%/*}/${db}
 source_sql 'create table tx (id integer primary key); create table t (id integer primary key, v text); create table pad (id integer primary key)'
 
 pgcopydb snapshot --follow > "${TMPDIR}/snapshot.out" 2> "${TMPDIR}/snapshot.log" &
@@ -158,6 +177,16 @@ for attempt in 1 2 3 4 5; do
 done
 test -n "${held}" || fail 'never held receive with A partly sent again'
 
+# a crash leaves A's partial copy for the next run; with no receive, that
+# run's apply can only wait on A
+if test "${mode}" = resume; then
+    kill -KILL -- "-${follow_pid}"
+    wait "${follow_pid}" || true
+    follow_pid= receive_pid=
+    setsid pgcopydb stream catchup --resume --notice > "${TMPDIR}/catchup.log" 2>&1 &
+    catchup_pid=$!
+fi
+
 kill "${lock_pid}"
 lock_pid=
 target_sql "select pg_terminate_backend(pid) from pg_stat_activity where query like '%pg_sleep(3600)%' and pid <> pg_backend_pid()" > /dev/null
@@ -176,10 +205,45 @@ while test "${SECONDS}" -lt "${deadline}"; do
     fi
     sleep 0.2
 done
-kill -CONT "${receive_pid}"
+if test "${mode}" = resume; then
+    kill -TERM -- "-${catchup_pid}"
+    wait "${catchup_pid}" || true
+    catchup_pid=
+    setsid pgcopydb follow --resume --not-consistent --notice >> "${TMPDIR}/follow.log" 2>&1 &
+    follow_pid=$!
+else
+    # endpos at A's COMMIT while receive is inside A: receive must write all of
+    # A before it stops, and the run must end with A applied and D not
+    if test "${mode}" = endpos; then
+        lsn_a=$(timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader \
+            "${XDG_DATA_HOME}"/pgcopydb/*-output.db \
+            "select printf('%X/%X', lsn >> 32, lsn & 4294967295) from output
+              where action = 'C' and xid = ${xid_a}")
+        pgcopydb stream sentinel set endpos "${lsn_a}"
+    fi
+    kill -CONT "${receive_pid}"
+fi
+
+if test "${mode}" = endpos; then
+    deadline=$((SECONDS + 600))
+    while kill -0 "${follow_pid}" 2>/dev/null; do
+        test "${SECONDS}" -lt "${deadline}" || fail "follow did not stop at endpos ${lsn_a}"
+        sleep 1
+    done
+    wait "${follow_pid}" || fail "follow exited with $? at endpos ${lsn_a}"
+    follow_pid=
+    origin=$(target_sql "select pg_replication_origin_progress('pgcopydb', true)")
+    got=$(target_sql "select count(*) filter (where id > 0) || '|' || count(*) filter (where id = -1) from t")
+    echo "endpos ${lsn_a}: origin ${origin}, A rows|D rows on the target ${got}"
+    test "${origin}" = "${lsn_a}" -a "${got}" = "${rows}|0" || fail "follow stopped at endpos ${lsn_a} without A applied exactly"
+fi
 
 source_sql 'insert into tx values (2)'
 pgcopydb stream sentinel set endpos --current
+if test "${mode}" = endpos; then
+    setsid pgcopydb follow --resume --not-consistent --notice >> "${TMPDIR}/follow.log" 2>&1 &
+    follow_pid=$!
+fi
 deadline=$((SECONDS + 600))
 while kill -0 "${follow_pid}" 2>/dev/null; do
     test "${SECONDS}" -lt "${deadline}" || fail 'follow did not reach endpos'
@@ -202,4 +266,4 @@ done
 
 test -z "${early}" || fail "${early}"
 pgcopydb stream cleanup
-echo "PASS: A (${rows} rows) and D applied after a re-send"
+echo "PASS: A (${rows} rows) and D applied after a re-send (${plugin}, ${mode})"
