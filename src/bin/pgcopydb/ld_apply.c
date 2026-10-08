@@ -759,6 +759,28 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 
 
 /*
+ * stream_apply_commit commits the open target transaction with the origin at
+ * lsn. A failed COMMIT leaves the origin at previousLSN.
+ */
+static bool
+stream_apply_commit(StreamApplyContext *context, uint64_t lsn, char *timestamp)
+{
+	char originLSN[PG_LSN_MAXLENGTH] = { 0 };
+	char rewindLSN[PG_LSN_MAXLENGTH] = { 0 };
+
+	sformat(originLSN, sizeof(originLSN), "%X/%X", LSN_FORMAT_ARGS(lsn));
+	sformat(rewindLSN, sizeof(rewindLSN), "%X/%X",
+			LSN_FORMAT_ARGS(context->previousLSN));
+
+	return pgsql_replication_origin_xact_commit(&(context->applyPgConn),
+												context->origin,
+												originLSN,
+												timestamp,
+												rewindLSN);
+}
+
+
+/*
  * stream_apply_transaction applies a single committed transaction to the
  * target database.  It opens a Postgres transaction, iterates all DML rows
  * for xid in replay order (starting from begin_id), and commits with the
@@ -991,11 +1013,6 @@ stream_apply_transaction(StreamApplyContext *context,
 		return false;
 	}
 
-	/* set replication origin to commitLSN before committing */
-	char lsn[PG_LSN_MAXLENGTH] = { 0 };
-
-	sformat(lsn, sizeof(lsn), "%X/%X", LSN_FORMAT_ARGS(commitLSN));
-
 	if (IS_EMPTY_STRING_BUFFER(commitTimestamp))
 	{
 		TimestampTz now = feGetCurrentTimestamp();
@@ -1005,22 +1022,12 @@ stream_apply_transaction(StreamApplyContext *context,
 										   sizeof(commitTimestamp));
 	}
 
-	if (!pgsql_replication_origin_xact_setup(applyPgConn, lsn, commitTimestamp))
-	{
-		log_error("Failed to setup replication origin for xid %u at %X/%X",
-				  xid, LSN_FORMAT_ARGS(commitLSN));
-		(void) pgsql_execute(applyPgConn, "ROLLBACK");
-		context->transactionInProgress = false;
-		return false;
-	}
-
 	log_debug("COMMIT xid %u LSN %X/%X", xid, LSN_FORMAT_ARGS(commitLSN));
 
-	/* A queued COMMIT is not confirmed until its pipeline results are checked. */
-	if (!pgsql_execute(applyPgConn, "COMMIT") ||
-		!pgsql_sync_pipeline(applyPgConn))
+	if (!stream_apply_commit(context, commitLSN, commitTimestamp))
 	{
-		/* errors have already been logged */
+		log_error("Failed to commit xid %u at %X/%X",
+				  xid, LSN_FORMAT_ARGS(commitLSN));
 		context->transactionInProgress = false;
 		return false;
 	}
@@ -1841,33 +1848,15 @@ stream_apply_sql(StreamApplyContext *context,
 				return true;
 			}
 
-			/*
-			 * update replication progress with metadata->lsn, that is,
-			 * transaction COMMIT LSN
-			 */
-			char lsn[PG_LSN_MAXLENGTH] = { 0 };
-
-			sformat(lsn, sizeof(lsn), "%X/%X",
-					LSN_FORMAT_ARGS(metadata->lsn));
-
-			if (!pgsql_replication_origin_xact_setup(applyPgConn,
-													 lsn,
-													 metadata->timestamp))
-			{
-				log_error("Failed to setup apply transaction, "
-						  "see above for details");
-				return false;
-			}
-
 			log_trace("COMMIT %lld LSN %X/%X",
 					  (long long) metadata->xid,
 					  LSN_FORMAT_ARGS(metadata->lsn));
 
-
-			/* calling pgsql_commit() would finish the connection, avoid */
-			if (!pgsql_execute(applyPgConn, "COMMIT"))
+			/* the origin moves to the transaction COMMIT LSN */
+			if (!stream_apply_commit(context, metadata->lsn, metadata->timestamp))
 			{
-				/* errors have already been logged */
+				log_error("Failed to commit apply transaction, "
+						  "see above for details");
 				return false;
 			}
 
@@ -2089,6 +2078,10 @@ stream_apply_sql(StreamApplyContext *context,
 			sformat(lsn, sizeof(lsn), "%X/%X",
 					LSN_FORMAT_ARGS(originLSN));
 
+			/*
+			 * An abort after this setup moves the origin no further than the
+			 * COMMIT would, so the pipelined form is safe and stays cheap.
+			 */
 			if (!pgsql_replication_origin_xact_setup(applyPgConn,
 													 lsn,
 													 metadata->timestamp))

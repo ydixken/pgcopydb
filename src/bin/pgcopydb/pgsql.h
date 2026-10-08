@@ -539,6 +539,12 @@ bool pgsql_replication_origin_xact_setup(PGSQL *pgsql,
 										 char *origin_lsn,
 										 char *origin_timestamp);
 
+bool pgsql_replication_origin_xact_commit(PGSQL *pgsql,
+										  char *nodeName,
+										  char *origin_lsn,
+										  char *origin_timestamp,
+										  char *rewind_lsn);
+
 bool pgsql_replication_origin_advance(PGSQL *pgsql, char *nodeName, char *lsn);
 
 bool pgsql_replication_origin_progress(PGSQL *pgsql,

@@ -89,7 +89,11 @@ On reconnect, streaming starts at the greater of the requested start position an
 The receiver must therefore account for changes already stored locally that the server may not send again.
 
 ``sentinel.replay_lsn`` records durable target progress.
-The SQLite apply path uses ``synchronous_commit=on`` and checks the pipelined COMMIT result before publishing the source COMMIT LSN.
+The SQLite apply path uses ``synchronous_commit=on``, drains the pipeline, and sends ``SET CONSTRAINTS ALL IMMEDIATE``, the origin setup, and the COMMIT as one simple query before publishing the source COMMIT LSN.
+PostgreSQL 16 and later advance the origin when a transaction aborts after its origin setup.
+So the server never gets the setup without the COMMIT, and deferred triggers and constraint checks run before the setup.
+When that query fails, apply moves the origin back to ``previousLSN`` before it exits.
+That is the origin position apply started from, the last COMMIT LSN it applied, or a later SWITCH or ENDPOS position it reached without a commit.
 Before any data commit, apply can publish the initialized replication-origin position without a user write.
 On restart, ``setupReplicationOrigin`` reads ``pg_replication_origin_progress()`` and sets ``context->previousLSN`` from that authoritative target position.
 KEEPALIVE rows have a separate cursor and never advance ``previousLSN``, the target origin, or ``sentinel.replay_lsn``.

@@ -116,7 +116,6 @@ barrier_dir=$(mktemp -d "${TMPDIR}/barrier.XXXXXX")
 timeout 90s gdb -q -batch \
     -ex "set \$barrier_dir = \"${barrier_dir}\"" \
     -ex "set \$expected_lsn = \"${endpos}\"" \
-    -ex "set \$confirmed_lsn = \"${confirmed}\"" \
     -x /usr/src/pgcopydb/apply-kill.gdb \
     --args pgcopydb stream catchup --resume --endpos "${endpos}" >"${TMPDIR}/gdb.log" 2>&1 &
 debugger_pid=$!
