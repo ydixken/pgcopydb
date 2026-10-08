@@ -2011,7 +2011,8 @@ ld_store_insert_pgoutput_message(DatabaseCatalog *catalog,
 
 	if (pgmsg->new_cols != NULL)
 	{
-		INSERT_COLS(pgmsg->new_cols, pgmsg->ncols_new, 'N');
+		INSERT_COLS(pgmsg->new_cols, pgmsg->ncols_new,
+					pgmsg->action == 'T' ? 'T' : 'N');
 	}
 
 	#undef INSERT_COLS

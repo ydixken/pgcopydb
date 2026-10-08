@@ -84,12 +84,14 @@ typedef struct PgoutputMessage
 	char nspname[PG_NAMEDATALEN];
 	char relname[PG_NAMEDATALEN];
 
-	char oldType;                   /* 'K'=key-only, 'O'=full-old, 0=absent */
+	char oldType;                   /* 'K'=key-only, 'O'=full-old, 0=absent,
+	                                 * 'R'=TRUNCATE RESTART IDENTITY */
 	int ncols_old;
 	PgoutputColumn *old_cols;       /* malloc'd array; NULL when oldType==0 */
 
 	int ncols_new;
-	PgoutputColumn *new_cols;       /* malloc'd array; NULL for DELETE */
+	PgoutputColumn *new_cols;       /* malloc'd array; NULL for DELETE;
+	                                 * TRUNCATE relations, stored as 'T' */
 } PgoutputMessage;
 
 
