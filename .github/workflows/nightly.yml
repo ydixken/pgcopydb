@@ -129,6 +129,7 @@ jobs:
           - cdc-pgoutput
           - cdc-keepalive
           - cdc-filtering-pgoutput
+          - cdc-truncate-multi
           - follow-wal2json
           - follow-9.6
           - follow-data-only

@@ -2608,26 +2608,43 @@ stream_write_delete(ReplayDBStmt *replayStmt, LogicalMessageDelete *delete)
 
 
 /*
- * stream_write_truncate writes a TRUNCATE statement into the replayDB.
- *
- * Each call emits exactly one relation per statement; the data model
- * (LogicalMessageTruncate.table) is singular by construction. The apply path
- * in ld_apply.c (STREAM_ACTION_TRUNCATE) relies on this invariant to detect
- * the partitioned-target case via a single regclass lookup. If this is ever
- * changed to emit multi-relation TRUNCATE statements, update the apply path
- * accordingly.
+ * One statement for all relations, as a referenced table can only be truncated
+ * in the same command as the table referencing it. ONLY binds to a single
+ * relation, so each gets its own; the source already lists descendants.
  */
 static bool
 stream_write_truncate(ReplayDBStmt *replayStmt, LogicalMessageTruncate *truncate)
 {
-	strlcpy(replayStmt->nspname, truncate->table.nspname, sizeof(replayStmt->nspname));
-	strlcpy(replayStmt->relname, truncate->table.relname, sizeof(replayStmt->relname));
+	if (truncate->count < 1)
+	{
+		log_error("BUG: stream_write_truncate called without a relation");
+		return false;
+	}
+
+	strlcpy(replayStmt->nspname, truncate->tables[0].nspname,
+			sizeof(replayStmt->nspname));
+	strlcpy(replayStmt->relname, truncate->tables[0].relname,
+			sizeof(replayStmt->relname));
 
 	PQExpBuffer buf = createPQExpBuffer();
 
-	printfPQExpBuffer(buf, "TRUNCATE ONLY %s.%s\n",
-					  truncate->table.nspname,
-					  truncate->table.relname);
+	appendPQExpBufferStr(buf, "TRUNCATE ");
+
+	for (int i = 0; i < truncate->count; i++)
+	{
+		appendPQExpBuffer(buf, "%sONLY %s.%s",
+						  i == 0 ? "" : ", ",
+						  truncate->tables[i].nspname,
+						  truncate->tables[i].relname);
+	}
+
+	/* CASCADE is not replayed: the source lists every relation it reached */
+	if (truncate->restartIdentity)
+	{
+		appendPQExpBufferStr(buf, " RESTART IDENTITY");
+	}
+
+	appendPQExpBufferChar(buf, '\n');
 
 	if (PQExpBufferBroken(buf))
 	{
