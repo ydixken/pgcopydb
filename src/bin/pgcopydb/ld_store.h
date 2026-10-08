@@ -146,8 +146,10 @@ typedef struct ReplayDBOutputIterator
 
 	/*
 	 * pending_xid is set when the init step found a BEGIN for xid N in the
-	 * output table but no matching COMMIT/ROLLBACK yet.  The outer function
-	 * (ld_store_iter_output) checks this to decide between two situations:
+	 * output table but not its COMMIT, or one that receive is sending again
+	 * after a reconnect (see ld_store_lookup_output_xid_end).  The outer
+	 * function (ld_store_iter_output) checks this to decide between two
+	 * situations:
 	 *
 	 *   pending_xid == 0  — no rows at all; upstream is still producing.
 	 *   pending_xid != 0  — a BEGIN exists but COMMIT has not arrived yet.
