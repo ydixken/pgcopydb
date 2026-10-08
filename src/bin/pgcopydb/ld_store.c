@@ -624,16 +624,9 @@ ld_store_lookup_output_at_lsn(DatabaseCatalog *catalog, uint64_t lsn,
 
 
 /*
- * ld_store_lookup_output_after_lsn searches the first message following the
- * given LSN in the replayDB database.
- *
- * The same LSN would typically be used in Postgres for a COMMIT message and
- * the BEGIN message of the following transaction, so we search for a message
- * with an lsn greater than or equal to the given one, and a message that's
- * neither a COMMIT nor a ROLLBACK.
- *
- * {"action":"C","xid":"499","lsn":"0/24E1B08"}
- * {"action":"B","xid":"500","lsn":"0/24E1B08"}
+ * ld_store_lookup_output_after_lsn returns the next unit to transform: the
+ * BEGIN of the transaction that ends first after lsn, the first KEEPALIVE or
+ * SWITCH after keepaliveLSN, or else the BEGIN of a still open transaction.
  */
 bool
 ld_store_lookup_output_after_lsn(DatabaseCatalog *catalog,
@@ -652,77 +645,58 @@ ld_store_lookup_output_after_lsn(DatabaseCatalog *catalog,
 
 
 	/*
-	 * Order by LSN so that a BEGIN (which has the lowest LSN in its
-	 * transaction) is found before any internal markers (ENDPOS, KEEPALIVE)
-	 * that may have been inserted at the same LSN or higher.
-	 * Within the same LSN, prefer BEGIN (action='B') over other actions,
-	 * then fall back to insertion order (id) as a tiebreaker.
+	 * Logical decoding sends transactions in commit order, but a BEGIN row
+	 * carries the transaction's first LSN, which is below the previous COMMIT
+	 * when the two overlapped on the source.  So a transaction is keyed by its
+	 * end row, the one ld_store_lookup_output_xid_end picks (COMMIT, else
+	 * ROLLBACK), strictly above lsn: the target origin holds that end LSN.
+	 * Returning the BEGIN, never the end row, keeps a pass from looping.
 	 *
-	 * SQLite requires ORDER BY on a UNION to reference result-set columns by
-	 * name, so wrap the UNION in a subquery to allow the CASE expression.
+	 * Markers keep their own cursor ($2) because they carry the server's
+	 * walEnd, above transactions not decoded yet.  Receive writes each
+	 * transaction whole (proto_version 1 does not stream), so only the newest
+	 * BEGIN can lack its end row; it sorts last, after everything that commits
+	 * before it.  Each branch is a LIMIT 1 index seek.
 	 *
-	 * Both branches now use >= (not just BEGIN) to ensure that internal
-	 * markers like ENDPOS are found even when inserted at the exact endpos LSN.
-	 */
-
-	/*
-	 * Find the next thing to process starting from transform_lsn.
-	 *
-	 * Valid "first row" types are: BEGIN (start of a new transaction),
-	 * KEEPALIVE, ENDPOS, SWITCH (non-transactional markers), or a DML row
-	 * (when transform_lsn was advanced past a partial boundary and the slot
-	 * re-delivered the complete transaction — the "resuming" case).
-	 *
-	 * COMMIT (action='C') and ROLLBACK (action='R') are NEVER valid starting
-	 * points: they are the END of a transaction, never the start.  If we
-	 * returned them here we would re-iterate the same transaction forever:
-	 *
-	 *   transform_lsn = COMMIT_LSN
-	 *   → query returns COMMIT (lsn = COMMIT_LSN, lowest id that is not B)
-	 *   → default: case resumes from BEGIN, processes txn, sets transform_lsn
-	 *     back to COMMIT_LSN  → infinite loop
-	 *
-	 * By excluding C and R, the query instead returns the ENDPOS or next
-	 * BEGIN sitting at COMMIT_LSN, which breaks the loop.
-	 *
-	 * Note: ld_store_lookup_output_xid_end uses a separate query that still
-	 * looks for C/R — it is not affected by this change.
-	 */
-
-	/*
-	 * Outer query: find the next unit of work for transform.
-	 *
-	 * There are exactly two kinds of row that the outer loop should see:
-	 *
-	 *   1. BEGIN ('B') — the start of a transaction.  Transform iterates
-	 *      the full transaction (B … DML … C/R) via the inner iterator.
-	 *      BEGIN may legitimately share a LSN with the previous COMMIT
-	 *      (wal2json emits them at the same WAL position), so use >=.
-	 *
-	 *   2. KEEPALIVE ('K') or SWITCH ('X') — non-transactional markers
-	 *      that appear between committed transactions.  They carry the
-	 *      server's walEnd, which sits above transactions the server has
-	 *      not decoded yet, so they get their own cursor ($2) instead of
-	 *      riding on the transaction cursor ($1), which would hide those
-	 *      transactions.  Strict > so that the marker the apply just
-	 *      consumed is not handed back.
-	 *
-	 * DML rows (I/U/D/T) are NEVER returned here: they are always inside
-	 * a transaction and are consumed exclusively by the inner iterator
-	 * once the BEGIN has been found.  COMMIT and ROLLBACK are also
-	 * excluded — they are end-of-transaction anchors, not starting points.
+	 * SQLite numbers $N parameters by first appearance: keep $1 before $2.
+	 * ORDER BY on a UNION may only name result columns, hence the subquery.
 	 */
 	char *sql =
 		"select id, action, xid, lsn, timestamp, message, nspname, relname, old_type from ("
-		"  select id, action, xid, lsn, timestamp, message, nspname, relname, old_type "
-		"    from output "
-		"   where lsn >= $1 and action = 'B' "
+		"  select * from ("
+		"    select b.id, b.action, b.xid, b.lsn, b.timestamp, b.message, "
+		"           b.nspname, b.relname, b.old_type, e.lsn as k "
+		"      from output e "
+		"      join output b on b.xid = e.xid and b.action = 'B' and b.id < e.id "
+		"     where e.action = 'C' and e.lsn > $1 "
+		"  order by e.lsn, b.id desc limit 1) "
 		" union all "
-		"  select id, action, xid, lsn, timestamp, message, nspname, relname, old_type "
-		"    from output "
-		"   where lsn > $2 and action in ('K', 'X') "
+		"  select * from ("
+		"    select b.id, b.action, b.xid, b.lsn, b.timestamp, b.message, "
+		"           b.nspname, b.relname, b.old_type, e.lsn as k "
+		"      from output e "
+		"      join output b on b.xid = e.xid and b.action = 'B' and b.id < e.id "
+		"     where e.action = 'R' and e.lsn > $1 "
+		"       and not exists (select 1 from output c "
+		"                        where c.xid = b.xid and c.action = 'C' and c.id > b.id) "
+		"  order by e.lsn, b.id desc limit 1) "
+		" union all "
+		"  select * from ("
+		"    select id, action, xid, lsn, timestamp, message, nspname, relname, old_type, lsn as k "
+		"      from output where action = 'K' and lsn > $2 order by lsn limit 1) "
+		" union all "
+		"  select * from ("
+		"    select id, action, xid, lsn, timestamp, message, nspname, relname, old_type, lsn as k "
+		"      from output where action = 'X' and lsn > $2 order by lsn limit 1) "
+		" union all "
+		"  select b.id, b.action, b.xid, b.lsn, b.timestamp, b.message, "
+		"         b.nspname, b.relname, b.old_type, 9223372036854775807 as k "
+		"    from output b "
+		"   where b.id = (select max(id) from output where action = 'B') "
+		"     and not exists (select 1 from output e where e.xid = b.xid "
+		"                      and e.action in ('C', 'R') and e.id > b.id) "
 		") "
-		"order by lsn asc, case when action = 'B' then 0 else 1 end, id asc "
+		"order by k asc, case when action = 'B' then 0 else 1 end, id asc "
 		"limit 1";
 
 	log_debug("ld_store_lookup_output_after_lsn: %X/%X (keepalive %X/%X)",

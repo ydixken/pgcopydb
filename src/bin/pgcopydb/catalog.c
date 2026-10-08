@@ -620,6 +620,9 @@ static char *outputDBcreateDDLs[] = {
 	"create unique index o_a_lsn on output(action, lsn)",
 	"create index o_a_xid on output(action, xid)",
 
+	/* lets the transform find the newest BEGIN without scanning markers */
+	"create index o_begin on output(action) where action = 'B'",
+
 	/*
 	 * pgoutput stores structured column data here instead of a text blob.
 	 * Other plugins never touch this table.
