@@ -134,6 +134,7 @@ jobs:
           - cdc-replica-identity-index
           - cdc-replica-identity-full
           - cdc-truncate-multi
+          - cdc-origin-abort
           - follow-wal2json
           - follow-pgoutput
           - follow-9.6
@@ -178,6 +179,8 @@ jobs:
           - TEST: cdc-replica-identity-full
             PGVERSION: 16
           - TEST: cdc-truncate-multi
+            PGVERSION: 16
+          - TEST: cdc-origin-abort
             PGVERSION: 16
           - TEST: follow-wal2json
             PGVERSION: 16

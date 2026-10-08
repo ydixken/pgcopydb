@@ -245,7 +245,7 @@ restart_interleaved() {
 
     prefetch "$(wal_lsn)"
     end=$(last_commit)
-    kill_catchup_at "pgsql_replication_origin_xact_setup if \$_streq(origin_lsn, \"$(commit_of "${xid_a}")\")" 0 "${end}"
+    kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"$(commit_of "${xid_a}")\")" 0 "${end}"
     test "$(count 'tb where id = 51')" = 1 || fail 'B was not applied before the kill'
     test "$(count 'ta where id > 500')" = 0 || fail 'A was applied before the kill'
     test "$(origin)" = "$(commit_of "${xid_b}")" || fail "origin $(origin) is not B's COMMIT"

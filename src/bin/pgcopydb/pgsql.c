@@ -5105,6 +5105,87 @@ pgsql_replication_origin_xact_setup(PGSQL *pgsql,
 
 
 /*
+ * pgsql_replication_origin_xact_commit commits the open transaction with the
+ * origin progress at origin_lsn. Since Postgres 16 an abort after the setup
+ * advances the origin too, so the setup and the COMMIT go in one simple-query
+ * message, which the server runs only once it has all of it. When that fails
+ * the origin is moved back to rewind_lsn.
+ */
+bool
+pgsql_replication_origin_xact_commit(PGSQL *pgsql,
+									 char *nodeName,
+									 char *origin_lsn,
+									 char *origin_timestamp,
+									 char *rewind_lsn)
+{
+	PGconn *conn = pgsql->connection;
+	bool pipelineMode = pqPipelineModeEnabled(conn);
+
+#if defined(LIBPQ_HAS_PIPELINING) && LIBPQ_HAS_PIPELINING
+
+	/* a simple query needs the pipeline drained and closed first */
+	if (pipelineMode)
+	{
+		if (!pgsql_sync_pipeline(pgsql))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		if (PQexitPipelineMode(conn) != 1)
+		{
+			(void) pgcopy_log_error(pgsql, NULL, "Failed to exit pipeline mode");
+			return false;
+		}
+	}
+#endif
+
+	char *lsn = PQescapeLiteral(conn, origin_lsn, strlen(origin_lsn));
+	char *ts = PQescapeLiteral(conn, origin_timestamp, strlen(origin_timestamp));
+
+	if (lsn == NULL || ts == NULL)
+	{
+		(void) pgcopy_log_error(pgsql, NULL, "Failed to quote origin LSN or timestamp");
+		PQfreemem(lsn);
+		PQfreemem(ts);
+		return false;
+	}
+
+	char sql[BUFSIZE] = { 0 };
+
+	sformat(sql, sizeof(sql),
+			"select pg_replication_origin_xact_setup(%s, %s); commit",
+			lsn, ts);
+
+	PQfreemem(lsn);
+	PQfreemem(ts);
+
+	if (!pgsql_execute(pgsql, sql))
+	{
+		log_error("Failed to commit at origin LSN %s and origin timestamp "
+				  "\"%s\", moving replication origin \"%s\" back to %s",
+				  origin_lsn, origin_timestamp, nodeName, rewind_lsn);
+
+		/* pg_replication_origin_advance refuses an origin a session holds */
+		if (pgsql->connection == NULL ||
+			!clear_results(pgsql) ||
+			!pgsql_execute(pgsql, "rollback") ||
+			!pgsql_execute(pgsql, "select pg_replication_origin_session_reset()") ||
+			!pgsql_replication_origin_advance(pgsql, nodeName, rewind_lsn))
+		{
+			log_error("Failed to move replication origin \"%s\" back to %s, "
+					  "see above for details",
+					  nodeName, rewind_lsn);
+		}
+
+		return false;
+	}
+
+	return !pipelineMode || pgsql_enable_pipeline_mode(pgsql);
+}
+
+
+/*
  * pgsql_replication_origin_advance calls pg_replication_origin_advance().
  */
 bool

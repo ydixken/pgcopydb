@@ -1,8 +1,8 @@
 set pagination off
 set confirm off
 set may-call-functions off
-# a KEEPALIVE applied first sets the origin to the last commit, $confirmed_lsn
-break pgsql_replication_origin_xact_setup if !$_streq(origin_lsn, $confirmed_lsn)
+# a KEEPALIVE commits through pgsql_replication_origin_xact_setup instead
+break pgsql_replication_origin_xact_commit
 run
 delete
 python
@@ -10,7 +10,7 @@ import pathlib
 import time
 
 barrier = pathlib.Path(gdb.parse_and_eval("$barrier_dir").string())
-if gdb.newest_frame().name() != "pgsql_replication_origin_xact_setup":
+if gdb.newest_frame().name() != "pgsql_replication_origin_xact_commit":
     raise gdb.GdbError("apply did not stop before origin setup and COMMIT")
 lsn = gdb.parse_and_eval("origin_lsn").string()
 if lsn != gdb.parse_and_eval("$expected_lsn").string():
