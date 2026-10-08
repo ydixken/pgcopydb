@@ -19,9 +19,16 @@ pgcopydb ping
 psql -d ${PGCOPYDB_SOURCE_PGURI} -f /usr/src/pgcopydb/ddl.sql
 
 # create the replication slot that captures all the changes
-coproc ( pgcopydb snapshot --follow )
+pgcopydb snapshot --follow >/tmp/snapshot.out &
+snapshot_pid=$!
 
-sleep 1
+# the snapshot is printed once the slot exists and the snapshot file is written
+deadline=$((SECONDS + 60))
+while ! test -s /tmp/snapshot.out; do
+    kill -0 "${snapshot_pid}"
+    test "${SECONDS}" -lt "${deadline}"
+    sleep 0.1
+done
 
 # now setup the replication origin (target) and the pgcopydb.sentinel (source)
 pgcopydb stream setup
@@ -29,8 +36,8 @@ pgcopydb stream setup
 # pgcopydb clone copies the (empty) schema to the target
 pgcopydb clone
 
-kill -TERM ${COPROC_PID}
-wait ${COPROC_PID}
+kill -TERM "${snapshot_pid}"
+wait "${snapshot_pid}"
 
 #
 # Phase 1: inject 20 small transactions.  With --max-replaydb-size 1kB these

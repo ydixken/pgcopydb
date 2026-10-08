@@ -12,6 +12,7 @@
 
 #include "postgres.h"
 #include "postgres_fe.h"
+#include "pqexpbuffer.h"
 #include "access/xlog_internal.h"
 #include "access/xlogdefs.h"
 
@@ -62,6 +63,7 @@ static bool setupConnection(PGSQL *pgsql, StreamApplyContext *context);
 static bool stream_apply_load_target_relkinds(StreamApplyContext *context);
 
 static bool stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s);
+static bool stream_apply_truncate(StreamApplyContext *context, const char *sql);
 static bool stream_apply_transaction(StreamApplyContext *context,
 									 uint32_t xid,
 									 uint64_t begin_id,
@@ -1045,12 +1047,109 @@ stream_apply_transaction(StreamApplyContext *context,
 
 
 /*
+ * stream_apply_truncate executes a TRUNCATE as stream_write_truncate wrote it,
+ * minus ONLY before each relation that is partitioned on the target, because
+ * Postgres refuses TRUNCATE ONLY on a partitioned table.
+ */
+static bool
+stream_apply_truncate(StreamApplyContext *context, const char *sql)
+{
+	const char prefix[] = "TRUNCATE ";
+	const char only[] = "ONLY ";
+	const char *p = sql;
+	PQExpBuffer buf = createPQExpBuffer();
+
+	if (strncmp(p, prefix, strlen(prefix)) == 0)
+	{
+		p += strlen(prefix);
+		appendPQExpBufferStr(buf, prefix);
+
+		for (;;)
+		{
+			bool isOnly = strncmp(p, only, strlen(only)) == 0;
+			const char *qname = isOnly ? p + strlen(only) : p;
+			bool inQuote = false;
+
+			for (p = qname; *p != '\0'; p++)
+			{
+				if (*p == '"')
+				{
+					inQuote = !inQuote;
+				}
+				else if (!inQuote &&
+						 (*p == ',' || *p == ';' || isspace((unsigned char) *p)))
+				{
+					break;
+				}
+			}
+
+			char *name = strndup(qname, p - qname);
+			char relkind = '\0';
+
+			if (name == NULL)
+			{
+				log_error(ALLOCATION_FAILED_ERROR);
+				destroyPQExpBuffer(buf);
+				return false;
+			}
+
+			/* applyPgConn is in pipeline mode, which cannot read a result here */
+			if (isOnly &&
+				!pgsql_get_table_relkind(&(context->controlPgConn), name, &relkind))
+			{
+				log_warn("Could not resolve relkind for replicated "
+						 "TRUNCATE on \"%s\"; replaying as TRUNCATE ONLY. "
+						 "If the target is partitioned, Postgres will "
+						 "reject this statement.",
+						 name);
+			}
+
+			appendPQExpBuffer(buf, "%s%s",
+							  isOnly && relkind != 'p' ? only : "",
+							  name);
+
+			if (*p != ',')
+			{
+				break;
+			}
+
+			appendPQExpBufferStr(buf, ", ");
+
+			for (++p; *p == ' '; p++)
+			{ }
+		}
+	}
+
+	/* the rest is " RESTART IDENTITY" when the source used it */
+	appendPQExpBufferStr(buf, p);
+
+	/* chomp the final semi-colon that a SQL file carries */
+	if (buf->len > 0 && buf->data[buf->len - 1] == ';')
+	{
+		buf->data[--buf->len] = '\0';
+	}
+
+	if (PQExpBufferBroken(buf))
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		destroyPQExpBuffer(buf);
+		return false;
+	}
+
+	bool success = pgsql_execute(&(context->applyPgConn), buf->data);
+
+	destroyPQExpBuffer(buf);
+
+	return success;
+}
+
+
+/*
  * stream_apply_dml applies a single DML row (INSERT/UPDATE/DELETE/TRUNCATE)
  * to the target database.  The transaction must already be open.
  *
  * INSERT/UPDATE/DELETE use the PREPARE-once-per-hash + EXECUTE pattern.
- * TRUNCATE is executed directly (with TRUNCATE ONLY → TRUNCATE rewrite for
- * partitioned target tables).
+ * TRUNCATE is executed directly, see stream_apply_truncate.
  *
  * Rows with a NULL stmt and zero hash (generated-column degenerate rows) are
  * silently skipped.
@@ -1062,79 +1161,7 @@ stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s)
 
 	if (s->action == STREAM_ACTION_TRUNCATE)
 	{
-		const char *sql = (s->stmt != NULL) ? s->stmt : "";
-		int len = strlen(sql);
-		char truncateSQL[BUFSIZE] = { 0 };
-
-		strlcpy(truncateSQL, sql, sizeof(truncateSQL));
-
-		/* chomp trailing semicolon */
-		if (len > 0 && truncateSQL[len - 1] == ';')
-		{
-			truncateSQL[len - 1] = '\0';
-		}
-
-		const char *execSQL = truncateSQL;
-		char rewritten[BUFSIZE] = { 0 };
-		const char onlyPrefix[] = "TRUNCATE ONLY ";
-		size_t prefixLen = sizeof(onlyPrefix) - 1;
-
-		if (strncmp(truncateSQL, onlyPrefix, prefixLen) == 0)
-		{
-			const char *qname = truncateSQL + prefixLen;
-			bool isPartitioned = false;
-
-			if (context->targetRelkindCache != NULL &&
-				!IS_EMPTY_STRING_BUFFER(s->nspname))
-			{
-				TargetRelkind lookupKey = { 0 };
-				strlcpy(lookupKey.nspname, s->nspname, sizeof(lookupKey.nspname));
-				strlcpy(lookupKey.relname, s->relname, sizeof(lookupKey.relname));
-
-				unsigned keylen =
-					offsetof(TargetRelkind, relname) +
-					sizeof(lookupKey.relname) -
-					offsetof(TargetRelkind, nspname);
-
-				TargetRelkind *found = NULL;
-
-				HASH_FIND(hh, context->targetRelkindCache,
-						  lookupKey.nspname, keylen, found);
-
-				isPartitioned = (found != NULL && found->relkind == 'p');
-			}
-			else
-			{
-				/* cache unavailable: fall back to live lookup on controlPgConn */
-				char relkind = '\0';
-
-				if (pgsql_get_table_relkind(&(context->controlPgConn),
-											qname, &relkind))
-				{
-					isPartitioned = (relkind == 'p');
-				}
-				else
-				{
-					log_warn("Could not resolve relkind for replicated "
-							 "TRUNCATE on \"%s\"; replaying as TRUNCATE ONLY.",
-							 qname);
-				}
-			}
-
-			if (isPartitioned)
-			{
-				sformat(rewritten, sizeof(rewritten), "TRUNCATE %s", qname);
-				execSQL = rewritten;
-			}
-		}
-
-		if (!pgsql_execute(applyPgConn, execSQL))
-		{
-			/* errors have already been logged */
-			return false;
-		}
-
-		return true;
+		return stream_apply_truncate(context, s->stmt != NULL ? s->stmt : "");
 	}
 
 	/* INSERT / UPDATE / DELETE */
@@ -2278,60 +2305,7 @@ stream_apply_sql(StreamApplyContext *context,
 				return true;
 			}
 
-			/* chomp the final semi-colon that we added */
-			int len = strlen(sql);
-
-			if (sql[len - 1] == ';')
-			{
-				char *ptr = (char *) sql + len - 1;
-				*ptr = '\0';
-			}
-
-			/*
-			 * Postgres rejects TRUNCATE ONLY on partitioned tables. Mirror
-			 * the runtime fix in pgsql_truncate: when the target relation is
-			 * partitioned, drop the ONLY keyword. The lookup runs on the
-			 * non-pipeline controlPgConn because applyPgConn is in pipeline
-			 * mode (which forbids parseFun callbacks; see pgsql_execute_with_params).
-			 *
-			 * Invariant: stream_write_truncate emits exactly one relation per
-			 * statement (LogicalMessageTruncate.table is singular), so the
-			 * single-relation regclass lookup below is sufficient. If a future
-			 * change ever makes this multi-relation, the regclass cast will
-			 * fail, the rewrite will be skipped, and Postgres will surface a
-			 * loud error from the original TRUNCATE ONLY.
-			 */
-			char rewritten[BUFSIZE] = { 0 };
-			const char *truncateSQL = sql;
-			const char onlyPrefix[] = "TRUNCATE ONLY ";
-			size_t prefixLen = sizeof(onlyPrefix) - 1;
-
-			if (strncmp(sql, onlyPrefix, prefixLen) == 0)
-			{
-				char relkind = '\0';
-				const char *qname = sql + prefixLen;
-
-				if (pgsql_get_table_relkind(&(context->controlPgConn),
-											qname, &relkind))
-				{
-					if (relkind == 'p')
-					{
-						sformat(rewritten, sizeof(rewritten),
-								"TRUNCATE %s", qname);
-						truncateSQL = rewritten;
-					}
-				}
-				else
-				{
-					log_warn("Could not resolve relkind for replicated "
-							 "TRUNCATE on \"%s\"; replaying as TRUNCATE ONLY. "
-							 "If the target is partitioned, Postgres will "
-							 "reject this statement.",
-							 qname);
-				}
-			}
-
-			if (!pgsql_execute(applyPgConn, truncateSQL))
+			if (!stream_apply_truncate(context, sql))
 			{
 				/* errors have already been logged */
 				return false;

@@ -192,10 +192,10 @@ bool ld_store_iter_replay_finish(ReplayDBReplayIterator *iter);
 
 /*
  * ld_store_replay_next_event returns the next event to apply.  For
- * transactions it returns the BEGIN row only when the full transaction has
- * been written (endlsn > previousLSN).  KEEPALIVE rows have their own cursor,
- * keepaliveLSN: they must not be re-delivered, and previousLSN only ever
- * moves to a COMMIT the apply executed.
+ * transactions it returns the newest BEGIN of the one that commits first after
+ * previousLSN, once that copy is complete.  KEEPALIVE rows have their own
+ * cursor, keepaliveLSN: they must not be re-delivered, and previousLSN only
+ * ever moves to a COMMIT the apply executed.
  *
  * s->action is set to STREAM_ACTION_UNKNOWN when no rows are available.
  */
@@ -208,9 +208,9 @@ bool ld_store_replay_next_event(DatabaseCatalog *catalog,
 
 
 /*
- * ReplayDBReplayTxnIterator iterates over all rows of a single transaction
- * in the replay table (BEGIN + DML rows + COMMIT/ROLLBACK), starting from
- * the given begin_id, ordered by id.
+ * ReplayDBReplayTxnIterator iterates over the rows of a single transaction
+ * in the replay table (BEGIN + DML rows + COMMIT/ROLLBACK), from the given
+ * begin_id to the first end row after it, ordered by id.
  */
 typedef struct ReplayDBReplayTxnIterator
 {

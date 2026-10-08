@@ -17,9 +17,16 @@ psql -o /tmp/s.out -d ${PGCOPYDB_SOURCE_PGURI} -1 -f /usr/src/pagila/pagila-sche
 psql -o /tmp/d.out -d ${PGCOPYDB_SOURCE_PGURI} -1 -f /usr/src/pagila/pagila-data.sql
 
 # create the replication slot that captures all the changes with pgoutput
-coproc ( pgcopydb snapshot --follow --plugin pgoutput )
+pgcopydb snapshot --follow --plugin pgoutput >/tmp/snapshot.out &
+snapshot_pid=$!
 
-sleep 1
+# the snapshot is printed once the slot exists and the snapshot file is written
+deadline=$((SECONDS + 60))
+while ! test -s /tmp/snapshot.out; do
+    kill -0 "${snapshot_pid}"
+    test "${SECONDS}" -lt "${deadline}"
+    sleep 0.1
+done
 
 # now setup the replication origin (target) and the pgcopydb.sentinel (source)
 pgcopydb stream setup
@@ -27,8 +34,8 @@ pgcopydb stream setup
 # clone source to target, skipping the 'staff' table
 pgcopydb clone --filters /usr/src/pgcopydb/filters.ini --split-tables-larger-than 200kB
 
-kill -TERM ${COPROC_PID}
-wait ${COPROC_PID}
+kill -TERM "${snapshot_pid}"
+wait "${snapshot_pid}"
 
 #
 # Verify that the filter excluded 'staff' from the initial clone.

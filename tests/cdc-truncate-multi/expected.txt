@@ -1,0 +1,9 @@
+S p.T, ONLY x|1|f
+public.casc_child|10|t
+public.casc_parent|10|t
+public.child|10|t
+public.parent|10|t
+public.tr3|1|f
+public.tr5|1|f
+public.tr6|1|f
+public.tr7|10|t

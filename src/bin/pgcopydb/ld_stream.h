@@ -171,7 +171,9 @@ typedef struct LogicalMessageDelete
 
 typedef struct LogicalMessageTruncate
 {
-	LogicalMessageRelation table;
+	int count;
+	LogicalMessageRelation *tables; /* malloc'ed area */
+	bool restartIdentity;
 } LogicalMessageTruncate;
 
 typedef struct LogicalMessageSwitchWAL

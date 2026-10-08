@@ -25,7 +25,8 @@ drain() {
     timeout 120s pgcopydb follow --resume --not-consistent --notice
 }
 
-# without the overlap this suite would pass on a build that loses it
+# without the overlap this suite would pass on a build that loses it; count
+# each workload's pairs on their own, so one workload cannot cover another
 interleaved() {
     local n=0 f
     for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
@@ -34,7 +35,8 @@ interleaved() {
                join output c on c.action = 'C' and c.id < b.id and c.lsn > b.lsn
               where b.action = 'B'")))
     done
-    test "${n}" -ge "$1"
+    test "$((n - seen))" -eq "$1"
+    seen=${n}
 }
 
 compare() {
@@ -72,6 +74,7 @@ for plugin in pgoutput test_decoding; do
     wait ${snapshot_pid}
 
     pgcopydb stream sentinel set apply
+    seen=0
 
     # a later transaction commits after the last overlapped one
     workload followed.sql
@@ -82,7 +85,7 @@ for plugin in pgoutput test_decoding; do
     # the overlapped transaction is the last one before endpos
     workload tail.sql
     drain
-    interleaved 4
+    interleaved 1
     compare
 
     pgcopydb stream cleanup

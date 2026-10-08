@@ -24,8 +24,10 @@ services:
       -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
 
   test:
-    image: cdc-resend-after-reconnect
+    image: cdc-commit-order-resume
     build: .
+    cap_add:
+      - SYS_PTRACE
     environment:
       PGSSLMODE: "require"
       PGCOPYDB_SOURCE_PGURI: postgres://postgres:h4ckm3@source/postgres
@@ -33,7 +35,7 @@ services:
       PGCOPYDB_TABLE_JOBS: 2
       PGCOPYDB_INDEX_JOBS: 2
       PGCOPYDB_OUTPUT_PLUGIN: pgoutput
-      RESEND_CASE: ${RESEND_CASE:-}
+      CASE: ${CASE:-all}
     depends_on:
       - source
       - target
