@@ -1599,6 +1599,34 @@ prepareMessageMetadataFromContext(LogicalStreamContext *context)
 		return false;
 	}
 
+	/*
+	 * Every tuple of a multi-insert WAL record decodes at the same LSN, so
+	 * output rows are keyed on seq too.  A send always starts at BEGIN, so a
+	 * re-sent change gets the same seq again and replaces its row.
+	 */
+	switch (metadata->action)
+	{
+		case STREAM_ACTION_BEGIN:
+		{
+			privateContext->changeSeq = 0;
+			break;
+		}
+
+		case STREAM_ACTION_INSERT:
+		case STREAM_ACTION_UPDATE:
+		case STREAM_ACTION_DELETE:
+		case STREAM_ACTION_TRUNCATE:
+		{
+			metadata->seq = ++privateContext->changeSeq;
+			break;
+		}
+
+		default:
+		{
+			break;
+		}
+	}
+
 	/* in case of filtering, early exit */
 	if (metadata->filterOut)
 	{

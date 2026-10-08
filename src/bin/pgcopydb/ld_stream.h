@@ -71,6 +71,7 @@ typedef struct LogicalMessageMetadata
 	uint32_t xid;
 	uint64_t lsn;
 	uint64_t txnCommitLSN;      /* COMMIT LSN of the transaction */
+	uint32_t seq;               /* change number in its transaction, from 1 */
 	char timestamp[PG_MAX_TIMESTAMP];
 
 	/* our own internal decision making */
@@ -457,6 +458,7 @@ typedef struct StreamContext
 	FILE *sqlFile;
 
 	bool transactionInProgress;
+	uint32_t changeSeq;         /* seq of the last change since BEGIN */
 
 	/*
 	 * Output plugin identity, copied from specs->slot.plugin at context init.

@@ -615,9 +615,11 @@ static char *outputDBcreateDDLs[] = {
 	"  id integer primary key, "
 	"  action text, xid integer, lsn integer, timestamp text, "
 	"  message text, "
-	"  nspname text, relname text, old_type text)",
+	"  nspname text, relname text, old_type text, "
+	"  seq integer not null default 0)",
 
-	"create unique index o_a_lsn on output(action, lsn)",
+	/* the tuples of a multi-insert WAL record share their lsn */
+	"create unique index o_a_lsn_seq on output(action, lsn, seq)",
 	"create index o_a_xid on output(action, xid)",
 
 	/* lets the transform find the newest BEGIN without scanning markers */
@@ -746,6 +748,7 @@ static char *replayDBdropDDLs[] = {
 };
 
 static bool catalog_upgrade_schema(DatabaseCatalog *catalog);
+static bool catalog_upgrade_output_schema(DatabaseCatalog *catalog);
 
 
 /*
@@ -1626,6 +1629,11 @@ catalog_init(DatabaseCatalog *catalog)
 static bool
 catalog_upgrade_schema(DatabaseCatalog *catalog)
 {
+	if (catalog->type == DATABASE_CATALOG_TYPE_OUTPUT)
+	{
+		return catalog_upgrade_output_schema(catalog);
+	}
+
 	if (catalog->type != DATABASE_CATALOG_TYPE_SOURCE &&
 		catalog->type != DATABASE_CATALOG_TYPE_FILTER &&
 		catalog->type != DATABASE_CATALOG_TYPE_TARGET)
@@ -1690,6 +1698,120 @@ catalog_upgrade_schema(DatabaseCatalog *catalog)
 	(void) semaphore_unlock(&(catalog->sema));
 
 	return true;
+}
+
+
+/*
+ * catalog_output_lacks_seq sets lacksSeq when the output table predates the
+ * seq column.
+ */
+static bool
+catalog_output_lacks_seq(DatabaseCatalog *catalog, bool *lacksSeq)
+{
+	char *sql =
+		"select not exists(select 1 from pragma_table_info('output') "
+		"                   where name = 'seq')";
+
+	SQLiteQuery query = { 0 };
+
+	if (!catalog_sql_prepare(catalog->db, sql, &query))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (catalog_sql_step(&query) != SQLITE_ROW)
+	{
+		log_error("Failed to check output table of \"%s\": %s",
+				  catalog->dbfile,
+				  sqlite3_errmsg(catalog->db));
+		(void) catalog_sql_finalize(&query);
+		return false;
+	}
+
+	*lacksSeq = sqlite3_column_int(query.ppStmt, 0) == 1;
+
+	return catalog_sql_finalize(&query);
+}
+
+
+/*
+ * An output.db from an older pgcopydb keys its rows on (action, lsn), so
+ * receive would keep one tuple of each multi-insert WAL record.  Rekey it,
+ * so that --resume keeps writing to it.
+ */
+static bool
+catalog_upgrade_output_schema(DatabaseCatalog *catalog)
+{
+	char *ddls[] = {
+		"alter table output add column seq integer not null default 0",
+		"drop index if exists o_a_lsn",
+		"create unique index o_a_lsn_seq on output(action, lsn, seq)",
+		"create index if not exists o_begin on output(action) where action = 'B'"
+	};
+
+	bool lacksSeq = false;
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/*
+	 * Apply opens this file while receive holds its write transaction, so
+	 * only take the write lock when there is work, and check again under it.
+	 */
+	if (!catalog_output_lacks_seq(catalog, &lacksSeq))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	if (!lacksSeq)
+	{
+		(void) semaphore_unlock(&(catalog->sema));
+		return true;
+	}
+
+	if (!catalog_begin(catalog, true))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	if (!catalog_output_lacks_seq(catalog, &lacksSeq))
+	{
+		(void) catalog_rollback(catalog);
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	if (lacksSeq)
+	{
+		log_notice("Adding column output.seq to \"%s\"", catalog->dbfile);
+
+		int count = sizeof(ddls) / sizeof(ddls[0]);
+
+		for (int i = 0; i < count; i++)
+		{
+			if (!catalog_execute(catalog, ddls[i]))
+			{
+				/* errors have already been logged */
+				(void) catalog_rollback(catalog);
+				(void) semaphore_unlock(&(catalog->sema));
+				return false;
+			}
+		}
+	}
+
+	bool committed = catalog_commit(catalog);
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return committed;
 }
 
 
