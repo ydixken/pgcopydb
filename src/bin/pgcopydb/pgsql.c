@@ -5108,8 +5108,9 @@ pgsql_replication_origin_xact_setup(PGSQL *pgsql,
  * pgsql_replication_origin_xact_commit commits the open transaction with the
  * origin progress at origin_lsn. Since Postgres 16 an abort after the setup
  * advances the origin too, so the setup and the COMMIT go in one simple-query
- * message, which the server runs only once it has all of it. When that fails
- * the origin is moved back to rewind_lsn.
+ * message, which the server runs only once it has all of it. Deferred triggers
+ * and checks run before the setup, so a backend terminated in them leaves the
+ * origin alone. When the query fails the origin is moved back to rewind_lsn.
  */
 bool
 pgsql_replication_origin_xact_commit(PGSQL *pgsql,
@@ -5154,6 +5155,7 @@ pgsql_replication_origin_xact_commit(PGSQL *pgsql,
 	char sql[BUFSIZE] = { 0 };
 
 	sformat(sql, sizeof(sql),
+			"set constraints all immediate; "
 			"select pg_replication_origin_xact_setup(%s, %s); commit",
 			lsn, ts);
 

@@ -3,6 +3,7 @@
 # A transaction the apply did not commit must not move the replication origin.
 # Case A kills the apply once everything before its COMMIT ran on the target.
 # Case B makes the COMMIT itself fail in a deferred trigger only the target has.
+# Case C terminates the target backend while such a trigger runs at COMMIT.
 # Each case then resumes and expects the transaction applied, none skipped.
 
 set -euxo pipefail
@@ -161,6 +162,45 @@ target_sql 'drop trigger oa_reject on oa'
 timeout 60s pgcopydb stream catchup --resume --endpos "${commit_b2}"
 check "B: origin after resume" "${commit_b2}" "$(origin)"
 check "B: rows after resume" "$(source_sql "$(digest 'id > 1000')")" "$(target_sql "$(digest 'id > 1000')")"
+
+#
+# Case C: the target backend is terminated while a deferred trigger runs
+#
+target_sql "create function oa_stall() returns trigger language plpgsql as \$\$
+    begin perform pg_sleep(300); return null; end \$\$;
+    create constraint trigger oa_stall after insert on oa deferrable initially deferred
+    for each row when (new.v = 'stall') execute function oa_stall();
+    alter table oa enable always trigger oa_stall"
+xid=$(source_sql "begin; select pg_current_xact_id(); insert into oa values (2001, 1, 'stall'); commit")
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+commit_c=$(commit_lsn "${xid}")
+pgcopydb stream sentinel set endpos "${commit_c}"
+origin_before=$(origin)
+
+timeout 120s pgcopydb stream catchup --resume --endpos "${commit_c}" >"${TMPDIR}/stall.log" 2>&1 &
+apply_pid=$!
+deadline=$((SECONDS + 60))
+while true; do
+    stalled=$(target_sql "select pid from pg_stat_activity
+     where application_name like 'pgcopydb%' and wait_event = 'PgSleep'")
+    if [[ ${stalled} =~ ^[1-9][0-9]*$ ]]; then break; fi
+    kill -0 "${apply_pid}"
+    test "${SECONDS}" -lt "${deadline}"
+    sleep 0.1
+done
+target_sql "select state, query from pg_stat_activity where pid = ${stalled}"
+target_sql "select pg_terminate_backend(${stalled}, 10000)"
+status=0
+wait "${apply_pid}" || status=$?
+apply_pid=
+grep -E 'ERROR|FATAL' "${TMPDIR}/stall.log" | cut -c1-300 || true
+test "${status}" -ne 0
+check "C: origin after termination at ${commit_c}" "${origin_before}" "$(origin)"
+
+target_sql 'drop trigger oa_stall on oa'
+timeout 60s pgcopydb stream catchup --resume --endpos "${commit_c}"
+check "C: origin after resume" "${commit_c}" "$(origin)"
+check "C: rows after resume" "$(source_sql "$(digest 'id > 2000')")" "$(target_sql "$(digest 'id > 2000')")"
 
 pgcopydb stream cleanup
 echo "RESULT failures=${failures}"
