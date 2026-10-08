@@ -44,6 +44,14 @@ __ https://www.postgresql.org/docs/current/logical-replication-restrictions.html
 
  - Large Objects are not replicated.
 
+ - ``TRUNCATE ... CASCADE`` is replayed without ``CASCADE``.
+
+   The source lists every table that its ``TRUNCATE`` reached, and pgcopydb
+   truncates those tables on the target in one statement, with ``RESTART
+   IDENTITY`` when the source used it. As in Postgres logical replication,
+   the target does not cascade further: a target table that references them
+   and was not truncated on the source makes the replay fail.
+
 See the Postgres documentation page for `Logical Replication Restrictions`__
 to read the exhaustive list of restrictions.
 

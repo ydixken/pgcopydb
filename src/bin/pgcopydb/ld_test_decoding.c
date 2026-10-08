@@ -64,6 +64,9 @@ static bool parseTestDecodingMessageHeader(TestDecodingHeader *header,
 static bool parseTestDecodingInsertMessage(StreamContext *privateContext,
 										   TestDecodingHeader *header);
 
+static bool parseTestDecodingTruncateMessage(TestDecodingHeader *header,
+											 LogicalMessageTruncate *truncate);
+
 static bool parseTestDecodingUpdateMessage(StreamContext *privateContext,
 										   TestDecodingHeader *header);
 
@@ -301,7 +304,13 @@ parseTestDecodingMessage(StreamContext *privateContext,
 
 		case STREAM_ACTION_TRUNCATE:
 		{
-			stmt->stmt.truncate.table = header.table;
+			if (!parseTestDecodingTruncateMessage(&header,
+												  &(stmt->stmt.truncate)))
+			{
+				log_error("Failed to parse test_decoding TRUNCATE message: %s",
+						  header.message);
+				return false;
+			}
 
 			break;
 		}
@@ -526,6 +535,101 @@ parseTestDecodingMessageHeader(TestDecodingHeader *header, const char *message)
 				  message);
 		return false;
 	}
+
+	return true;
+}
+
+
+/*
+ * A TRUNCATE header lists every relation, then the flags:
+ *   table public.a, "S p"."B, c": TRUNCATE: restart_seqs cascade
+ */
+static bool
+parseTestDecodingTruncateMessage(TestDecodingHeader *header,
+								 LogicalMessageTruncate *truncate)
+{
+	const char *message = header->message;
+	char *list = (char *) message + strlen("table ");
+	int listLen = 0;
+
+	if (!findIdentifierEndPos(list, ':', &listLen))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	list = strndup(list, listLen);
+
+	if (list == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	/* split the list at the commas found outside of quoted identifiers */
+	int count = 1;
+	bool inQuote = false;
+
+	for (char *p = list; *p != '\0'; p++)
+	{
+		if (*p == '"')
+		{
+			inQuote = !inQuote;
+		}
+		else if (*p == ',' && !inQuote)
+		{
+			*p = '\0';
+			++count;
+		}
+	}
+
+	truncate->count = count;
+	truncate->tables =
+		(LogicalMessageRelation *) calloc(count, sizeof(LogicalMessageRelation));
+
+	if (truncate->tables == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	char *item = list;
+
+	for (int i = 0; i < count; i++)
+	{
+		int itemLen = strlen(item);
+		int dot = 0;
+
+		while (*item == ' ')
+		{
+			++item;
+			--itemLen;
+		}
+
+		if (!findIdentifierEndPos(item, '.', &dot))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		truncate->tables[i].nspname = strndup(item, dot);
+		truncate->tables[i].relname = strdup(item + dot + 1);
+
+		if (truncate->tables[i].nspname == NULL ||
+			truncate->tables[i].relname == NULL)
+		{
+			log_error(ALLOCATION_FAILED_ERROR);
+			return false;
+		}
+
+		item += itemLen + 1;
+	}
+
+	const char *flags = message + header->offset;
+
+	truncate->restartIdentity =
+		header->offset <= (int) strlen(message) &&
+		strstr(flags, "restart_seqs") != NULL;
 
 	return true;
 }

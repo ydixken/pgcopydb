@@ -45,6 +45,9 @@
  */
 #define PGOUT_IS_REPLICA_IDENTITY 0x01
 
+/* TRUNCATE flags from logicalproto.h; CASCADE is decoded but not replayed */
+#define PGOUT_TRUNCATE_RESTART_SEQS (1 << 1)
+
 
 /* ----------
  * Big-endian binary reader helpers.
@@ -748,23 +751,58 @@ preparePgoutputMessage(LogicalStreamContext *context)
 		case 'T':
 		{
 			uint32_t nrelids = pgout_u32(buf, &pos, bufLen);
-			pgout_u8(buf, &pos, bufLen);    /* flags (cascade, restart_seqs) */
+			uint8_t flags = pgout_u8(buf, &pos, bufLen);
+
+			if (nrelids == 0 || nrelids > (uint32_t) (bufLen - pos) / 4)
+			{
+				log_error("pgoutput: TRUNCATE with %u relations in a "
+						  "%d bytes message", nrelids, bufLen);
+				return false;
+			}
+
+			/* one 'T' column per relation: name is nspname, value is relname */
+			msg->new_cols = calloc(nrelids, sizeof(PgoutputColumn));
+
+			if (msg->new_cols == NULL)
+			{
+				log_error(ALLOCATION_FAILED_ERROR);
+				return false;
+			}
+
+			msg->ncols_new = nrelids;
+
+			if (flags & PGOUT_TRUNCATE_RESTART_SEQS)
+			{
+				msg->oldType = 'R';
+			}
 
 			for (uint32_t i = 0; i < nrelids; i++)
 			{
 				uint32_t relOid = pgout_u32(buf, &pos, bufLen);
+				PgoutputRelationCache *rel = NULL;
+				HASH_FIND_INT(privateContext->pgoutputRelationCache, &relOid, rel);
+
+				if (rel == NULL)
+				{
+					log_error("pgoutput: TRUNCATE for uncached relOid %u", relOid);
+					return false;
+				}
+
 				if (i == 0)
 				{
-					PgoutputRelationCache *rel = NULL;
-					HASH_FIND_INT(privateContext->pgoutputRelationCache,
-								  &relOid, rel);
-					if (rel != NULL)
-					{
-						strlcpy(msg->nspname, rel->nspname,
-								sizeof(msg->nspname));
-						strlcpy(msg->relname, rel->relname,
-								sizeof(msg->relname));
-					}
+					strlcpy(msg->nspname, rel->nspname, sizeof(msg->nspname));
+					strlcpy(msg->relname, rel->relname, sizeof(msg->relname));
+				}
+
+				strlcpy(msg->new_cols[i].name, rel->nspname,
+						sizeof(msg->new_cols[i].name));
+				msg->new_cols[i].status = 't';
+				msg->new_cols[i].value = strdup(rel->relname);
+
+				if (msg->new_cols[i].value == NULL)
+				{
+					log_error(ALLOCATION_FAILED_ERROR);
+					return false;
 				}
 			}
 			break;
@@ -1207,8 +1245,47 @@ parsePgoutputMessage(StreamContext *privateContext,
 
 		case STREAM_ACTION_TRUNCATE:
 		{
-			stmt->stmt.truncate.table.nspname = quote_and_dup(nspname);
-			stmt->stmt.truncate.table.relname = quote_and_dup(relname);
+			LogicalMessageTruncate *truncate = &(stmt->stmt.truncate);
+
+			for (int i = 0; i < colCount; i++)
+			{
+				truncate->count += (sections[i][0] == 'T');
+			}
+
+			/* an output.db written before 'T' columns existed has one relation */
+			bool legacy = (truncate->count == 0);
+
+			if (legacy)
+			{
+				truncate->count = 1;
+			}
+
+			truncate->tables = (LogicalMessageRelation *)
+							   calloc(truncate->count, sizeof(LogicalMessageRelation));
+
+			if (truncate->tables == NULL)
+			{
+				log_error(ALLOCATION_FAILED_ERROR);
+				return false;
+			}
+
+			if (legacy)
+			{
+				truncate->tables[0].nspname = quote_and_dup(nspname);
+				truncate->tables[0].relname = quote_and_dup(relname);
+			}
+
+			for (int i = 0, j = 0; i < colCount; i++)
+			{
+				if (sections[i][0] == 'T')
+				{
+					truncate->tables[j].nspname = quote_and_dup(names[i]);
+					truncate->tables[j].relname = quote_and_dup(values[i]);
+					++j;
+				}
+			}
+
+			truncate->restartIdentity = (old_type == 'R');
 			break;
 		}
 

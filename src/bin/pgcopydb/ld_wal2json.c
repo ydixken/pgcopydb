@@ -150,7 +150,18 @@ parseWal2jsonMessage(StreamContext *privateContext,
 
 		case STREAM_ACTION_TRUNCATE:
 		{
-			stmt->stmt.truncate.table = table;
+			/* wal2json sends one message per truncated relation */
+			stmt->stmt.truncate.tables =
+				(LogicalMessageRelation *) calloc(1, sizeof(LogicalMessageRelation));
+
+			if (stmt->stmt.truncate.tables == NULL)
+			{
+				log_error(ALLOCATION_FAILED_ERROR);
+				return false;
+			}
+
+			stmt->stmt.truncate.count = 1;
+			stmt->stmt.truncate.tables[0] = table;
 			break;
 		}
 

@@ -133,6 +133,7 @@ jobs:
           - cdc-matview
           - cdc-replica-identity-index
           - cdc-replica-identity-full
+          - cdc-truncate-multi
           - follow-wal2json
           - follow-pgoutput
           - follow-9.6
@@ -172,6 +173,8 @@ jobs:
           - TEST: cdc-replica-identity-index
             PGVERSION: 16
           - TEST: cdc-replica-identity-full
+            PGVERSION: 16
+          - TEST: cdc-truncate-multi
             PGVERSION: 16
           - TEST: follow-wal2json
             PGVERSION: 16
