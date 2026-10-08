@@ -3197,20 +3197,9 @@ ld_store_replay_event_fetch(SQLiteQuery *query)
 
 
 /*
- * ld_store_replay_next_event returns the next event to apply after
- * previousLSN into s.  s->action is STREAM_ACTION_UNKNOWN when no rows.
- *
- * For transactions: returns the BEGIN row only when the matching COMMIT
- * already exists in the replay table (endlsn > previousLSN ensures this).
- *
- * For non-transactional events (KEEPALIVE only — ENDPOS rows are no longer
- * written to the replay table): returns the first row at lsn > keepaliveLSN.
- *
- * Apply exits when no more rows AND pipeline_state['transform'].run_end_lsn
- * has been reached (set at stream_apply_catchup startup).
- *
- * The UNION ALL orders by lsn ASC, id ASC so that a non-txn event whose LSN
- * is earlier than any pending BEGIN is returned first.
+ * ld_store_replay_next_event returns the newest BEGIN of the transaction that
+ * commits first after previousLSN, or the first KEEPALIVE after keepaliveLSN
+ * when it sorts first.  s->action is STREAM_ACTION_UNKNOWN when there is none.
  */
 bool
 ld_store_replay_next_event(DatabaseCatalog *catalog,
@@ -3227,18 +3216,8 @@ ld_store_replay_next_event(DatabaseCatalog *catalog,
 	}
 
 	/*
-	 * Return the next event that is ready to apply.
-	 *
-	 * For transactions (action='B'): only return the BEGIN row when the
-	 * matching COMMIT or ROLLBACK row already exists in the replay table.
-	 * The JOIN on replay c ensures this: the transform writes BEGIN first
-	 * (with endlsn populated), then DML rows, then COMMIT — each as a
-	 * separate SQLite statement.  Without the JOIN we could see a BEGIN
-	 * before its COMMIT and DML rows have been written.
-	 *
-	 * For non-transactional events (KEEPALIVE only — ENDPOS rows are no
-	 * longer written to the replay table): return the first KEEPALIVE row
-	 * at lsn STRICTLY greater than keepaliveLSN.
+	 * Commit order, as in ld_store_lookup_output_after_lsn.  A killed apply can
+	 * leave a partial copy: wait while the newest BEGIN is above the end row.
 	 *
 	 * Keepalives get their own cursor because previousLSN also selects the
 	 * transactions still to apply.  A keepalive LSN sits above transactions
@@ -3247,16 +3226,20 @@ ld_store_replay_next_event(DatabaseCatalog *catalog,
 	 * >= the row apply just consumed comes back and apply spins.
 	 */
 	char *sql =
-		"select b.id, b.action, b.xid, b.lsn, b.endlsn, b.timestamp "
-		"  from replay b "
-		"  join replay c on c.xid = b.xid and c.action in ('C', 'R') "
-		" where b.action = 'B' and b.endlsn > $1 "
-		"union all "
-		"select id, action, xid, lsn, endlsn, timestamp "
-		"  from replay "
-		" where action = 'K' "            /* KEEPALIVE only — no ENDPOS rows */
-		"   and lsn > $2 "                /* strict: avoids re-delivering same row */
-		"order by lsn asc, id asc "
+		"select id, action, xid, lsn, endlsn, timestamp from ("
+		"  select b.id, b.action, b.xid, b.lsn, b.endlsn, b.timestamp, e.lsn as k "
+		"    from (select id, xid, lsn from replay "
+		"           where action in ('C', 'R') and lsn > $1 "
+		"        order by lsn, id desc limit 1) e "
+		"    join replay b on b.id = (select max(id) from replay "
+		"                              where action = 'B' and xid = e.xid) "
+		"   where b.id < e.id "
+		" union all "
+		"  select * from ("
+		"    select id, action, xid, lsn, endlsn, timestamp, lsn as k "
+		"      from replay where action = 'K' and lsn > $2 order by lsn limit 1) "
+		") "
+		"order by k, case when action = 'B' then 0 else 1 end, id "
 		"limit 1";
 
 	bzero(s, sizeof(ReplayDBStmt));
@@ -3297,9 +3280,9 @@ ld_store_replay_next_event(DatabaseCatalog *catalog,
 
 
 /*
- * ld_store_iter_replay_txn_init prepares the inner-transaction iterator.
- * It fetches all rows for the given xid with id >= begin_id, in id order.
- * This covers: the BEGIN row itself, all DML rows, and the COMMIT/ROLLBACK row.
+ * ld_store_iter_replay_txn_init prepares the inner-transaction iterator over
+ * the rows of xid from begin_id to the first COMMIT or ROLLBACK after it, in
+ * id order, so that another copy of the transaction is never read with it.
  */
 bool
 ld_store_iter_replay_txn_init(ReplayDBReplayTxnIterator *iter)
@@ -3328,6 +3311,8 @@ ld_store_iter_replay_txn_init(ReplayDBReplayTxnIterator *iter)
 		"     from replay r "
 		"left join stmt s on r.stmt_hash = s.hash "
 		"    where r.xid = $1 and r.id >= $2 "
+		"      and r.id <= (select min(id) from replay "
+		"                    where xid = $1 and action in ('C', 'R') and id > $2) "
 		" order by r.id";
 
 	SQLiteQuery *query = &(iter->query);
