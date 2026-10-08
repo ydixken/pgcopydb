@@ -1887,12 +1887,41 @@ stream_transform_write_replay_stmt(StreamSpecs *specs)
 }
 
 
+static bool stream_transform_write_replay_txn_rows(StreamSpecs *specs);
+
 /*
- * stream_transform_write_replay_txn walks through a transaction's list of
- * statements and inserts them in the replayDB stmt and replay tables.
+ * stream_transform_write_replay_txn writes a transaction's replay rows in one
+ * SQLite transaction, so that a killed apply never leaves part of it behind
+ * for the next run to read along with the copy that run writes.
  */
 bool
 stream_transform_write_replay_txn(StreamSpecs *specs)
+{
+	DatabaseCatalog *replayDB = specs->replayDB;
+
+	if (!catalog_begin(replayDB, false))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!stream_transform_write_replay_txn_rows(specs) ||
+		!catalog_commit(replayDB))
+	{
+		(void) catalog_rollback(replayDB);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * stream_transform_write_replay_txn_rows walks through a transaction's list of
+ * statements and inserts them in the replayDB stmt and replay tables.
+ */
+static bool
+stream_transform_write_replay_txn_rows(StreamSpecs *specs)
 {
 	StreamContext *privateContext = &(specs->private);
 	LogicalMessage *msg = &(privateContext->currentMsg);

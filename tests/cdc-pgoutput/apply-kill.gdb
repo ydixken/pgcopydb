@@ -1,8 +1,10 @@
 set pagination off
 set confirm off
 set may-call-functions off
-tbreak pgsql_replication_origin_xact_setup
+# a KEEPALIVE applied first sets the origin to the last commit, $confirmed_lsn
+break pgsql_replication_origin_xact_setup if !$_streq(origin_lsn, $confirmed_lsn)
 run
+delete
 python
 import pathlib
 import time

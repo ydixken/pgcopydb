@@ -146,8 +146,10 @@ typedef struct ReplayDBOutputIterator
 
 	/*
 	 * pending_xid is set when the init step found a BEGIN for xid N in the
-	 * output table but no matching COMMIT/ROLLBACK yet.  The outer function
-	 * (ld_store_iter_output) checks this to decide between two situations:
+	 * output table but not its COMMIT, or one that receive is sending again
+	 * after a reconnect (see ld_store_lookup_output_xid_end).  The outer
+	 * function (ld_store_iter_output) checks this to decide between two
+	 * situations:
 	 *
 	 *   pending_xid == 0  — no rows at all; upstream is still producing.
 	 *   pending_xid != 0  — a BEGIN exists but COMMIT has not arrived yet.
@@ -190,10 +192,10 @@ bool ld_store_iter_replay_finish(ReplayDBReplayIterator *iter);
 
 /*
  * ld_store_replay_next_event returns the next event to apply.  For
- * transactions it returns the BEGIN row only when the full transaction has
- * been written (endlsn > previousLSN).  KEEPALIVE rows have their own cursor,
- * keepaliveLSN: they must not be re-delivered, and previousLSN only ever
- * moves to a COMMIT the apply executed.
+ * transactions it returns the newest BEGIN of the one that commits first after
+ * previousLSN, once that copy is complete.  KEEPALIVE rows have their own
+ * cursor, keepaliveLSN: they must not be re-delivered, and previousLSN only
+ * ever moves to a COMMIT the apply executed.
  *
  * s->action is set to STREAM_ACTION_UNKNOWN when no rows are available.
  */
@@ -206,9 +208,9 @@ bool ld_store_replay_next_event(DatabaseCatalog *catalog,
 
 
 /*
- * ReplayDBReplayTxnIterator iterates over all rows of a single transaction
- * in the replay table (BEGIN + DML rows + COMMIT/ROLLBACK), starting from
- * the given begin_id, ordered by id.
+ * ReplayDBReplayTxnIterator iterates over the rows of a single transaction
+ * in the replay table (BEGIN + DML rows + COMMIT/ROLLBACK), from the given
+ * begin_id to the first end row after it, ordered by id.
  */
 typedef struct ReplayDBReplayTxnIterator
 {

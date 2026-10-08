@@ -624,16 +624,9 @@ ld_store_lookup_output_at_lsn(DatabaseCatalog *catalog, uint64_t lsn,
 
 
 /*
- * ld_store_lookup_output_after_lsn searches the first message following the
- * given LSN in the replayDB database.
- *
- * The same LSN would typically be used in Postgres for a COMMIT message and
- * the BEGIN message of the following transaction, so we search for a message
- * with an lsn greater than or equal to the given one, and a message that's
- * neither a COMMIT nor a ROLLBACK.
- *
- * {"action":"C","xid":"499","lsn":"0/24E1B08"}
- * {"action":"B","xid":"500","lsn":"0/24E1B08"}
+ * ld_store_lookup_output_after_lsn returns the next unit to transform: the
+ * BEGIN of the transaction that commits first after lsn, the first KEEPALIVE
+ * or SWITCH after keepaliveLSN, or else the BEGIN of a still open transaction.
  */
 bool
 ld_store_lookup_output_after_lsn(DatabaseCatalog *catalog,
@@ -652,77 +645,53 @@ ld_store_lookup_output_after_lsn(DatabaseCatalog *catalog,
 
 
 	/*
-	 * Order by LSN so that a BEGIN (which has the lowest LSN in its
-	 * transaction) is found before any internal markers (ENDPOS, KEEPALIVE)
-	 * that may have been inserted at the same LSN or higher.
-	 * Within the same LSN, prefer BEGIN (action='B') over other actions,
-	 * then fall back to insertion order (id) as a tiebreaker.
+	 * Logical decoding sends transactions in commit order, but a BEGIN row
+	 * carries the transaction's first LSN, which is below the previous COMMIT
+	 * when the two overlapped on the source.  So a transaction is keyed by its
+	 * COMMIT row, strictly above lsn: the target origin holds that COMMIT LSN.
 	 *
-	 * SQLite requires ORDER BY on a UNION to reference result-set columns by
-	 * name, so wrap the UNION in a subquery to allow the CASE expression.
+	 * After a reconnect, receive sends the unapplied backlog again and
+	 * INSERT OR REPLACE gives each rewritten row a new id, while the COMMIT
+	 * LSN stays.  So the BEGIN returned is the newest one for the xid, even
+	 * when its id is above the COMMIT's: ld_store_lookup_output_xid_end then
+	 * reports the transaction as not complete yet and the caller waits on it,
+	 * rather than skip to a later transaction that would move lsn past it.
 	 *
-	 * Both branches now use >= (not just BEGIN) to ensure that internal
-	 * markers like ENDPOS are found even when inserted at the exact endpos LSN.
-	 */
-
-	/*
-	 * Find the next thing to process starting from transform_lsn.
+	 * Markers keep their own cursor ($2) because they carry the server's
+	 * walEnd, above transactions not decoded yet.  Only the newest BEGIN can
+	 * have no COMMIT row at all; it sorts last.  Receive never writes a
+	 * ROLLBACK row, so only COMMIT ends a transaction here.
 	 *
-	 * Valid "first row" types are: BEGIN (start of a new transaction),
-	 * KEEPALIVE, ENDPOS, SWITCH (non-transactional markers), or a DML row
-	 * (when transform_lsn was advanced past a partial boundary and the slot
-	 * re-delivered the complete transaction — the "resuming" case).
-	 *
-	 * COMMIT (action='C') and ROLLBACK (action='R') are NEVER valid starting
-	 * points: they are the END of a transaction, never the start.  If we
-	 * returned them here we would re-iterate the same transaction forever:
-	 *
-	 *   transform_lsn = COMMIT_LSN
-	 *   → query returns COMMIT (lsn = COMMIT_LSN, lowest id that is not B)
-	 *   → default: case resumes from BEGIN, processes txn, sets transform_lsn
-	 *     back to COMMIT_LSN  → infinite loop
-	 *
-	 * By excluding C and R, the query instead returns the ENDPOS or next
-	 * BEGIN sitting at COMMIT_LSN, which breaks the loop.
-	 *
-	 * Note: ld_store_lookup_output_xid_end uses a separate query that still
-	 * looks for C/R — it is not affected by this change.
-	 */
-
-	/*
-	 * Outer query: find the next unit of work for transform.
-	 *
-	 * There are exactly two kinds of row that the outer loop should see:
-	 *
-	 *   1. BEGIN ('B') — the start of a transaction.  Transform iterates
-	 *      the full transaction (B … DML … C/R) via the inner iterator.
-	 *      BEGIN may legitimately share a LSN with the previous COMMIT
-	 *      (wal2json emits them at the same WAL position), so use >=.
-	 *
-	 *   2. KEEPALIVE ('K') or SWITCH ('X') — non-transactional markers
-	 *      that appear between committed transactions.  They carry the
-	 *      server's walEnd, which sits above transactions the server has
-	 *      not decoded yet, so they get their own cursor ($2) instead of
-	 *      riding on the transaction cursor ($1), which would hide those
-	 *      transactions.  Strict > so that the marker the apply just
-	 *      consumed is not handed back.
-	 *
-	 * DML rows (I/U/D/T) are NEVER returned here: they are always inside
-	 * a transaction and are consumed exclusively by the inner iterator
-	 * once the BEGIN has been found.  COMMIT and ROLLBACK are also
-	 * excluded — they are end-of-transaction anchors, not starting points.
+	 * SQLite numbers $N parameters by first appearance: keep $1 before $2.
+	 * ORDER BY on a UNION may only name result columns, hence the subquery.
 	 */
 	char *sql =
 		"select id, action, xid, lsn, timestamp, message, nspname, relname, old_type from ("
-		"  select id, action, xid, lsn, timestamp, message, nspname, relname, old_type "
-		"    from output "
-		"   where lsn >= $1 and action = 'B' "
+		"  select * from ("
+		"    select b.id, b.action, b.xid, b.lsn, b.timestamp, b.message, "
+		"           b.nspname, b.relname, b.old_type, e.lsn as k "
+		"      from output e "
+		"      join output b on b.id = (select max(id) from output "
+		"                                where action = 'B' and xid = e.xid) "
+		"     where e.action = 'C' and e.lsn > $1 "
+		"  order by e.lsn limit 1) "
 		" union all "
-		"  select id, action, xid, lsn, timestamp, message, nspname, relname, old_type "
-		"    from output "
-		"   where lsn > $2 and action in ('K', 'X') "
+		"  select * from ("
+		"    select id, action, xid, lsn, timestamp, message, nspname, relname, old_type, lsn as k "
+		"      from output where action = 'K' and lsn > $2 order by lsn limit 1) "
+		" union all "
+		"  select * from ("
+		"    select id, action, xid, lsn, timestamp, message, nspname, relname, old_type, lsn as k "
+		"      from output where action = 'X' and lsn > $2 order by lsn limit 1) "
+		" union all "
+		"  select b.id, b.action, b.xid, b.lsn, b.timestamp, b.message, "
+		"         b.nspname, b.relname, b.old_type, 9223372036854775807 as k "
+		"    from output b "
+		"   where b.id = (select max(id) from output where action = 'B') "
+		"     and not exists (select 1 from output e "
+		"                      where e.action = 'C' and e.xid = b.xid) "
 		") "
-		"order by lsn asc, case when action = 'B' then 0 else 1 end, id asc "
+		"order by k asc, case when action = 'B' then 0 else 1 end, id asc "
 		"limit 1";
 
 	log_debug("ld_store_lookup_output_after_lsn: %X/%X (keepalive %X/%X)",
@@ -771,8 +740,9 @@ ld_store_lookup_output_after_lsn(DatabaseCatalog *catalog,
 
 
 /*
- * ld_store_lookup_output_xid_end searches the last message for the given
- * transaction (xid) in the replayDB database.
+ * ld_store_lookup_output_xid_end returns the COMMIT row of the given
+ * transaction (xid) once the output table holds all of it, with the same
+ * rule as ld_store_lookup_output_after_lsn.
  */
 bool
 ld_store_lookup_output_xid_end(DatabaseCatalog *catalog,
@@ -788,21 +758,15 @@ ld_store_lookup_output_xid_end(DatabaseCatalog *catalog,
 	}
 
 	/*
-	 * Prefer COMMIT (action='C') over ROLLBACK (action='R') when both exist.
-	 *
-	 * In the mid-transaction endpos scenario, the prefetch inserts an
-	 * artificial ROLLBACK so the transform can advance past the partial
-	 * transaction boundary.  When pgcopydb follow reconnects and the slot
-	 * re-delivers the complete transaction, the real COMMIT is inserted with
-	 * a higher id than the stale ROLLBACK.  Ordering by COMMIT first ensures
-	 * we find the real COMMIT rather than the stale ROLLBACK.
+	 * A newest BEGIN above the COMMIT means receive is sending the
+	 * transaction again after a reconnect and has not rewritten its COMMIT
+	 * yet: the rows after that BEGIN are partial, so report no COMMIT.
 	 */
 	char *sql =
 		"  select id, action, xid, lsn, timestamp, message, nspname, relname, old_type "
 		"    from output "
-		"   where xid = $1 and (action = 'C' or action = 'R') "
-		"order by case when action = 'C' then 0 else 1 end, id "
-		"   limit 1";
+		"   where action = 'C' and xid = $1 "
+		"     and id > (select max(id) from output where action = 'B' and xid = $1)";
 
 	log_debug("ld_store_lookup_output_xid_end: %u", xid);
 
@@ -846,22 +810,16 @@ ld_store_lookup_output_xid_end(DatabaseCatalog *catalog,
 
 
 /*
- * ld_store_lookup_output_complete_txn returns the oldest complete transaction
- * in the output table that commits after previousLSN and at or before endpos,
- * with the commit LSN in output->lsn.  output->lsn is InvalidXLogRecPtr when
- * there is none.
+ * ld_store_lookup_output_complete_txn returns the oldest transaction in the
+ * output table that commits after previousLSN and at or before endpos, with
+ * the commit LSN in output->lsn.  output->lsn is InvalidXLogRecPtr when there
+ * is none.
  *
- * The join to the COMMIT row is what makes a transaction count as complete: an
- * endpos that falls inside a transaction still leaves nothing to drain here,
- * which is how the apply loop terminates in that case.
- *
- * Only a COMMIT terminates a transaction for this purpose.  A ROLLBACK leaves
- * previousLSN where it was, by design, so counting one as work left to drain
- * would hold the window open on a transaction the apply is never going to
- * move past.  ld_store_lookup_output_xid_end documents the reconnect case
- * where one xid carries both a stale artificial ROLLBACK and the re-delivered
- * real COMMIT; correlating on c.id > b.id keeps the stale row from pairing
- * with the later BEGIN.
+ * The COMMIT row is what makes a transaction count: an endpos that falls
+ * inside a transaction still leaves nothing to drain here, which is how the
+ * apply loop terminates in that case.  A transaction that receive is sending
+ * again after a reconnect counts too, though ld_store_lookup_output_xid_end
+ * does not report it complete yet: the apply must wait for it, not stop.
  */
 bool
 ld_store_lookup_output_complete_txn(DatabaseCatalog *catalog,
@@ -879,16 +837,17 @@ ld_store_lookup_output_complete_txn(DatabaseCatalog *catalog,
 	sqlite3 *db = catalog->db;
 
 	/*
-	 * The BEGIN row carries the transaction, the C/R row carries the position
+	 * The BEGIN row carries the transaction, the COMMIT row carries the position
 	 * the apply compares against: report c.lsn as the row lsn.  The message
 	 * body is never read here, so select null for it and skip its malloc.
 	 */
 	char *sql =
 		"  select b.id, b.action, b.xid, c.lsn, b.timestamp, null, "
 		"         b.nspname, b.relname, b.old_type "
-		"    from output b "
-		"    join output c on c.xid = b.xid and c.action = 'C' and c.id > b.id "
-		"   where b.action = 'B' and c.lsn > $1 and c.lsn <= $2 "
+		"    from output c "
+		"    join output b on b.id = (select max(id) from output "
+		"                              where action = 'B' and xid = c.xid) "
+		"   where c.action = 'C' and c.lsn > $1 and c.lsn <= $2 "
 		"order by c.lsn asc "
 		"   limit 1";
 
@@ -2670,7 +2629,7 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 
 		case STREAM_ACTION_BEGIN:
 		{
-			/* greab the COMMIT or ROLLBACK output entry if there is one */
+			/* grab the COMMIT output entry if there is one */
 
 			if (!ld_store_lookup_output_xid_end(catalog, first.xid, &last))
 			{
@@ -2684,7 +2643,8 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 			if (last.lsn == InvalidXLogRecPtr)
 			{
 				/*
-				 * Transaction is incomplete (no COMMIT/ROLLBACK yet).
+				 * Transaction is incomplete: no COMMIT yet, or receive is
+				 * sending it again after a reconnect.
 				 *
 				 * Two possible situations:
 				 *   1. Receive is still running — the COMMIT will arrive
@@ -2720,14 +2680,10 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 		default:
 		{
 			/*
-			 * A DML message (INSERT/UPDATE/DELETE) appeared as the first
-			 * entry after transform_lsn.  This happens when transform_lsn
-			 * was advanced past a partial transaction boundary (via the
-			 * artificial ROLLBACK in streamCloseFile) and the slot then
-			 * re-delivered the complete transaction on reconnect.
-			 *
-			 * The BEGIN for this XID is at a lower LSN — look it up and
-			 * treat it just like the BEGIN case above.
+			 * ld_store_lookup_output_after_lsn returns BEGIN, KEEPALIVE and
+			 * SWITCH rows only, so no DML row starts an iteration and the
+			 * resume path below is dead code.  Receive writes no SWITCH row
+			 * to the output table; one would carry xid 0 and stop here.
 			 */
 			if (first.xid == 0)
 			{
@@ -2739,18 +2695,13 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 				return false;
 			}
 
-			/* check the transaction has a COMMIT (prefer over ROLLBACK) */
+			/* check the output table holds the transaction's COMMIT */
 			if (!ld_store_lookup_output_xid_end(catalog, first.xid, &last))
 			{
 				iter->output = NULL;
 				return false;
 			}
 
-			/*
-			 * ld_store_lookup_output_after_lsn returns BEGIN rows and markers
-			 * only, and the markers ride their own strict cursor, so a row at
-			 * exactly transform_lsn cannot come back as a starting point.
-			 */
 			if (last.lsn == InvalidXLogRecPtr)
 			{
 				/*
@@ -2776,7 +2727,7 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 					"  select id, action, xid, lsn, timestamp, message, nspname, relname, old_type "
 					"    from output "
 					"   where xid = $1 and action = 'B' "
-					"order by id limit 1";
+					"order by id desc limit 1";
 
 				ReplayDBOutputMessage begin = { 0 };
 				SQLiteQuery bq = {
@@ -2834,18 +2785,14 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 	}
 
 	/*
-	 * Select all output rows for this transaction in insertion order.
-	 *
-	 * We start at id >= iter->output->id (the BEGIN's row-id) to skip any
-	 * artificial ROLLBACK rows that were inserted during an earlier partial
-	 * run and now have a lower id than the re-delivered BEGIN (because
-	 * INSERT OR REPLACE renewed the BEGIN's id).  For a first-time run the
-	 * BEGIN has the lowest id so this filter is a no-op.
+	 * Select the transaction's rows in insertion order, from its newest BEGIN
+	 * to its COMMIT, the same rows ld_store_lookup_output_xid_end vouched
+	 * for.  The id range also bounds the scan.
 	 */
 	char *sql =
 		"   select id, action, xid, lsn, timestamp, message "
 		"     from output "
-		"    where xid = $1 and id >= $2 "
+		"    where xid = $1 and id >= $2 and id <= $3 "
 		" order by id";
 
 
@@ -2856,7 +2803,8 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 
 	BindParam params[] = {
 		{ BIND_PARAMETER_TYPE_INT64, "xid", first.xid, NULL },
-		{ BIND_PARAMETER_TYPE_INT64, "id", iter->output->id, NULL }
+		{ BIND_PARAMETER_TYPE_INT64, "id", iter->output->id, NULL },
+		{ BIND_PARAMETER_TYPE_INT64, "endid", last.id, NULL }
 	};
 
 	int count = sizeof(params) / sizeof(params[0]);
@@ -3241,20 +3189,9 @@ ld_store_replay_event_fetch(SQLiteQuery *query)
 
 
 /*
- * ld_store_replay_next_event returns the next event to apply after
- * previousLSN into s.  s->action is STREAM_ACTION_UNKNOWN when no rows.
- *
- * For transactions: returns the BEGIN row only when the matching COMMIT
- * already exists in the replay table (endlsn > previousLSN ensures this).
- *
- * For non-transactional events (KEEPALIVE only — ENDPOS rows are no longer
- * written to the replay table): returns the first row at lsn > keepaliveLSN.
- *
- * Apply exits when no more rows AND pipeline_state['transform'].run_end_lsn
- * has been reached (set at stream_apply_catchup startup).
- *
- * The UNION ALL orders by lsn ASC, id ASC so that a non-txn event whose LSN
- * is earlier than any pending BEGIN is returned first.
+ * ld_store_replay_next_event returns the newest BEGIN of the transaction that
+ * commits first after previousLSN, or the first KEEPALIVE after keepaliveLSN
+ * when it sorts first.  s->action is STREAM_ACTION_UNKNOWN when there is none.
  */
 bool
 ld_store_replay_next_event(DatabaseCatalog *catalog,
@@ -3271,18 +3208,8 @@ ld_store_replay_next_event(DatabaseCatalog *catalog,
 	}
 
 	/*
-	 * Return the next event that is ready to apply.
-	 *
-	 * For transactions (action='B'): only return the BEGIN row when the
-	 * matching COMMIT or ROLLBACK row already exists in the replay table.
-	 * The JOIN on replay c ensures this: the transform writes BEGIN first
-	 * (with endlsn populated), then DML rows, then COMMIT — each as a
-	 * separate SQLite statement.  Without the JOIN we could see a BEGIN
-	 * before its COMMIT and DML rows have been written.
-	 *
-	 * For non-transactional events (KEEPALIVE only — ENDPOS rows are no
-	 * longer written to the replay table): return the first KEEPALIVE row
-	 * at lsn STRICTLY greater than keepaliveLSN.
+	 * Commit order, as in ld_store_lookup_output_after_lsn.  A killed apply can
+	 * leave a partial copy: wait while the newest BEGIN is above the end row.
 	 *
 	 * Keepalives get their own cursor because previousLSN also selects the
 	 * transactions still to apply.  A keepalive LSN sits above transactions
@@ -3291,16 +3218,20 @@ ld_store_replay_next_event(DatabaseCatalog *catalog,
 	 * >= the row apply just consumed comes back and apply spins.
 	 */
 	char *sql =
-		"select b.id, b.action, b.xid, b.lsn, b.endlsn, b.timestamp "
-		"  from replay b "
-		"  join replay c on c.xid = b.xid and c.action in ('C', 'R') "
-		" where b.action = 'B' and b.endlsn > $1 "
-		"union all "
-		"select id, action, xid, lsn, endlsn, timestamp "
-		"  from replay "
-		" where action = 'K' "            /* KEEPALIVE only — no ENDPOS rows */
-		"   and lsn > $2 "                /* strict: avoids re-delivering same row */
-		"order by lsn asc, id asc "
+		"select id, action, xid, lsn, endlsn, timestamp from ("
+		"  select b.id, b.action, b.xid, b.lsn, b.endlsn, b.timestamp, e.lsn as k "
+		"    from (select id, xid, lsn from replay "
+		"           where action in ('C', 'R') and lsn > $1 "
+		"        order by lsn, id desc limit 1) e "
+		"    join replay b on b.id = (select max(id) from replay "
+		"                              where action = 'B' and xid = e.xid) "
+		"   where b.id < e.id "
+		" union all "
+		"  select * from ("
+		"    select id, action, xid, lsn, endlsn, timestamp, lsn as k "
+		"      from replay where action = 'K' and lsn > $2 order by lsn limit 1) "
+		") "
+		"order by k, case when action = 'B' then 0 else 1 end, id "
 		"limit 1";
 
 	bzero(s, sizeof(ReplayDBStmt));
@@ -3341,9 +3272,9 @@ ld_store_replay_next_event(DatabaseCatalog *catalog,
 
 
 /*
- * ld_store_iter_replay_txn_init prepares the inner-transaction iterator.
- * It fetches all rows for the given xid with id >= begin_id, in id order.
- * This covers: the BEGIN row itself, all DML rows, and the COMMIT/ROLLBACK row.
+ * ld_store_iter_replay_txn_init prepares the inner-transaction iterator over
+ * the rows of xid from begin_id to the first COMMIT or ROLLBACK after it, in
+ * id order, so that another copy of the transaction is never read with it.
  */
 bool
 ld_store_iter_replay_txn_init(ReplayDBReplayTxnIterator *iter)
@@ -3372,6 +3303,8 @@ ld_store_iter_replay_txn_init(ReplayDBReplayTxnIterator *iter)
 		"     from replay r "
 		"left join stmt s on r.stmt_hash = s.hash "
 		"    where r.xid = $1 and r.id >= $2 "
+		"      and r.id <= (select min(id) from replay "
+		"                    where xid = $1 and action in ('C', 'R') and id > $2) "
 		" order by r.id";
 
 	SQLiteQuery *query = &(iter->query);
