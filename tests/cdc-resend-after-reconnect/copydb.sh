@@ -36,6 +36,7 @@ cleanup() {
     test -z "${snapshot_pid}" || kill -TERM "${snapshot_pid}" 2>/dev/null || true
     if test "${status}" -ne 0; then
         tail -n 40 "${TMPDIR}/follow.log" 2>/dev/null || true
+        tail -n 40 "${TMPDIR}/catchup.log" 2>/dev/null || true
     fi
     exit "${status}"
 }
@@ -183,6 +184,16 @@ if test "${mode}" = resume; then
     kill -KILL -- "-${follow_pid}"
     wait "${follow_pid}" || true
     follow_pid= receive_pid=
+    # the killed apply's backend waits on the lock and keeps the origin busy
+    others="from pg_stat_activity where datname = current_database()
+              and backend_type = 'client backend' and pid <> pg_backend_pid()
+              and query not like '%pg_sleep(3600)%'"
+    target_sql "select pg_terminate_backend(pid) ${others}" > /dev/null
+    deadline=$((SECONDS + 60))
+    until test "$(target_sql "select count(*) ${others}")" = 0; do
+        test "${SECONDS}" -lt "${deadline}" || fail 'the killed apply is still on the target'
+        sleep 0.2
+    done
     setsid pgcopydb stream catchup --resume --notice > "${TMPDIR}/catchup.log" 2>&1 &
     catchup_pid=$!
 fi
@@ -206,6 +217,7 @@ while test "${SECONDS}" -lt "${deadline}"; do
     sleep 0.2
 done
 if test "${mode}" = resume; then
+    kill -0 "${catchup_pid}" 2>/dev/null || fail 'catchup exited while A was partly sent again'
     kill -TERM -- "-${catchup_pid}"
     wait "${catchup_pid}" || true
     catchup_pid=
