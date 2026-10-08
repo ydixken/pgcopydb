@@ -48,6 +48,7 @@ struct SQLiteQuery
 bool catalog_open(DatabaseCatalog *catalog);
 bool catalog_open_readonly(DatabaseCatalog *catalog);
 bool catalog_init(DatabaseCatalog *catalog);
+bool catalog_upgrade_output_schema(DatabaseCatalog *catalog);
 bool catalog_create_semaphore(DatabaseCatalog *catalog);
 bool catalog_attach(DatabaseCatalog *a, DatabaseCatalog *b, const char *name);
 bool catalog_close(DatabaseCatalog *catalog);
