@@ -137,6 +137,34 @@ ld_store_open_outputdb(StreamSpecs *specs)
 
 
 /*
+ * ld_store_upgrade_outputdb opens the output.db that receive resumes writing
+ * to, when there is one, and upgrades it from an older pgcopydb.  Apply only
+ * reads output.db and does not need the upgrade.
+ */
+bool
+ld_store_upgrade_outputdb(StreamSpecs *specs)
+{
+	DatabaseCatalog *outputDB = specs->outputDB;
+
+	if (IS_EMPTY_STRING_BUFFER(outputDB->dbfile) &&
+		!ld_store_set_current_cdc_filename(specs))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/* no output.db yet: stream_init_timeline creates it */
+	if (IS_EMPTY_STRING_BUFFER(outputDB->dbfile))
+	{
+		return true;
+	}
+
+	return ld_store_open_outputdb(specs) &&
+		   catalog_upgrade_output_schema(outputDB);
+}
+
+
+/*
  * ld_store_open_replaydb opens (or creates) the replay.db file for apply.
  *
  * replay.db contains stmt and replay tables and is written exclusively by

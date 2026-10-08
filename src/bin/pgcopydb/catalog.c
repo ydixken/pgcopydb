@@ -748,7 +748,6 @@ static char *replayDBdropDDLs[] = {
 };
 
 static bool catalog_upgrade_schema(DatabaseCatalog *catalog);
-static bool catalog_upgrade_output_schema(DatabaseCatalog *catalog);
 
 
 /*
@@ -1629,11 +1628,6 @@ catalog_init(DatabaseCatalog *catalog)
 static bool
 catalog_upgrade_schema(DatabaseCatalog *catalog)
 {
-	if (catalog->type == DATABASE_CATALOG_TYPE_OUTPUT)
-	{
-		return catalog_upgrade_output_schema(catalog);
-	}
-
 	if (catalog->type != DATABASE_CATALOG_TYPE_SOURCE &&
 		catalog->type != DATABASE_CATALOG_TYPE_FILTER &&
 		catalog->type != DATABASE_CATALOG_TYPE_TARGET)
@@ -1736,18 +1730,19 @@ catalog_output_lacks_seq(DatabaseCatalog *catalog, bool *lacksSeq)
 
 
 /*
- * An output.db from an older pgcopydb keys its rows on (action, lsn), so
- * receive would keep one tuple of each multi-insert WAL record.  Rekey it,
- * so that --resume keeps writing to it.
+ * catalog_upgrade_output_schema rekeys an output.db from an older pgcopydb on
+ * (action, lsn, seq), so that receive keeps every tuple of a multi-insert WAL
+ * record, and adds o_begin.  Only receive writes output.db and calls this.
  */
-static bool
+bool
 catalog_upgrade_output_schema(DatabaseCatalog *catalog)
 {
+	/* the first DDL runs on every file, the others when seq is missing */
 	char *ddls[] = {
+		"create index if not exists o_begin on output(action) where action = 'B'",
 		"alter table output add column seq integer not null default 0",
 		"drop index if exists o_a_lsn",
-		"create unique index o_a_lsn_seq on output(action, lsn, seq)",
-		"create index if not exists o_begin on output(action) where action = 'B'"
+		"create unique index o_a_lsn_seq on output(action, lsn, seq)"
 	};
 
 	bool lacksSeq = false;
@@ -1756,23 +1751,6 @@ catalog_upgrade_output_schema(DatabaseCatalog *catalog)
 	{
 		/* errors have already been logged */
 		return false;
-	}
-
-	/*
-	 * Apply opens this file while receive holds its write transaction, so
-	 * only take the write lock when there is work, and check again under it.
-	 */
-	if (!catalog_output_lacks_seq(catalog, &lacksSeq))
-	{
-		/* errors have already been logged */
-		(void) semaphore_unlock(&(catalog->sema));
-		return false;
-	}
-
-	if (!lacksSeq)
-	{
-		(void) semaphore_unlock(&(catalog->sema));
-		return true;
 	}
 
 	if (!catalog_begin(catalog, true))
@@ -1792,18 +1770,18 @@ catalog_upgrade_output_schema(DatabaseCatalog *catalog)
 	if (lacksSeq)
 	{
 		log_notice("Adding column output.seq to \"%s\"", catalog->dbfile);
+	}
 
-		int count = sizeof(ddls) / sizeof(ddls[0]);
+	int count = lacksSeq ? sizeof(ddls) / sizeof(ddls[0]) : 1;
 
-		for (int i = 0; i < count; i++)
+	for (int i = 0; i < count; i++)
+	{
+		if (!catalog_execute(catalog, ddls[i]))
 		{
-			if (!catalog_execute(catalog, ddls[i]))
-			{
-				/* errors have already been logged */
-				(void) catalog_rollback(catalog);
-				(void) semaphore_unlock(&(catalog->sema));
-				return false;
-			}
+			/* errors have already been logged */
+			(void) catalog_rollback(catalog);
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
 		}
 	}
 
@@ -2249,7 +2227,7 @@ catalog_begin(DatabaseCatalog *catalog, bool immediate)
 			/* we have milliseconds, pg_usleep() wants microseconds */
 			(void) pg_usleep(sleepTimeMs * 1000);
 
-			rc = sqlite3_exec(catalog->db, "BEGIN", NULL, NULL, NULL);
+			rc = sqlite3_exec(catalog->db, sql, NULL, NULL, NULL);
 		}
 	}
 

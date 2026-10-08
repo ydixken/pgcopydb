@@ -99,9 +99,10 @@ check_orphans() {
     test "${n}" = 0 || fail "pgoutput_col holds ${n} rows of replaced output rows"
 }
 
+# compares tables $@ of the source and the target
 compare() {
     local t sql
-    for t in tx t_copy t_ins t_resend p_copy; do
+    for t in "$@"; do
         sql="copy (select * from ${t} order by id) to stdout"
         psql -X -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" -c "${sql}" > "${TMPDIR}/src_${t}.txt"
         psql -X -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI}" -c "${sql}" > "${TMPDIR}/tgt_${t}.txt"
@@ -113,19 +114,17 @@ compare() {
     done
 }
 
-pgcopydb ping
-
-for plugin in pgoutput test_decoding wal2json; do
-    db=multi_insert_${plugin}
-    export PGCOPYDB_SOURCE_PGURI=${src_base}/${db}
-    export PGCOPYDB_TARGET_PGURI=${tgt_base}/${db}
-    export PGCOPYDB_OUTPUT_PLUGIN=${plugin}
-    export TMPDIR=/tmp/multi-insert-${plugin}
+# creates database $1 on both sides and clones it, for output plugin $2
+prepare() {
+    export PGCOPYDB_SOURCE_PGURI=${src_base}/$1
+    export PGCOPYDB_TARGET_PGURI=${tgt_base}/$1
+    export PGCOPYDB_OUTPUT_PLUGIN=$2
+    export TMPDIR=/tmp/$1
     export XDG_DATA_HOME=${TMPDIR}/cdc
     mkdir -p "${TMPDIR}"
 
-    psql -X -v ON_ERROR_STOP=1 -d "${src_base}/postgres" -c "create database ${db}"
-    psql -X -v ON_ERROR_STOP=1 -d "${tgt_base}/postgres" -c "create database ${db}"
+    psql -X -v ON_ERROR_STOP=1 -d "${src_base}/postgres" -c "create database $1"
+    psql -X -v ON_ERROR_STOP=1 -d "${tgt_base}/postgres" -c "create database $1"
     psql -X -q -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" -f /usr/src/pgcopydb/ddl.sql
 
     pgcopydb snapshot --follow > "${TMPDIR}/snapshot.out" 2> "${TMPDIR}/snapshot.log" &
@@ -136,11 +135,31 @@ for plugin in pgoutput test_decoding wal2json; do
     kill -TERM "${snapshot_pid}"
     wait "${snapshot_pid}"
     snapshot_pid=
-
     pgcopydb stream sentinel set apply
-    setsid pgcopydb follow --resume --not-consistent --notice > "${TMPDIR}/follow.log" 2>&1 &
+}
+
+start_follow() {
+    setsid pgcopydb follow --resume --not-consistent --notice >> "${TMPDIR}/follow.log" 2>&1 &
     follow_pid=$!
     poll 'the slot to be streamed' 60 slot_active
+}
+
+stop_follow() {
+    local deadline=$((SECONDS + 300))
+    pgcopydb stream sentinel set endpos --current
+    while kill -0 "${follow_pid}" 2>/dev/null; do
+        test "${SECONDS}" -lt "${deadline}" || fail 'follow did not reach endpos'
+        sleep 1
+    done
+    wait "${follow_pid}" || fail "follow exited with $?"
+    follow_pid=
+}
+
+pgcopydb ping
+
+for plugin in pgoutput test_decoding wal2json; do
+    prepare "multi_insert_${plugin}" "${plugin}"
+    start_follow
 
     # COPY into a table and into a partitioned table; INSERT ... SELECT
     # writes one WAL record per row and is the control
@@ -182,16 +201,50 @@ for plugin in pgoutput test_decoding wal2json; do
     target_sql "select pg_terminate_backend(pid) from pg_stat_activity where query like '%pg_sleep(3600)%' and pid <> pg_backend_pid()" > /dev/null
 
     source_sql 'insert into tx values (2)'
-    pgcopydb stream sentinel set endpos --current
-    deadline=$((SECONDS + 300))
-    while kill -0 "${follow_pid}" 2>/dev/null; do
-        test "${SECONDS}" -lt "${deadline}" || fail 'follow did not reach endpos'
-        sleep 1
-    done
-    wait "${follow_pid}" || fail "follow exited with $?"
-    follow_pid=
-
-    compare
+    stop_follow
+    compare tx t_copy t_ins t_resend p_copy
     pgcopydb stream cleanup
     echo "PASS: ${plugin}"
 done
+
+# An output.db written before seq existed keys its rows on (action, lsn).
+# The resume upgrades it while apply opens it too; the file is large enough
+# that the index build overlaps apply's open.
+plugin=upgrade
+prepare multi_insert_upgrade pgoutput
+start_follow
+source_sql "insert into t_ins select g, 'old-' || g from generate_series(1, ${UPGRADE_ROWS:-300000}) g"
+source_sql 'insert into tx values (1)'
+stop_follow
+
+for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
+    sqlite3 -init /dev/null -batch "${f}" \
+        "drop index o_a_lsn_seq; drop index o_begin;
+         alter table output drop column seq;
+         create unique index o_a_lsn on output(action, lsn)"
+done
+schema() {
+    spool "select group_concat(name, ',') from (select name from pragma_table_info('output')
+                                                where name = 'seq'
+                                               union all
+                                               select name from pragma_index_list('output')
+                                               order by name)"
+}
+echo "old output.db: $(spool 'select count(*) from output') rows, seq and indexes: $(schema)"
+test "$(schema)" = o_a_lsn,o_a_xid || fail "output.db does not have the old schema: $(schema)"
+
+pgcopydb stream sentinel set endpos 0/0
+start_follow
+xid_copy=$(copy_rows t_copy 1 "${rows}")
+poll "xid ${xid_copy} in output.db" 120 committed "${xid_copy}"
+check_spool t_copy "${xid_copy}" shared
+echo "upgraded output.db: seq and indexes: $(schema)"
+test "$(schema)" = o_a_lsn_seq,o_a_xid,o_begin,seq || fail "output.db was not upgraded: $(schema)"
+source_sql 'insert into tx values (2)'
+stop_follow
+compare tx t_copy t_ins
+test "$(grep -c ' ERROR ' "${TMPDIR}/follow.log")" = 0 || fail 'the resume logged errors'
+grep 'Adding column output.seq' "${TMPDIR}/follow.log" | cut -d' ' -f3-
+test "$(grep -c 'Adding column output.seq' "${TMPDIR}/follow.log")" = 1 || fail 'the upgrade did not run once'
+pgcopydb stream cleanup
+echo "PASS: ${plugin}"
