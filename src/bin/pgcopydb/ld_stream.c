@@ -621,6 +621,23 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 		return false;
 	}
 
+	/*
+	 * An output.db from an older build lacks o_begin; receive is its only
+	 * writer.  These calls retry while apply opens the file at the same time.
+	 */
+	SQLiteQuery query = { 0 };
+
+	if (!catalog_sql_prepare(specs->outputDB->db,
+							 "create index if not exists o_begin "
+							 "on output(action) where action = 'B'",
+							 &query) ||
+		!catalog_sql_execute_once(&query))
+	{
+		log_warn("Failed to add index o_begin to \"%s\", the transform "
+				 "falls back to a slower lookup of the newest BEGIN",
+				 specs->outputDB->dbfile);
+	}
+
 	return true;
 }
 
