@@ -3,7 +3,8 @@
 # Each case leaves the apply in a state where only commit order is right: an
 # open newest BEGIN, a KEEPALIVE inside a transaction, a restart between two
 # overlapping transactions, a kill while replay.db is written, a replay.db
-# backlog above the target origin, and an output.db without o_begin.
+# backlog above the target origin, a partial copy an older build left in
+# replay.db, and an output.db without o_begin.
 
 set -euo pipefail
 
@@ -257,7 +258,7 @@ restart_interleaved() {
 # must apply T once.
 replay_kill() {
     begin_case replay-kill
-    local xid_t end
+    local xid_t end rows
     on a begin
     on a "insert into ta values (601, 'T1')"
     xid_t=$(xid_of a)
@@ -271,7 +272,8 @@ replay_kill() {
     end=$(last_commit)
     # BEGIN and T1 are written, T2 is next
     kill_catchup_at "ld_store_insert_replay_stmt if replayStmt->xid == ${xid_t}" 2 "${end}"
-    echo "replay.db rows of T after the kill: $(lite replay "select group_concat(action, '') from replay where xid = ${xid_t}")"
+    rows=$(lite replay "select group_concat(action, '') from replay where xid = ${xid_t}")
+    test -z "${rows}" || fail "a partial copy of T stayed in replay.db: ${rows}"
     test "$(count ta)" = 0 || fail 'T was applied before the kill'
 
     catchup "${end}"
@@ -311,6 +313,42 @@ replay_backlog() {
     end_case
 }
 
+# An older build wrote replay.db rows one statement at a time, so a kill could
+# leave a partial copy of T after a full one.  The apply must wait for the
+# transform to write T again, and read that copy alone.
+old_partial() {
+    begin_case old-partial
+    local origin0 xid_t end rows
+    origin0=$(origin)
+    on a begin
+    on a "insert into ta values (901, 'T1')"
+    xid_t=$(xid_of a)
+    on a "insert into tb values (92, 'T2')"
+    on a commit
+    on b "insert into tb values (91, 'after T')"
+
+    prefetch "$(wal_lsn)"
+    end=$(last_commit)
+    catchup "${end}"
+    compare
+
+    target_sql "select pg_replication_origin_advance('pgcopydb', '${origin0}')" > /dev/null
+    target_sql 'delete from ta where id >= 900; delete from tb where id >= 90'
+    lite replay "insert into replay (action, xid, lsn, endlsn, timestamp, nspname, relname, stmt_hash, stmt_args)
+                 select action, xid, lsn, endlsn, timestamp, nspname, relname, stmt_hash, stmt_args
+                   from replay
+                  where xid = ${xid_t}
+                    and id <= (select min(id) from replay where xid = ${xid_t} and action = 'I')
+               order by id"
+    rows=$(lite replay "select group_concat(action, '') from (select action from replay where xid = ${xid_t} order by id)")
+    test "${rows}" = BIICBI || fail "replay.db rows of T are ${rows}, expected BIICBI"
+
+    catchup "${end}"
+    rows=$(lite replay "select group_concat(action, '') from (select action from replay where xid = ${xid_t} order by id)")
+    test "${rows}" = BIICBIBIIC || fail "the apply did not wait for a new copy of T: ${rows}"
+    end_case
+}
+
 # An output.db written before o_begin existed gets it when receive opens it.
 obegin_upgrade() {
     begin_case obegin-upgrade
@@ -320,6 +358,7 @@ obegin_upgrade() {
     lite output 'drop index if exists o_begin'
     plan=$(lite output "explain query plan select max(id) from output where action = 'B'")
     echo "plan without o_begin: ${plan}"
+    ! grep -q 'INDEX o_begin' <<<"${plan}" || fail 'o_begin is still there before receive opens the file'
     on b "insert into tb values (82, 'two')"
     prefetch "$(wal_lsn)"
     plan=$(lite output "explain query plan select max(id) from output where action = 'B'")
@@ -331,12 +370,13 @@ obegin_upgrade() {
 
 for c in ${CASE:-all}; do
     case "${c}" in
-        all) open_begin; keepalive_in_txn; restart_interleaved; replay_kill; replay_backlog; obegin_upgrade ;;
+        all) open_begin; keepalive_in_txn; restart_interleaved; replay_kill; replay_backlog; old_partial; obegin_upgrade ;;
         open-begin) open_begin ;;
         keepalive-in-txn) keepalive_in_txn ;;
         restart-interleaved) restart_interleaved ;;
         replay-kill) replay_kill ;;
         replay-backlog) replay_backlog ;;
+        old-partial) old_partial ;;
         obegin-upgrade) obegin_upgrade ;;
         *) fail "unknown case ${c}" ;;
     esac
