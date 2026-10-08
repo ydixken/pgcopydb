@@ -304,6 +304,10 @@ parseTestDecodingMessage(StreamContext *privateContext,
 
 		case STREAM_ACTION_TRUNCATE:
 		{
+			/* the relations come from the list, not from the header */
+			free(header.table.nspname);
+			free(header.table.relname);
+
 			if (!parseTestDecodingTruncateMessage(&header,
 												  &(stmt->stmt.truncate)))
 			{
@@ -590,6 +594,7 @@ parseTestDecodingTruncateMessage(TestDecodingHeader *header,
 	if (truncate->tables == NULL)
 	{
 		log_error(ALLOCATION_FAILED_ERROR);
+		free(list);
 		return false;
 	}
 
@@ -609,6 +614,7 @@ parseTestDecodingTruncateMessage(TestDecodingHeader *header,
 		if (!findIdentifierEndPos(item, '.', &dot))
 		{
 			/* errors have already been logged */
+			free(list);
 			return false;
 		}
 
@@ -619,11 +625,14 @@ parseTestDecodingTruncateMessage(TestDecodingHeader *header,
 			truncate->tables[i].relname == NULL)
 		{
 			log_error(ALLOCATION_FAILED_ERROR);
+			free(list);
 			return false;
 		}
 
 		item += itemLen + 1;
 	}
+
+	free(list);
 
 	const char *flags = message + header->offset;
 
