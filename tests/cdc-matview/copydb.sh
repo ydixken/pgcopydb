@@ -22,15 +22,22 @@ psql -a -d "${PGCOPYDB_SOURCE_PGURI}" -1 -f /usr/src/pgcopydb/source.sql
 # Take a snapshot and create the replication slot, then clone the source to
 # the target.  pgcopydb clone copies the schema (including the materialized
 # view definition and its initial data) and the table rows in one step.
-coproc ( pgcopydb snapshot --follow --plugin test_decoding )
+pgcopydb snapshot --follow --plugin test_decoding >/tmp/snapshot.out &
+snapshot_pid=$!
 
-sleep 1
+# the snapshot is printed once the slot exists and the snapshot file is written
+deadline=$((SECONDS + 60))
+while ! test -s /tmp/snapshot.out; do
+    kill -0 "${snapshot_pid}"
+    test "${SECONDS}" -lt "${deadline}"
+    sleep 0.1
+done
 
 pgcopydb stream setup
 pgcopydb clone
 
-kill -TERM ${COPROC_PID}
-wait ${COPROC_PID}
+kill -TERM "${snapshot_pid}"
+wait "${snapshot_pid}"
 
 # Confirm initial clone: source mv1 = target mv1.
 src_initial=$(psql -AtqX -d "${PGCOPYDB_SOURCE_PGURI}" \

@@ -28,15 +28,22 @@ psql -a -d "${PGCOPYDB_TARGET_PGURI}" -1 -f /usr/src/pgcopydb/target.sql
 # Snapshot + slot for follow mode, then copy the seed rows. This step
 # exercises fix #1: copy table-data must succeed against the partitioned
 # target.
-coproc ( pgcopydb snapshot --follow --plugin test_decoding )
+pgcopydb snapshot --follow --plugin test_decoding >/tmp/snapshot.out &
+snapshot_pid=$!
 
-sleep 1
+# the snapshot is printed once the slot exists and the snapshot file is written
+deadline=$((SECONDS + 60))
+while ! test -s /tmp/snapshot.out; do
+    kill -0 "${snapshot_pid}"
+    test "${SECONDS}" -lt "${deadline}"
+    sleep 0.1
+done
 
 pgcopydb stream setup
 pgcopydb copy table-data
 
-kill -TERM ${COPROC_PID}
-wait ${COPROC_PID}
+kill -TERM "${snapshot_pid}"
+wait "${snapshot_pid}"
 
 # Confirm initial copy distributed the seed rows correctly into the
 # partitions. If pg_copy had silently failed, this assertion catches it.
