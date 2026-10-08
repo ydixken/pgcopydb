@@ -2680,14 +2680,10 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 		default:
 		{
 			/*
-			 * A DML message (INSERT/UPDATE/DELETE) appeared as the first
-			 * entry after transform_lsn.  This happens when transform_lsn
-			 * was advanced past a partial transaction boundary (via the
-			 * artificial ROLLBACK in streamCloseFile) and the slot then
-			 * re-delivered the complete transaction on reconnect.
-			 *
-			 * The BEGIN for this XID is at a lower LSN — look it up and
-			 * treat it just like the BEGIN case above.
+			 * ld_store_lookup_output_after_lsn returns BEGIN, KEEPALIVE and
+			 * SWITCH rows only, so no DML row starts an iteration and the
+			 * resume path below is dead code.  Receive writes no SWITCH row
+			 * to the output table; one would carry xid 0 and stop here.
 			 */
 			if (first.xid == 0)
 			{
@@ -2699,18 +2695,13 @@ ld_store_iter_output_init(ReplayDBOutputIterator *iter)
 				return false;
 			}
 
-			/* check the transaction has a COMMIT (prefer over ROLLBACK) */
+			/* check the output table holds the transaction's COMMIT */
 			if (!ld_store_lookup_output_xid_end(catalog, first.xid, &last))
 			{
 				iter->output = NULL;
 				return false;
 			}
 
-			/*
-			 * ld_store_lookup_output_after_lsn returns BEGIN rows and markers
-			 * only, and the markers ride their own strict cursor, so a row at
-			 * exactly transform_lsn cannot come back as a starting point.
-			 */
 			if (last.lsn == InvalidXLogRecPtr)
 			{
 				/*
