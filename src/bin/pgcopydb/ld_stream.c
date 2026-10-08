@@ -622,21 +622,25 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 	}
 
 	/*
-	 * An output.db from an older build lacks o_begin; receive is its only
-	 * writer.  These calls retry while apply opens the file at the same time.
+	 * An output.db from an older build lacks o_begin.  It only speeds up a
+	 * lookup, so a failure is a warning, and SQLite's busy timeout waits while
+	 * apply opens the file: catalog_sql_* would log ERROR lines first.
 	 */
-	SQLiteQuery query = { 0 };
+	sqlite3 *db = specs->outputDB->db;
 
-	if (!catalog_sql_prepare(specs->outputDB->db,
-							 "create index if not exists o_begin "
-							 "on output(action) where action = 'B'",
-							 &query) ||
-		!catalog_sql_execute_once(&query))
+	(void) sqlite3_busy_timeout(db, 5000);
+
+	if (sqlite3_exec(db,
+					 "create index if not exists o_begin "
+					 "on output(action) where action = 'B'",
+					 NULL, NULL, NULL) != SQLITE_OK)
 	{
 		log_warn("Failed to add index o_begin to \"%s\", the transform "
-				 "falls back to a slower lookup of the newest BEGIN",
-				 specs->outputDB->dbfile);
+				 "falls back to a slower lookup of the newest BEGIN: %s",
+				 specs->outputDB->dbfile, sqlite3_errmsg(db));
 	}
+
+	(void) sqlite3_busy_timeout(db, 0);
 
 	return true;
 }
