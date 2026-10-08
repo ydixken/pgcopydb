@@ -12,7 +12,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-partitioned-target cdc-matview \
 	 cdc-endpos-in-multi-wal-txn cdc-file-rotation \
 	 cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput \
-	 cdc-interleaved-commits cdc-resend-after-reconnect \
+	 cdc-interleaved-commits cdc-resend-after-reconnect cdc-commit-order-resume \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering;
 
@@ -97,6 +97,9 @@ cdc-interleaved-commits: build
 cdc-resend-after-reconnect: build
 	$(MAKE) -C $@
 
+cdc-commit-order-resume: build
+	$(MAKE) -C $@
+
 follow-pgoutput: build
 	$(MAKE) -C $@
 
@@ -142,6 +145,6 @@ clean-images:
 .PHONY: cdc-replica-identity-full
 .PHONY: cdc-endpos-in-multi-wal-txn cdc-file-rotation
 .PHONY: cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput follow-pgoutput follow-filtering
-.PHONY: cdc-interleaved-commits cdc-resend-after-reconnect
+.PHONY: cdc-interleaved-commits cdc-resend-after-reconnect cdc-commit-order-resume
 .PHONY: follow-wal2json follow-9.6
 .PHONY: timescaledb citus
