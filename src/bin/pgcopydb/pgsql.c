@@ -4664,7 +4664,9 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 	res = PQgetResult(conn);
 	if (PQresultStatus(res) == PGRES_COPY_OUT)
 	{
+		/* the error label clears res again when the drain fails */
 		PQclear(res);
+		res = NULL;
 
 		/*
 		 * We're doing a client-initiated clean exit and have sent CopyDone to
