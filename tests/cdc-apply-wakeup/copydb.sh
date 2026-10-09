@@ -37,6 +37,19 @@ count() { target_sql "select count(*) from t where v = '$1'"; }
 applied() { test "$(count "$1")" = "$2"; }
 at_least() { test "$(count "$1")" -ge "$2"; }
 now_ms() { echo $(($(date +%s%N) / 1000000)); }
+lsn() { echo $(((16#${1%/*} << 32) + 16#${1#*/})); }
+origin() { target_sql "select pg_replication_origin_progress('pgcopydb', true)"; }
+replay_lsn() { timeout 15s pgcopydb stream sentinel get --replay-lsn; }
+
+# apply writes replay_lsn at most once a second, so it may trail the origin
+replay_not_ahead() {
+    local replay origin
+    replay=$(replay_lsn)
+    origin=$(origin)
+    echo "$1: sentinel replay_lsn ${replay}, origin ${origin}"
+    test "$(lsn "${replay}")" -le "$(lsn "${origin}")" ||
+        fail "$1: sentinel replay_lsn ${replay} is ahead of the origin ${origin}"
+}
 
 # one source transaction per row
 insert_txns() {
@@ -86,6 +99,7 @@ interrupt() {
     n=$(count "$1")
     echo "$1: follow exited ${rc} after $2 with ${n} of ${backlog} rows applied"
     test "${n}" -lt "${backlog}" || fail "$2 came after the whole backlog, so it checks nothing"
+    replay_not_ahead "$1"
 
     start_follow "resume-$1"
     poll "the rest of $1" 300 applied "$1" "${backlog}"
@@ -175,8 +189,10 @@ for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
     test "${l}" -le "${last}" || last=${l}
 done
 last=$(printf '%X/%X' $((last >> 32)) $((last & 4294967295)))
-origin=$(target_sql "select pg_replication_origin_progress('pgcopydb', true)")
+origin=$(origin)
 test "${origin}" = "${last}" || fail "origin ${origin} is not the last COMMIT ${last}"
+# the write at endpos and at exit is not held back
+test "$(replay_lsn)" = "${origin}" || fail "sentinel replay_lsn $(replay_lsn) is not the origin ${origin}"
 
 pgcopydb stream cleanup > "${TMPDIR}/cleanup.log" 2>&1
 echo "PASS: $(wc -l < "${TMPDIR}/tgt.txt") rows match, origin at the last COMMIT ${origin}"
