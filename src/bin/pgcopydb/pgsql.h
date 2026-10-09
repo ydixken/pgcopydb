@@ -491,6 +491,7 @@ typedef struct LogicalStreamClient
 	LogicalStreamReceiver closeFunction;
 	LogicalStreamReceiver feedbackFunction;
 	LogicalStreamReceiver keepaliveFunction;
+	LogicalStreamReceiver idleFunction; /* socket drained, before blocking */
 
 	int fsync_interval;
 	int standby_message_timeout;

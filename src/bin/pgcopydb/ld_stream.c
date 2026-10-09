@@ -37,6 +37,16 @@
 #include "string_utils.h"
 #include "summary.h"
 
+/* group commit triggers, indexes into StreamContext.batchStats */
+#define STREAM_BATCH_IDLE 0
+#define STREAM_BATCH_AGE 1
+#define STREAM_BATCH_FLUSH 2
+
+/* ponytail: fixed latency ceiling for apply under a saturated stream */
+#define STREAM_BATCH_MAX_AGE_MS 50
+
+static bool stream_commit_batch(LogicalStreamContext *context, int trigger);
+
 
 /*
  * stream_init_specs initializes Change Data Capture streaming specifications
@@ -641,6 +651,7 @@ startLogicalStreaming(StreamSpecs *specs)
 	stream.closeFunction = &streamClose;
 	stream.feedbackFunction = &streamFeedback;
 	stream.keepaliveFunction = &streamKeepalive;
+	stream.idleFunction = &streamIdle;
 
 	/*
 	 * Read possibly already existing file to initialize the start LSN from a
@@ -733,6 +744,14 @@ startLogicalStreaming(StreamSpecs *specs)
 		if (!cleanExit && !ld_store_output_rollback(specs->outputDB))
 		{
 			return false;
+		}
+
+		/* the rollback discards whole batched transactions, not just a partial one */
+		if (!cleanExit)
+		{
+			privateContext->batchTxns = 0;
+			context.tracking->written_lsn =
+				Max(privateContext->committedWrittenLSN, specs->startpos);
 		}
 
 		if ((cleanExit && context.endpos != InvalidXLogRecPtr) ||
@@ -1000,15 +1019,21 @@ streamWrite(LogicalStreamContext *context)
 	}
 	else if (metadata->action == STREAM_ACTION_COMMIT)
 	{
-		if (!ld_store_output_commit(replayDB))
-		{
-			return false;
-		}
-
+		/*
+		 * The output.db commit waits for the socket to drain or the batch to
+		 * age (group commit). lastDurableCommitLSN still moves here: raised
+		 * only at the SQLite commit, it could lag replay_lsn while this COMMIT
+		 * is unsaved, and the keepalive guard would confirm past it.
+		 */
 		if (!metadata->skipping)
 		{
 			privateContext->lastDurableCommitLSN =
 				Max(privateContext->lastDurableCommitLSN, metadata->lsn);
+
+			if (privateContext->batchTxns++ == 0)
+			{
+				privateContext->batchStart = feGetCurrentTimestamp();
+			}
 		}
 
 		privateContext->transactionInProgress = false;
@@ -1039,6 +1064,11 @@ streamWrite(LogicalStreamContext *context)
 						 (long long) st.st_size,
 						 (unsigned long long) specs->maxReplayDBSize);
 
+				if (!stream_commit_batch(context, STREAM_BATCH_FLUSH))
+				{
+					return false;
+				}
+
 				if (!ld_store_rotate_outputdb(specs,
 											  context->cur_record_lsn))
 				{
@@ -1063,6 +1093,16 @@ streamWrite(LogicalStreamContext *context)
 	else if (metadata->action == STREAM_ACTION_ROLLBACK)
 	{
 		log_error("BUG: STREAM_ACTION_ROLLBACK is not expected here");
+		return false;
+	}
+
+	/* bound apply latency when the socket never drains */
+	if (privateContext->batchTxns > 0 &&
+		feTimestampDifferenceExceeds(privateContext->batchStart,
+									 feGetCurrentTimestamp(),
+									 STREAM_BATCH_MAX_AGE_MS) &&
+		!stream_commit_batch(context, STREAM_BATCH_AGE))
+	{
 		return false;
 	}
 
@@ -1295,6 +1335,51 @@ streamCloseFile(LogicalStreamContext *context, bool time_to_abort)
 
 
 /*
+ * stream_commit_batch commits the open output.db transaction, which holds
+ * batchTxns complete source transactions and maybe the start of the next.
+ */
+static bool
+stream_commit_batch(LogicalStreamContext *context, int trigger)
+{
+	StreamContext *privateContext = (StreamContext *) context->private;
+
+	if (!ld_store_output_commit(privateContext->outputDB))
+	{
+		return false;
+	}
+
+	if (privateContext->batchTxns > 0)
+	{
+		privateContext->batchStats[trigger]++;
+		privateContext->batchStatsTxns += privateContext->batchTxns;
+	}
+
+	privateContext->batchTxns = 0;
+	privateContext->committedWrittenLSN = context->tracking->written_lsn;
+
+	return true;
+}
+
+
+/*
+ * streamIdle is called once the replication socket is drained: commit what
+ * arrived meanwhile, so a slow source still commits each transaction at once.
+ */
+bool
+streamIdle(LogicalStreamContext *context)
+{
+	StreamContext *privateContext = (StreamContext *) context->private;
+
+	if (privateContext->batchTxns == 0)
+	{
+		return true;
+	}
+
+	return stream_commit_batch(context, STREAM_BATCH_IDLE);
+}
+
+
+/*
  * streamFlush is a callback function for our LogicalStreamClient.
  *
  * Commit the SQLite batch before publishing its LSN to the source.
@@ -1324,9 +1409,25 @@ streamFlush(LogicalStreamContext *context)
 	}
 
 	/* A repeated LSN can still leave an open keepalive transaction. */
-	if (!ld_store_output_commit(privateContext->outputDB))
+	if (!stream_commit_batch(context, STREAM_BATCH_FLUSH))
 	{
 		return false;
+	}
+
+	uint64_t *b = privateContext->batchStats;
+
+	if (b[0] + b[1] + b[2] > 0)
+	{
+		log_info("Receive committed %llu transactions to output.db in %llu "
+				 "batches (idle %llu, age %llu, flush %llu)",
+				 (unsigned long long) privateContext->batchStatsTxns,
+				 (unsigned long long) (b[0] + b[1] + b[2]),
+				 (unsigned long long) b[0],
+				 (unsigned long long) b[1],
+				 (unsigned long long) b[2]);
+
+		bzero(b, sizeof(privateContext->batchStats));
+		privateContext->batchStatsTxns = 0;
 	}
 
 	if (context->tracking->flushed_lsn < context->tracking->written_lsn)
