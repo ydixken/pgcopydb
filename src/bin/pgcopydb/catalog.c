@@ -11244,7 +11244,7 @@ catalog_sql_bind(SQLiteQuery *query, BindParam *params, int count)
 				  query->sql);
 
 		(void) sqlite3_clear_bindings(query->ppStmt);
-		(void) sqlite3_finalize(query->ppStmt);
+		(void) catalog_sql_finalize(query);
 		return false;
 	}
 
@@ -11311,7 +11311,7 @@ catalog_sql_execute(SQLiteQuery *query)
 					  sqlite3_errmsg(query->db));
 
 			(void) sqlite3_clear_bindings(query->ppStmt);
-			(void) sqlite3_finalize(query->ppStmt);
+			(void) catalog_sql_finalize(query);
 
 			return false;
 		}
@@ -11350,7 +11350,7 @@ catalog_sql_execute(SQLiteQuery *query)
 						  sqlite3_errmsg(query->db));
 
 				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 
 				return false;
 			}
@@ -11361,7 +11361,7 @@ catalog_sql_execute(SQLiteQuery *query)
 				log_error("Failed to fetch current row, "
 						  "see above for details");
 				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 				return false;
 			}
 
@@ -11383,7 +11383,7 @@ catalog_sql_execute(SQLiteQuery *query)
 						  sqlite3_errmsg(query->db));
 
 				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 
 				return false;
 			}
@@ -11459,11 +11459,18 @@ catalog_sql_step(SQLiteQuery *query)
 
 
 /*
- * catalog_sql_finalize finalizes a SQL query.
+ * catalog_sql_finalize finalizes a SQL query, or resets a cached one.
  */
 bool
 catalog_sql_finalize(SQLiteQuery *query)
 {
+	/* the cache owns this statement: finalizing it would leave a dangling entry */
+	if (query->fromCache)
+	{
+		(void) sqlite3_reset(query->ppStmt);
+		return true;
+	}
+
 	if (sqlite3_finalize(query->ppStmt) != SQLITE_OK)
 	{
 		log_error("Failed to finalize SQLite statement: %s",
