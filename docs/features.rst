@@ -164,6 +164,12 @@ transformed SQL statements. Together they use three main tables:
   can be reused across multiple EXECUTE calls, with the actual SQL and a hash
   for fast lookup.
 
+The ``*-replay.db`` file runs with SQLite ``synchronous=NORMAL``, the
+``*-output.db`` file with ``FULL``. A power loss can drop the last
+transactions of ``*-replay.db``, never part of one. Apply resumes from the
+target replication origin and transforms those transactions again from
+``*-output.db``.
+
 The apply process converts the output table entries into parameterized SQL
 using `prepared statements`__ as an optimization, as part of its inline
 transform step. This means that pgcopydb efficiently reuses prepared statements
