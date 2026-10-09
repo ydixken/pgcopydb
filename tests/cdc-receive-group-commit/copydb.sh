@@ -3,12 +3,14 @@
 # Receive commits output.db per batch of source transactions, not per COMMIT.
 # A receive killed with a batch open must lose nothing the slot confirmed:
 # burst cases kill it mid-burst, the guard case holds a batch open under gdb.
+# The drop case kills the walsender in quick succession: receive must keep
+# reconnecting while keepalives advance, though no batch commits in between.
 
 set -euo pipefail
 
-# guard, or mode:fraction of the burst received before the kill
+# guard, drop:<walsender drops>, or mode:fraction of the burst received before the kill
 if test -z "${GC_CASE:-}"; then
-    for c in guard follow:0.3 follow:0.7 prefetch:0.3 prefetch:0.7; do
+    for c in guard drop:3 follow:0.3 follow:0.7 prefetch:0.3 prefetch:0.7; do
         GC_CASE=${c} bash "$0"
     done
     exit 0
@@ -22,13 +24,14 @@ db=gc_${mode}_${frac//./}
 export TMPDIR=/tmp/gc-${mode}-${frac//./}
 export XDG_DATA_HOME=${TMPDIR}/cdc
 mkdir -p "${TMPDIR}"
-snapshot_pid= follow_pid= burst_pid= gdb_pid=
+snapshot_pid= follow_pid= burst_pid= gdb_pid= walgen_pid=
 
 cleanup() {
     local status=$?
     trap - EXIT
     test -z "${gdb_pid}" || sudo kill "${gdb_pid}" 2>/dev/null || true
     test -z "${burst_pid}" || kill "${burst_pid}" 2>/dev/null || true
+    test -z "${walgen_pid}" || kill "${walgen_pid}" 2>/dev/null || true
     test -z "${follow_pid}" || kill -KILL -- "-${follow_pid}" 2>/dev/null || true
     test -z "${snapshot_pid}" || kill -TERM "${snapshot_pid}" 2>/dev/null || true
     if test "${status}" -ne 0; then
@@ -99,6 +102,7 @@ kill_receive() {
 pgcopydb ping
 psql -X -q -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" -c "create database ${db}"
 psql -X -q -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI}" -c "create database ${db}"
+source_admin=${PGCOPYDB_SOURCE_PGURI}
 export PGCOPYDB_SOURCE_PGURI=${PGCOPYDB_SOURCE_PGURI%/*}/${db}
 export PGCOPYDB_TARGET_PGURI=${PGCOPYDB_TARGET_PGURI%/*}/${db}
 source_sql 'create table t (id integer primary key, v text)'
@@ -153,6 +157,40 @@ if test "${mode}" = guard; then
     wait "${gdb_pid}" || true
     gdb_pid=
     start_follow
+elif test "${mode}" = drop; then
+    pgcopydb stream sentinel set apply
+    start_follow
+
+    # WAL in another database: keepalives advance, nothing replicates
+    psql -qX -v ON_ERROR_STOP=1 -d "${source_admin}" -c 'create table if not exists gc_wal (pad text)'
+    while :; do
+        psql -qX -d "${source_admin}" -c "insert into gc_wal select repeat('x', 200) from generate_series(1, 200)" > /dev/null 2>&1 || true
+        sleep 0.1
+    done &
+    walgen_pid=$!
+
+    walsender() {
+        source_sql "select active_pid from pg_replication_slots where slot_name = 'pgcopydb' and active_pid is not null"
+    }
+    reconnected() {
+        ! grep -q 'did not make any progress' "${TMPDIR}/follow.log" \
+            || fail "receive stopped retrying after walsender drop ${i}"
+        local pid
+        pid=$(walsender)
+        test -n "${pid}" && test "${pid}" != "${old}"
+    }
+    # drops 1 s apart: no flush interval and no wal_sender_timeout ping between them
+    sleep 2
+    for i in $(seq "${frac}"); do
+        old=$(walsender)
+        source_sql "select pg_terminate_backend(${old})" > /dev/null
+        poll "receive to reconnect after walsender drop ${i}" 30 reconnected
+        sleep 1
+    done
+    kill "${walgen_pid}"
+    wait "${walgen_pid}" || true
+    walgen_pid=
+    echo "receive reconnected after ${frac} walsender drops"
 else
     test "${mode}" = prefetch || pgcopydb stream sentinel set apply
     start_follow
@@ -191,7 +229,7 @@ fi
 test -z "${slot_verdict}${lost}" || fail "${slot_verdict:+${slot_verdict}; }${lost}"
 
 # the burst must have been committed in groups, not one transaction per batch
-if test "${mode}" != guard; then
+if test "${mode}" = follow || test "${mode}" = prefetch; then
     read -r batches txns < <(grep -o 'batches/txns: .*' "${TMPDIR}/follow.log" \
         | grep -o '[0-9]*/[0-9]*' | awk -F/ '{b += $1; t += $2} END {print b + 0, t + 0}')
     echo "receive group commit: ${txns} transactions in ${batches} batches"
