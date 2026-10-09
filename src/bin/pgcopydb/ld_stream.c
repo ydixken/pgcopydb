@@ -480,9 +480,10 @@ stream_recv_upstream_done(StreamSpecs *specs, int pipe_read_fd)
 	uint64_t wire = 0;
 	ssize_t n = read(pipe_read_fd, &wire, sizeof(wire));
 
+	specs->upstream_done = true;
+
 	if (n == (ssize_t) sizeof(wire))
 	{
-		specs->upstream_done = true;
 		specs->upstream_done_lsn = pg_ntoh64(wire);
 		log_info("Upstream done signal received: final LSN %X/%X",
 				 LSN_FORMAT_ARGS(specs->upstream_done_lsn));
