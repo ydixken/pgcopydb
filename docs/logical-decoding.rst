@@ -101,7 +101,7 @@ KEEPALIVE rows have a separate cursor and never advance ``previousLSN``, the tar
 The receiver tracks three positions for feedback:
 
 * ``P`` is the durable apply position from ``sentinel.replay_lsn``, zero until initialized.
-* ``C`` is the highest actual COMMIT LSN durably stored in the output spool and still relevant to apply.
+* ``C`` is the highest actual COMMIT LSN received into the output spool and still relevant to apply, whether or not its output batch has committed yet.
   It uses the same ``metadata->lsn`` representation as output and apply, and excludes skipped empty or filtered transactions.
 * ``K`` is the highest genuine primary keepalive LSN received on this replication connection, whether or not the server requested a reply.
   Raw XLogData positions and synthetic KEEPALIVE rows do not set ``K``.
@@ -112,7 +112,13 @@ A source-catalog write transaction freezes ``P`` during the scan; it does not lo
 Cleanup using an already captured horizon ``R <= P`` can remove only closed files with ``endpos < R``, which the scan excludes.
 Holding ``P`` fixed prevents other scan candidates from becoming eligible for cleanup.
 An empty spool is valid only after these reads succeed.
-During streaming, ``C`` increases only after the output SQLite transaction containing a non-skipped COMMIT has committed.
+During streaming, ``C`` increases when receive reads a non-skipped COMMIT, before the output SQLite transaction holding it commits.
+A higher ``C`` only holds promotion back, so raising it early is the safe side: raised at the SQLite commit, it would let feedback pass a COMMIT that a crash can still discard.
+
+Receive commits the output spool in groups.
+A source COMMIT ends a source transaction inside the open SQLite transaction, which commits when the replication socket is drained, when it is 50 ms old, at every flush and close, and before an output file rotation.
+The output spool stays at ``synchronous=FULL``, so transform and apply only read durable rows, and a spool-only flush acknowledgement always follows a commit.
+When a streaming attempt fails, receive rolls the open batch back and resets its written position to the last committed one, so ``pipeline_state`` never records an end position covering discarded transactions.
 
 .. warning::
 
