@@ -1605,11 +1605,23 @@ catalog_init(DatabaseCatalog *catalog)
 			catalog->db = NULL;
 			return false;
 		}
-
-		return true;
+	}
+	else if (!catalog_upgrade_schema(catalog))
+	{
+		/* errors have already been logged */
+		sqlite3_close(catalog->db);
+		catalog->db = NULL;
+		return false;
 	}
 
-	if (!catalog_upgrade_schema(catalog))
+	/*
+	 * Power loss can drop the last replay.db transactions, never part of one.
+	 * Apply resumes from the target origin and transforms them again from
+	 * output.db, so replay.db does not need an fsync per transaction.  The
+	 * schema above is still committed with a full sync.
+	 */
+	if (catalog->type == DATABASE_CATALOG_TYPE_REPLAY &&
+		!catalog_execute(catalog, "PRAGMA synchronous = NORMAL"))
 	{
 		/* errors have already been logged */
 		sqlite3_close(catalog->db);
