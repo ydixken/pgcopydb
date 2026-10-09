@@ -64,6 +64,8 @@ static bool stream_apply_load_target_relkinds(StreamApplyContext *context);
 
 static bool stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s);
 static bool stream_apply_truncate(StreamApplyContext *context, const char *sql);
+static bool stream_apply_sentinel(StreamApplyContext *context,
+								  bool findDurableLSN, bool force);
 static bool stream_apply_transaction(StreamApplyContext *context,
 									 uint32_t xid,
 									 uint64_t begin_id,
@@ -764,6 +766,9 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 	{
 		(void) semaphore_unlock(&(replayDB->sema));
 	}
+
+	/* publish the last commit the replay_lsn rate limit may have held back */
+	(void) stream_apply_sentinel(context, false, true);
 
 	/* enforce a final durable checkpoint of the in-memory apply state */
 	(void) pipeline_state_sync(specs->sourceDB, &current);
@@ -1548,6 +1553,19 @@ stream_apply_wait_for_sentinel(StreamSpecs *specs, StreamApplyContext *context)
 bool
 stream_apply_sync_sentinel(StreamApplyContext *context, bool findDurableLSN)
 {
+	return stream_apply_sentinel(context, findDurableLSN, false);
+}
+
+
+/*
+ * stream_apply_sentinel always reads endpos and apply, so both take effect at
+ * once. It writes replay_lsn at most once per second, unless forced: each
+ * write costs a source.db fsync, and a later replay_lsn only delays progress.
+ */
+static bool
+stream_apply_sentinel(StreamApplyContext *context, bool findDurableLSN,
+					  bool force)
+{
 	uint64_t durableLSN = InvalidXLogRecPtr;
 
 	/*
@@ -1570,8 +1588,17 @@ stream_apply_sync_sentinel(StreamApplyContext *context, bool findDurableLSN)
 	}
 
 	CopyDBSentinel sentinel = { 0 };
+	uint64_t now = time(NULL);
 
-	if (!sentinel_sync_apply(context->sourceDB, durableLSN, &sentinel))
+	bool changed = durableLSN != context->sentinelWrittenLSN;
+	bool write =
+		findDurableLSN || context->reachedEndPos ||
+		(context->endpos != InvalidXLogRecPtr && context->endpos <= durableLSN) ||
+		(changed && (force || 1 <= now - context->sentinelSyncTime));
+
+	if (write ?
+		!sentinel_sync_apply(context->sourceDB, durableLSN, &sentinel) :
+		!sentinel_get(context->sourceDB, &sentinel))
 	{
 		log_warn("Failed to sync progress with the pgcopydb sentinel");
 		return true;
@@ -1580,7 +1607,12 @@ stream_apply_sync_sentinel(StreamApplyContext *context, bool findDurableLSN)
 	context->apply = sentinel.apply;
 	context->endpos = sentinel.endpos;
 	context->startpos = sentinel.startpos;
-	context->sentinelSyncTime = time(NULL);
+
+	if (write)
+	{
+		context->sentinelSyncTime = now;
+		context->sentinelWrittenLSN = durableLSN;
+	}
 
 	log_debug("stream_apply_sync_sentinel: "
 			  "write_lsn %X/%X flush_lsn %X/%X replay_lsn %X/%X "

@@ -582,7 +582,8 @@ typedef struct StreamApplyContext
 	DatabaseCatalog *sourceDB;
 	DatabaseCatalog *replayDB;
 	DatabaseCatalog *targetDB;  /* target schema SQLite catalog */
-	uint64_t sentinelSyncTime;
+	uint64_t sentinelSyncTime;  /* time of the last replay_lsn write */
+	uint64_t sentinelWrittenLSN;
 
 	ConnStrings *connStrings;
 	char origin[BUFSIZE];
