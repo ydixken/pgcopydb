@@ -732,6 +732,9 @@ startLogicalStreaming(StreamSpecs *specs)
 		/* ignore errors, try again unless asked to stop */
 		bool cleanExit = pgsql_stream_logical(&stream, &context);
 
+		/* keepalives count as progress even when no batch committed them */
+		uint64_t receivedLSN = context.tracking->written_lsn;
+
 		if (!cleanExit)
 		{
 			if (!ld_store_output_rollback(specs->outputDB))
@@ -739,7 +742,7 @@ startLogicalStreaming(StreamSpecs *specs)
 				return false;
 			}
 
-			/* run_end_lsn and the progress check must not cover lost txns */
+			/* run_end_lsn must not cover lost txns */
 			privateContext->batchTxns = 0;
 			context.tracking->written_lsn = privateContext->committedWrittenLSN;
 		}
@@ -765,24 +768,23 @@ startLogicalStreaming(StreamSpecs *specs)
 					 LSN_FORMAT_ARGS(context.tracking->flushed_lsn),
 					 retry ? "reconnecting in 1s" : "stopping");
 		}
-		else if (retries > 0 &&
-				 context.tracking->written_lsn == waterMarkLSN)
+		else if (retries > 0 && receivedLSN == waterMarkLSN)
 		{
 			log_warn("Streaming got interrupted at %X/%X, and did not make "
 					 "any progress from previous attempt, stopping now",
-					 LSN_FORMAT_ARGS(context.tracking->written_lsn));
+					 LSN_FORMAT_ARGS(receivedLSN));
 
 			return false;
 		}
 		else if (retry)
 		{
 			log_warn("Streaming got interrupted at %X/%X, reconnecting in 1s",
-					 LSN_FORMAT_ARGS(context.tracking->written_lsn));
+					 LSN_FORMAT_ARGS(receivedLSN));
 		}
 		else
 		{
 			log_warn("Streaming got interrupted at %X/%X",
-					 LSN_FORMAT_ARGS(context.tracking->written_lsn));
+					 LSN_FORMAT_ARGS(receivedLSN));
 		}
 
 		/* if we are going to retry, we need to rollback the last txn */
@@ -792,7 +794,7 @@ startLogicalStreaming(StreamSpecs *specs)
 		if (retry)
 		{
 			++retries;
-			waterMarkLSN = context.tracking->written_lsn;
+			waterMarkLSN = receivedLSN;
 
 			(void) pg_usleep(1 * 1000 * 1000); /* 1s */
 		}

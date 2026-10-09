@@ -119,6 +119,8 @@ Receive commits the output spool in groups.
 A source COMMIT ends a source transaction inside the open SQLite transaction, which commits when the replication socket is drained, when it is 50 ms old, at every flush and close, and before an output file rotation.
 The output spool stays at ``synchronous=FULL``, so transform and apply only read durable rows, and a spool-only flush acknowledgement always follows a commit.
 When a streaming attempt fails, receive rolls the open batch back and resets its written position to the last committed one, so ``pipeline_state`` never records an end position covering discarded transactions.
+Receive stops retrying when an attempt fails without making progress, and that check compares the received position, which keepalives raise, not the reset one.
+Two connection drops in a row with no replicated transaction between them therefore still reconnect, as long as the source keeps writing WAL.
 
 .. warning::
 
