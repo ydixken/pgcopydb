@@ -757,8 +757,6 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 	}
 
 	/* publish the replay_lsn that the once-a-second limit still holds back */
-	context->sentinelSyncTime = 0;
-	(void) stream_apply_sync_sentinel(context, false);
 
 	/* enforce a final durable checkpoint of the in-memory apply state */
 	(void) pipeline_state_sync(specs->sourceDB, &current);
@@ -1570,9 +1568,7 @@ stream_apply_sync_sentinel(StreamApplyContext *context, bool findDurableLSN)
 	 * a new endpos or apply value is seen before the next transaction.
 	 */
 	uint64_t now = time(NULL);
-	bool force = context->reachedEndPos || findDurableLSN ||
-				 (context->endpos != InvalidXLogRecPtr &&
-				  context->endpos <= durableLSN);
+	bool force = false;
 	bool write = durableLSN != context->sentinelWrittenLSN &&
 				 (force || 1 <= now - context->sentinelSyncTime);
 
