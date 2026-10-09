@@ -207,6 +207,11 @@ bool ld_store_replay_next_event(DatabaseCatalog *catalog,
 								uint64_t keepaliveLSN,
 								ReplayDBStmt *s);
 
+bool ld_store_replay_txn_must_commit_alone(DatabaseCatalog *catalog,
+										   uint32_t xid,
+										   uint64_t begin_id,
+										   bool *alone);
+
 
 /*
  * ReplayDBReplayTxnIterator iterates over the rows of a single transaction

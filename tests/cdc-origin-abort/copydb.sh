@@ -4,6 +4,9 @@
 # Case A kills the apply once everything before its COMMIT ran on the target.
 # Case B makes the COMMIT itself fail in a deferred trigger only the target has.
 # Case C terminates the target backend while such a trigger runs at COMMIT.
+# Case D refuses the COMMIT of a group of transactions (apply grouping).
+# Case F kills the apply before the COMMIT of a group.
+# Case E has a TRUNCATE after a transaction that left trigger events pending.
 # Each case then resumes and expects the transaction applied, none skipped.
 
 set -euxo pipefail
@@ -55,6 +58,53 @@ check() {
     fi
 }
 
+# kill_before_commit <lsn>: run catchup under gdb up to the COMMIT with origin
+# <lsn>, let the target run everything sent before it, then SIGKILL the apply.
+kill_before_commit() {
+    local lsn=$1 paused_lsn apply_backend
+    barrier_dir=$(mktemp -d "${TMPDIR}/barrier.XXXXXX")
+    timeout 120s gdb -q -batch \
+        -ex "set \$barrier_dir = \"${barrier_dir}\"" \
+        -ex "set \$expected_lsn = \"${lsn}\"" \
+        -x /usr/src/pgcopydb/kill-at-commit.gdb \
+        --args pgcopydb stream catchup --resume --endpos "${lsn}" >"${TMPDIR}/gdb.log" 2>&1 &
+    debugger_pid=$!
+    deadline=$((SECONDS + 60))
+    while ! test -s "${barrier_dir}/paused"; do
+        kill -0 "${debugger_pid}"
+        test "${SECONDS}" -lt "${deadline}"
+        sleep 0.1
+    done
+    read -r apply_pid paused_lsn <"${barrier_dir}/paused"
+    [[ ${apply_pid} =~ ^[1-9][0-9]*$ ]]
+    test "${paused_lsn}" = "${lsn}"
+
+    # The apply backend has written rows and waits for input: all it was sent ran.
+    deadline=$((SECONDS + 45))
+    while true; do
+        apply_backend=$(target_sql "select pid from pg_stat_activity
+         where application_name like 'pgcopydb[${apply_pid}] %'
+           and backend_xid is not null and wait_event = 'ClientRead'
+           and (state = 'idle in transaction'
+                or query like '%pg_replication_origin_xact_setup%')")
+        if [[ ${apply_backend} =~ ^[1-9][0-9]*$ ]]; then break; fi
+        kill -0 "${debugger_pid}" "${apply_pid}"
+        test "${SECONDS}" -lt "${deadline}"
+        sleep 0.1
+    done
+    target_sql "select state, query from pg_stat_activity where pid = ${apply_backend}"
+    printf '%s\n' "${apply_pid}" >"${barrier_dir}/kill.tmp"
+    mv "${barrier_dir}/kill.tmp" "${barrier_dir}/kill"
+    wait "${debugger_pid}"
+    debugger_pid= apply_pid=
+    cat "${TMPDIR}/gdb.log"
+    deadline=$((SECONDS + 60))
+    while test "$(target_sql "select count(*) from pg_stat_activity where pid = ${apply_backend}")" != 0; do
+        test "${SECONDS}" -lt "${deadline}"
+        sleep 0.1
+    done
+}
+
 pgcopydb ping
 source_sql 'drop table if exists oa; create table oa (id integer primary key, k integer, v text)'
 source_sql "insert into oa select i, i, md5(i::text) from generate_series(1, 10) i"
@@ -85,47 +135,7 @@ pgcopydb stream sentinel set endpos "${commit_a}"
 origin_before=$(origin)
 digest_before=$(target_sql "$(digest true)")
 
-barrier_dir=$(mktemp -d "${TMPDIR}/barrier.XXXXXX")
-timeout 120s gdb -q -batch \
-    -ex "set \$barrier_dir = \"${barrier_dir}\"" \
-    -ex "set \$expected_lsn = \"${commit_a}\"" \
-    -x /usr/src/pgcopydb/kill-at-commit.gdb \
-    --args pgcopydb stream catchup --resume --endpos "${commit_a}" >"${TMPDIR}/gdb.log" 2>&1 &
-debugger_pid=$!
-deadline=$((SECONDS + 60))
-while ! test -s "${barrier_dir}/paused"; do
-    kill -0 "${debugger_pid}"
-    test "${SECONDS}" -lt "${deadline}"
-    sleep 0.1
-done
-read -r apply_pid paused_lsn <"${barrier_dir}/paused"
-[[ ${apply_pid} =~ ^[1-9][0-9]*$ ]]
-test "${paused_lsn}" = "${commit_a}"
-
-# The apply backend has written rows and waits for input: all it was sent ran.
-deadline=$((SECONDS + 45))
-while true; do
-    apply_backend=$(target_sql "select pid from pg_stat_activity
-     where application_name like 'pgcopydb[${apply_pid}] %'
-       and backend_xid is not null and wait_event = 'ClientRead'
-       and (state = 'idle in transaction'
-            or query like '%pg_replication_origin_xact_setup%')")
-    if [[ ${apply_backend} =~ ^[1-9][0-9]*$ ]]; then break; fi
-    kill -0 "${debugger_pid}" "${apply_pid}"
-    test "${SECONDS}" -lt "${deadline}"
-    sleep 0.1
-done
-target_sql "select state, query from pg_stat_activity where pid = ${apply_backend}"
-printf '%s\n' "${apply_pid}" >"${barrier_dir}/kill.tmp"
-mv "${barrier_dir}/kill.tmp" "${barrier_dir}/kill"
-wait "${debugger_pid}"
-debugger_pid= apply_pid=
-cat "${TMPDIR}/gdb.log"
-deadline=$((SECONDS + 60))
-while test "$(target_sql "select count(*) from pg_stat_activity where pid = ${apply_backend}")" != 0; do
-    test "${SECONDS}" -lt "${deadline}"
-    sleep 0.1
-done
+kill_before_commit "${commit_a}"
 
 check "A: origin after kill before COMMIT" "${origin_before}" "$(origin)"
 check "A: rows after kill before COMMIT" "${digest_before}" "$(target_sql "$(digest true)")"
@@ -201,6 +211,103 @@ target_sql 'drop trigger oa_stall on oa'
 timeout 60s pgcopydb stream catchup --resume --endpos "${commit_c}"
 check "C: origin after resume" "${commit_c}" "$(origin)"
 check "C: rows after resume" "$(source_sql "$(digest 'id > 2000')")" "$(target_sql "$(digest 'id > 2000')")"
+
+#
+# Case D: the trigger refuses the 3rd of 10 transactions applied as a group
+#
+target_sql "create constraint trigger oa_reject after insert on oa deferrable initially deferred
+    for each row when (new.v = 'dup') execute function oa_reject();
+    alter table oa enable always trigger oa_reject"
+xids_d=() commits_d=()
+for i in $(seq 1 10); do
+    v=$(test "${i}" = 3 && echo dup || echo "d${i}")
+    xid=$(source_sql "begin; select pg_current_xact_id(); insert into oa values (400${i}, ${i}, '${v}'); commit")
+    xids_d+=("${xid}")
+done
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+for xid in "${xids_d[@]}"; do commits_d+=("$(commit_lsn "${xid}")"); done
+commit_d=${commits_d[9]}
+pgcopydb stream sentinel set endpos "${commit_d}"
+
+status=0
+PGCOPYDB_APPLY_GROUP_TXNS=100 timeout 60s pgcopydb stream catchup --resume --endpos "${commit_d}" \
+    >"${TMPDIR}/group.log" 2>&1 || status=$?
+grep -E 'ERROR|FATAL' "${TMPDIR}/group.log" | cut -c1-300 || true
+test "${status}" -ne 0
+grep -q 'oa_reject refuses row 4003' "${TMPDIR}/group.log"
+
+# The origin sits at a group boundary below the refused transaction, and the
+# target holds exactly the transactions at or below it: no part of a group.
+origin_d=$(origin)
+applied=0
+for i in $(seq 1 10); do
+    if test "$(target_sql "select '${commits_d[$((i - 1))]}'::pg_lsn <= '${origin_d}'::pg_lsn")" = t; then
+        applied=$((applied + 1))
+    fi
+done
+check "D: origin below the refused transaction" t \
+    "$(target_sql "select '${origin_d}'::pg_lsn < '${commits_d[2]}'::pg_lsn")"
+check "D: rows match the origin after the refused group" "${applied}" \
+    "$(target_sql 'select count(*) from oa where id > 4000')"
+grep -E 'Failed to commit [0-9]+ transaction' "${TMPDIR}/group.log" || true
+
+target_sql 'drop trigger oa_reject on oa'
+timeout 60s pgcopydb stream catchup --resume --endpos "${commit_d}"
+check "D: origin after resume" "${commit_d}" "$(origin)"
+check "D: rows after resume" "$(source_sql "$(digest 'id > 4000')")" "$(target_sql "$(digest 'id > 4000')")"
+
+#
+# Case F: SIGKILL before the COMMIT of a group of 5 transactions
+#
+xids_f=() commits_f=()
+for i in $(seq 1 5); do
+    xids_f+=("$(source_sql "begin; select pg_current_xact_id(); insert into oa values (600${i}, ${i}, 'f${i}'); commit")")
+done
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+for xid in "${xids_f[@]}"; do commits_f+=("$(commit_lsn "${xid}")"); done
+commit_f=${commits_f[4]}
+pgcopydb stream sentinel set endpos "${commit_f}"
+
+kill_before_commit "${commit_f}"
+
+# a KEEPALIVE can split the backlog: only the group holding the last one died
+origin_f=$(origin)
+applied=0
+for lsn in "${commits_f[@]}"; do
+    if test "$(target_sql "select '${lsn}'::pg_lsn <= '${origin_f}'::pg_lsn")" = t; then
+        applied=$((applied + 1))
+    fi
+done
+check "F: origin below the killed group" t \
+    "$(target_sql "select '${origin_f}'::pg_lsn < '${commit_f}'::pg_lsn")"
+check "F: rows match the origin after the kill" "${applied}" \
+    "$(target_sql 'select count(*) from oa where id > 6000')"
+grep -E 'COMMIT [0-9]+ transaction' "${TMPDIR}/gdb.log" || true
+
+timeout 60s pgcopydb stream catchup --resume --endpos "${commit_f}"
+check "F: origin after resume" "${commit_f}" "$(origin)"
+check "F: rows after resume" "$(source_sql "$(digest 'id > 6000')")" "$(target_sql "$(digest 'id > 6000')")"
+
+#
+# Case E: TRUNCATE after a transaction that left deferred trigger events
+#
+# Postgres refuses TRUNCATE of a table with pending trigger events, so a
+# grouped apply must not put the TRUNCATE in the same target transaction.
+target_sql "create function oa_noop() returns trigger language plpgsql as \$\$
+    begin return null; end \$\$;
+    create constraint trigger oa_defer after insert on oa deferrable initially deferred
+    for each row execute function oa_noop();
+    alter table oa enable always trigger oa_defer"
+source_sql "insert into oa values (5001, 1, 'e1')"
+source_sql 'truncate oa'
+xid=$(source_sql "begin; select pg_current_xact_id(); insert into oa values (5002, 2, 'e2'); commit")
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+commit_e=$(commit_lsn "${xid}")
+pgcopydb stream sentinel set endpos "${commit_e}"
+
+PGCOPYDB_APPLY_GROUP_TXNS=100 timeout 60s pgcopydb stream catchup --resume --endpos "${commit_e}"
+check "E: origin after TRUNCATE" "${commit_e}" "$(origin)"
+check "E: rows after TRUNCATE" "$(source_sql "$(digest true)")" "$(target_sql "$(digest true)")"
 
 pgcopydb stream cleanup
 echo "RESULT failures=${failures}"

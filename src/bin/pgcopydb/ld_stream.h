@@ -611,6 +611,24 @@ typedef struct StreamApplyContext
 
 	/* target relkind cache: populated at startup, used for matview detection */
 	TargetRelkind *targetRelkindCache;
+
+	/*
+	 * Consecutive source transactions share one target transaction (a group).
+	 * previousLSN moves only when a group commits; groupCursorLSN is the
+	 * commit LSN of the last member sent, and equals previousLSN otherwise.
+	 */
+	bool groupOpen;
+	uint64_t groupCursorLSN;
+	char groupLastTs[PG_MAX_TIMESTAMP];
+	uint32_t groupFirstXid;
+	uint32_t groupLastXid;
+	int groupTxns;
+	uint64_t groupRows;
+	TimestampTz groupStart;
+
+	int groupMaxTxns;           /* PGCOPYDB_APPLY_GROUP_TXNS, 1 disables */
+	int groupMaxRows;           /* PGCOPYDB_APPLY_GROUP_ROWS */
+	int groupMaxMs;             /* PGCOPYDB_APPLY_GROUP_MS */
 } StreamApplyContext;
 
 

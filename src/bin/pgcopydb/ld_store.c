@@ -25,6 +25,8 @@
 #include "file_utils.h"
 #include "string_utils.h"
 
+static bool ld_store_fetch_bool(SQLiteQuery *query);
+
 
 /*
  * ld_store_replaydb_filename_from_outputdb derives the replay.db path from the
@@ -3317,6 +3319,63 @@ ld_store_replay_next_event(DatabaseCatalog *catalog,
 		/* errors have already been logged */
 		return false;
 	}
+
+	return true;
+}
+
+
+/*
+ * ld_store_replay_txn_must_commit_alone sets alone when the transaction that
+ * starts at begin_id holds a TRUNCATE or ends in a ROLLBACK. Neither can share
+ * a target transaction: TRUNCATE fails on trigger events that an earlier
+ * member left pending, and a ROLLBACK would discard the earlier members.
+ */
+bool
+ld_store_replay_txn_must_commit_alone(DatabaseCatalog *catalog,
+									  uint32_t xid,
+									  uint64_t begin_id,
+									  bool *alone)
+{
+	sqlite3 *db = catalog->db;
+
+	char *sql =
+		"select exists(select 1 from replay "
+		"               where xid = $1 and id > $2 and action in ('T', 'R') "
+		"                 and id <= (select min(id) from replay "
+		"                             where xid = $1 and action in ('C', 'R') "
+		"                               and id > $2))";
+
+	SQLiteQuery query = {
+		.errorOnZeroRows = true,
+		.context = alone,
+		.fetchFunction = &ld_store_fetch_bool
+	};
+
+	if (!catalog_sql_prepare(db, sql, &query))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	BindParam params[] = {
+		{ BIND_PARAMETER_TYPE_INT64, "xid", xid, NULL },
+		{ BIND_PARAMETER_TYPE_INT64, "begin_id", begin_id, NULL }
+	};
+
+	if (!catalog_sql_bind(&query, params, 2))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	return catalog_sql_execute_once(&query);
+}
+
+
+static bool
+ld_store_fetch_bool(SQLiteQuery *query)
+{
+	*(bool *) query->context = sqlite3_column_int(query->ppStmt, 0) == 1;
 
 	return true;
 }

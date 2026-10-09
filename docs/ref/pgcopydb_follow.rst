@@ -561,6 +561,20 @@ PGCOPYDB_WAL2JSON_NUMERIC_AS_STRING
   When ``--wal2json-numeric-as-string`` is ommitted from the command line
   then this environment variable is used.
 
+PGCOPYDB_APPLY_GROUP_TXNS, PGCOPYDB_APPLY_GROUP_ROWS, PGCOPYDB_APPLY_GROUP_MS
+
+  The apply commits consecutive source transactions in one target
+  transaction, up to this many transactions (default 100), rows (default
+  10000) or milliseconds (default 200). The replication origin moves to the
+  commit LSN of the last one, so a failed or refused COMMIT rolls back the
+  whole group and the next run applies it again. A transaction that holds a
+  TRUNCATE or ends in a ROLLBACK is committed on its own.
+
+  Deferred constraint triggers that only the target has fire once per group,
+  against the state after its last transaction. Set
+  ``PGCOPYDB_APPLY_GROUP_TXNS`` to 1 to commit each source transaction on its
+  own.
+
 PGCOPYDB_SNAPSHOT
 
   Postgres snapshot identifier to re-use, see also ``--snapshot``.
