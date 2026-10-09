@@ -918,6 +918,8 @@ enum
  * stream_commit_batch commits the open output.db batch.  Every receive-side
  * commit goes through here so the batch counters stay true.
  */
+static uint64_t mutantPendingCommitLSN = 0;
+
 static bool
 stream_commit_batch(LogicalStreamContext *context, int trigger)
 {
@@ -927,6 +929,10 @@ stream_commit_batch(LogicalStreamContext *context, int trigger)
 	{
 		return false;
 	}
+
+	/* MUTANT: the guard learns a COMMIT only once output.db committed it */
+	privateContext->lastDurableCommitLSN =
+		Max(privateContext->lastDurableCommitLSN, mutantPendingCommitLSN);
 
 	if (privateContext->batchTxns > 0)
 	{
@@ -1068,8 +1074,7 @@ streamWrite(LogicalStreamContext *context)
 		 */
 		if (!metadata->skipping)
 		{
-			privateContext->lastDurableCommitLSN =
-				Max(privateContext->lastDurableCommitLSN, metadata->lsn);
+			mutantPendingCommitLSN = Max(mutantPendingCommitLSN, metadata->lsn);
 
 			if (privateContext->batchTxns++ == 0)
 			{
