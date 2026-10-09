@@ -2077,6 +2077,12 @@ pgsql_sync_pipeline(PGSQL *pgsql)
 			PQclear(res);
 		}
 
+		/* the sync result is the last one: waiting on the socket now only burns the timeout */
+		if (syncReceived)
+		{
+			break;
+		}
+
 		/*
 		 * We need to wait for the socket to be ready for reading, otherwise
 		 * select() will return immediately and we will busy loop.
