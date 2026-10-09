@@ -11995,7 +11995,7 @@ catalog_iter_s_table_batchable_init(SourceTableIterator *iter)
 		"     and not exists "
 		"         (select 1 from s_constraint c "
 		"                   join s_index ci on ci.oid = c.indexoid "
-		"           where ci.tableoid = t.oid and ci.isunique = 0)";
+		"           where ci.tableoid = t.oid and ci.isunique = 0 and false)";
 
 	SQLiteQuery *query = &(iter->query);
 
