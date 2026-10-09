@@ -233,10 +233,11 @@ keepalive_in_txn() {
 }
 
 # The apply is killed after B, before A's COMMIT; A began below B's COMMIT,
-# which is the origin on restart.
+# which is the origin on restart.  Grouped, B, A and the last transaction
+# share one COMMIT, so a kill before it leaves none of them applied.
 restart_interleaved() {
     begin_case restart-interleaved
-    local xid_a xid_b end
+    local xid_a xid_b end origin0
     on a begin
     on a "insert into ta values (501, 'A first')"
     xid_a=$(xid_of a)
@@ -250,7 +251,15 @@ restart_interleaved() {
 
     prefetch "$(wal_lsn)"
     end=$(last_commit)
-    kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"$(commit_of "${xid_a}")\")" 0 "${end}"
+    origin0=$(origin)
+    PGCOPYDB_APPLY_GROUP_MS=60000 \
+        kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"${end}\")" 0 "${end}"
+    test "$(count 'tb where id > 50')" = 0 || fail 'part of the group was applied before the kill'
+    test "$(count 'ta where id > 500')" = 0 || fail 'A was applied before the group kill'
+    test "$(origin)" = "${origin0}" || fail "origin $(origin) moved before the group COMMIT"
+
+    PGCOPYDB_APPLY_GROUP_TXNS=1 \
+        kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"$(commit_of "${xid_a}")\")" 0 "${end}"
     test "$(count 'tb where id = 51')" = 1 || fail 'B was not applied before the kill'
     test "$(count 'ta where id > 500')" = 0 || fail 'A was applied before the kill'
     test "$(origin)" = "$(commit_of "${xid_b}")" || fail "origin $(origin) is not B's COMMIT"

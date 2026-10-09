@@ -65,8 +65,27 @@ fi
 
 pgcopydb stream sentinel set endpos "${endpos}"
 pgcopydb stream sentinel set apply
+
+# Grouped, transactions 1 and 2 share a COMMIT and the refusal keeps both out.
+# Between, the group would read transaction 3 ahead, which the last check rules out.
+if test "${boundary}" = commit; then
+    origin0=$(target_sql "select pg_replication_origin_progress('pgcopydb', true)")
+    status=0
+    timeout 60s pgcopydb stream catchup --resume --endpos "${endpos}" || status=$?
+    origin=$(target_sql "select pg_replication_origin_progress('pgcopydb', true)")
+    state=$(catalog_sql "select run_state, run_end_lsn, last_txn_processed from pipeline_state where process_name = 'apply'")
+    rows=$(target_sql "select count(*) from apply_guard")
+    echo "Rejected group (${boundary}): exit=${status}, origin=${origin}, state=${state}, rows=${rows}, expected=${origin0}"
+    test "${status}" -ne 0
+    test "${status}" -ne 124
+    test "${origin}" = "${origin0}"
+    test "${state}" = "error|${origin0}|0"
+    test "${rows}" -eq 0
+fi
+
+# One transaction per COMMIT, the first one stays applied.
 status=0
-timeout 60s pgcopydb stream catchup --resume --endpos "${endpos}" || status=$?
+PGCOPYDB_APPLY_GROUP_TXNS=1 timeout 60s pgcopydb stream catchup --resume --endpos "${endpos}" || status=$?
 replay=$(pgcopydb stream sentinel get --replay-lsn)
 origin=$(target_sql "select pg_replication_origin_progress('pgcopydb', true)")
 state=$(catalog_sql "select run_state, run_end_lsn, last_txn_processed from pipeline_state where process_name = 'apply'")
