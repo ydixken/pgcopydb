@@ -64,10 +64,15 @@ static bool stream_apply_load_target_relkinds(StreamApplyContext *context);
 
 static bool stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s);
 static bool stream_apply_truncate(StreamApplyContext *context, const char *sql);
-static bool stream_apply_transaction(StreamApplyContext *context,
-									 uint32_t xid,
-									 uint64_t begin_id,
-									 uint64_t commitLSN);
+static bool stream_apply_group_open(StreamApplyContext *context);
+static bool stream_apply_group_rollback(StreamApplyContext *context);
+static bool stream_apply_group_close(StreamApplyContext *context,
+									 PipelineStateEntry *current);
+static bool stream_apply_txn_body(StreamApplyContext *context,
+								  uint32_t xid,
+								  uint64_t begin_id,
+								  uint64_t commitLSN,
+								  bool *degrade);
 
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
 
@@ -183,19 +188,41 @@ stream_apply_state_progressed(const PipelineStateEntry *before,
 }
 
 
+/* apply_group_limit reads a positive group limit from the environment */
+static int
+apply_group_limit(const char *name, int fallback)
+{
+	char value[BUFSIZE] = { 0 };
+	int limit = 0;
+
+	if (env_exists(name) &&
+		get_env_copy(name, value, sizeof(value)) &&
+		stringToInt(value, &limit) &&
+		limit > 0)
+	{
+		return limit;
+	}
+
+	return fallback;
+}
+
+
 /*
  * stream_apply_replaydb is the main catchup loop for the SQLite-based CDC
  * pipeline.  It drives a transaction-oriented outer loop:
  *
  *   1. Fetch the next event (BEGIN or non-txn) from the replayDB.
- *   2. For BEGIN rows, apply the full transaction via stream_apply_transaction().
- *   3. For non-txn events (KEEPALIVE/SWITCH/ENDPOS), call stream_apply_sql().
+ *   2. For BEGIN rows, send the full transaction into the open group, a
+ *      target transaction that commits once it holds enough transactions,
+ *      rows or time, or when the next one is not ready yet.
+ *   3. For non-txn events (KEEPALIVE/SWITCH/ENDPOS), commit the group, then
+ *      call stream_apply_sql().
  *
  * The outer query only returns BEGIN rows whose COMMIT has already been stored
- * (endlsn > previousLSN), so the loop never sees a half-written transaction.
+ * (endlsn > cursor), so the loop never sees a half-written transaction.
  *
  * Three explicit guards before each transaction:
- *   Guard 1 – commitLSN <= previousLSN:  already applied, skip.
+ *   Guard 1 – commitLSN <= cursor:       already applied, skip.
  *   Guard 2 – endpos < beginLSN:         endpos before this txn, stop.
  *   Guard 3 – beginLSN < endpos < commitLSN: endpos is mid-transaction;
  *             we still apply the full transaction and stop afterwards.
@@ -257,13 +284,51 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 	/* block on the pipe only after a pass that found nothing to do */
 	bool idle = false;
 
+	/* PGCOPYDB_APPLY_GROUP_TXNS=1 applies one source transaction per COMMIT */
+	int groupMaxTxns = apply_group_limit("PGCOPYDB_APPLY_GROUP_TXNS", 100);
+	int groupMaxRows = apply_group_limit("PGCOPYDB_APPLY_GROUP_ROWS", 10000);
+	int groupMaxMs = apply_group_limit("PGCOPYDB_APPLY_GROUP_MS", 200);
+
+	log_info("Applying up to %d transactions, %d rows or %d ms "
+			 "per target transaction",
+			 groupMaxTxns, groupMaxRows, groupMaxMs);
+
+	context->groupOpen = false;
+	context->groupCursorLSN = context->previousLSN;
+
 	for (;;)
 	{
 		if (asked_to_stop || asked_to_stop_fast || asked_to_quit)
 		{
+			/* the signal interrupts any query, a group COMMIT included */
+			if (context->groupOpen)
+			{
+				log_info("Apply leaves %d transactions after %X/%X "
+						 "uncommitted, the next run applies them again",
+						 context->groupTxns,
+						 LSN_FORMAT_ARGS(context->previousLSN));
+				context->groupOpen = false;
+				context->groupCursorLSN = context->previousLSN;
+			}
+
 			log_info("Apply process received a shutdown signal, stopping");
 			break;
 		}
+
+		if (!context->groupOpen &&
+			context->groupCursorLSN != context->previousLSN)
+		{
+			log_error("BUG: no group is open and its cursor %X/%X "
+					  "is not previousLSN %X/%X",
+					  LSN_FORMAT_ARGS(context->groupCursorLSN),
+					  LSN_FORMAT_ARGS(context->previousLSN));
+			success = false;
+			break;
+		}
+
+		/* the next transaction to transform or apply commits after this */
+		uint64_t cursorLSN =
+			context->groupOpen ? context->groupCursorLSN : context->previousLSN;
 
 		/* ── check for upstream-done signal ──────────────────────────── */
 		if (!specs->upstream_done && pipe_rd >= 0)
@@ -311,7 +376,7 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 		lock_held = true;
 
 		if (!ld_store_replay_next_event(replayDB,
-										context->previousLSN,
+										cursorLSN,
 										context->keepaliveLSN,
 										&s))
 		{
@@ -346,7 +411,7 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			PipelineStateEntry before = current;
 
 			if (!stream_transform_from_outputdb(specs,
-												context->previousLSN,
+												cursorLSN,
 												context->keepaliveLSN))
 			{
 				/*
@@ -359,6 +424,27 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 						  "see above for details");
 				success = false;
 				break;
+			}
+
+			/*
+			 * A group grows while the transform hands over transactions.
+			 * Everything below runs with no group open, so previousLSN is
+			 * the cursor the transform just used.
+			 */
+			if (context->groupOpen)
+			{
+				if (!specs->private.midTxnEndpos &&
+					stream_apply_state_progressed(&before, &current) &&
+					feGetCurrentTimestamp() - context->groupStart < groupMaxMs * 1000LL)
+				{
+					continue;
+				}
+
+				if (!stream_apply_group_close(context, &current))
+				{
+					success = false;
+					break;
+				}
 			}
 
 			if (specs->private.midTxnEndpos)
@@ -581,20 +667,45 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 
 			/* Guard 1: already applied — should not happen given the query,
 			 * but be safe on restart edge cases. */
-			if (commitLSN <= context->previousLSN)
+			if (commitLSN <= cursorLSN)
 			{
 				log_debug("Skip already-applied txn %u commitLSN %X/%X "
-						  "<= previousLSN %X/%X",
+						  "<= cursor %X/%X",
 						  xid,
 						  LSN_FORMAT_ARGS(commitLSN),
-						  LSN_FORMAT_ARGS(context->previousLSN));
+						  LSN_FORMAT_ARGS(cursorLSN));
 				continue;
+			}
+
+			/*
+			 * Per transaction, as when each one commits on its own: an endpos
+			 * set while the group is open must keep later members out.
+			 */
+			if (context->groupOpen)
+			{
+				CopyDBSentinel sentinel = { 0 };
+
+				if (!sentinel_get(context->sourceDB, &sentinel))
+				{
+					log_error("Failed to read endpos from the sentinel");
+					success = false;
+					break;
+				}
+
+				context->endpos = sentinel.endpos;
 			}
 
 			/* Guard 2: endpos lies entirely before this transaction. */
 			if (context->endpos != InvalidXLogRecPtr &&
 				context->endpos < beginLSN)
 			{
+				if (context->groupOpen &&
+					!stream_apply_group_close(context, &current))
+				{
+					success = false;
+					break;
+				}
+
 				context->reachedEndPos = true;
 
 				log_notice("Apply reached end position %X/%X before "
@@ -653,18 +764,66 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			current.last_txn_complete = false;
 			current.last_txn_processed = false;
 
-			if (!stream_apply_transaction(context, xid, begin_id, commitLSN))
+			if (!context->groupOpen && !stream_apply_group_open(context))
 			{
 				/* errors have already been logged */
 				success = false;
 				break;
 			}
 
-			/* Transaction applied to target: record completion in-memory. */
+			bool degrade = false;
+
+			if (!stream_apply_txn_body(context, xid, begin_id, commitLSN, &degrade))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			/* re-apply the members sent so far, then this one, ungrouped */
+			if (degrade)
+			{
+				if (!stream_apply_group_rollback(context))
+				{
+					success = false;
+					break;
+				}
+
+				context->noGroupUntilLSN = commitLSN;
+				continue;
+			}
+
+			/* a ROLLBACK row in the first member rolled the group back */
+			if (!context->groupOpen)
+			{
+				continue;
+			}
+
 			current.last_txn_end_lsn = commitLSN;
 			current.last_txn_complete = true;
-			current.last_txn_processed = true;
-			current.run_end_lsn = context->previousLSN;
+
+			int maxTxns =
+				context->previousLSN < context->noGroupUntilLSN ? 1 : groupMaxTxns;
+
+			/* the endpos transaction is always the last member */
+			bool closeGroup =
+				(context->endpos != InvalidXLogRecPtr &&
+				 context->endpos <= commitLSN) ||
+				context->groupTxns >= maxTxns ||
+				context->groupRows >= groupMaxRows ||
+				feGetCurrentTimestamp() - context->groupStart >= groupMaxMs * 1000LL;
+
+			if (!closeGroup)
+			{
+				continue;
+			}
+
+			if (!stream_apply_group_close(context, &current))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
 
 			/* After commit: check if endpos has been reached. */
 			if (context->endpos != InvalidXLogRecPtr &&
@@ -691,6 +850,14 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 		}
 		else
 		{
+			/* a KEEPALIVE commits with the origin at previousLSN */
+			if (context->groupOpen &&
+				!stream_apply_group_close(context, &current))
+			{
+				success = false;
+				break;
+			}
+
 			/*
 			 * Non-transactional event: KEEPALIVE only.
 			 * ENDPOS rows no longer appear in the replay table.
@@ -756,6 +923,10 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 		(void) semaphore_unlock(&(replayDB->sema));
 	}
 
+	log_info("Applied %lld transactions in %lld target transactions",
+			 (long long) context->groupedTxnsCommitted,
+			 (long long) context->groupsCommitted);
+
 	/* enforce a final durable checkpoint of the in-memory apply state */
 	(void) pipeline_state_sync(specs->sourceDB, &current);
 	specs->private.applyState = NULL;
@@ -787,24 +958,13 @@ stream_apply_commit(StreamApplyContext *context, uint64_t lsn, char *timestamp)
 
 
 /*
- * stream_apply_transaction applies a single committed transaction to the
- * target database.  It opens a Postgres transaction, iterates all DML rows
- * for xid in replay order (starting from begin_id), and commits with the
- * replication origin set to commitLSN.
- *
- * Every COMMIT confirms durable origin progress, so stopping between
- * transactions needs no further PostgreSQL query.
- *
- * Returns false on error; on success context->previousLSN = commitLSN.
+ * stream_apply_group_open opens the target transaction that the next source
+ * transactions (the group members) are applied in.
  */
 static bool
-stream_apply_transaction(StreamApplyContext *context,
-						 uint32_t xid,
-						 uint64_t begin_id,
-						 uint64_t commitLSN)
+stream_apply_group_open(StreamApplyContext *context)
 {
 	PGSQL *applyPgConn = &(context->applyPgConn);
-	DatabaseCatalog *replayDB = context->replayDB;
 
 	if (!pgsql_begin(applyPgConn))
 	{
@@ -819,9 +979,108 @@ stream_apply_transaction(StreamApplyContext *context,
 		return false;
 	}
 
+	context->groupOpen = true;
+	context->groupCursorLSN = context->previousLSN;
+	context->groupTxns = 0;
+	context->groupRows = 0;
+	context->groupStart = feGetCurrentTimestamp();
+
 	context->transactionInProgress = true;
 	context->reachedStartPos = true;
 	context->continuedTxn = false;
+
+	return true;
+}
+
+
+/*
+ * stream_apply_group_rollback discards the open group on the client side. No
+ * origin setup has been sent, so the origin stays at previousLSN.
+ */
+static bool
+stream_apply_group_rollback(StreamApplyContext *context)
+{
+	context->groupOpen = false;
+	context->groupCursorLSN = context->previousLSN;
+	context->transactionInProgress = false;
+
+	return pgsql_execute(&(context->applyPgConn), "ROLLBACK");
+}
+
+
+/*
+ * stream_apply_group_close commits the open group with the origin at the last
+ * member's commit LSN. A refused COMMIT rewinds the origin to previousLSN, the
+ * LSN before the group, and none of the group's rows stay on the target.
+ */
+static bool
+stream_apply_group_close(StreamApplyContext *context, PipelineStateEntry *current)
+{
+	log_debug("COMMIT %d transactions, xid %u to %u, LSN %X/%X",
+			  context->groupTxns,
+			  context->groupFirstXid,
+			  context->groupLastXid,
+			  LSN_FORMAT_ARGS(context->groupCursorLSN));
+
+	context->groupOpen = false;
+	context->transactionInProgress = false;
+
+	if (!stream_apply_commit(context,
+							 context->groupCursorLSN,
+							 context->groupLastTs))
+	{
+		log_error("Failed to commit %d transactions, xid %u to %u, "
+				  "committing after %X/%X up to %X/%X",
+				  context->groupTxns,
+				  context->groupFirstXid,
+				  context->groupLastXid,
+				  LSN_FORMAT_ARGS(context->previousLSN),
+				  LSN_FORMAT_ARGS(context->groupCursorLSN));
+		context->groupCursorLSN = context->previousLSN;
+		return false;
+	}
+
+	context->previousLSN = context->groupCursorLSN;
+	context->groupsCommitted++;
+	context->groupedTxnsCommitted += context->groupTxns;
+
+	/* the transform may have recorded a later transaction since */
+	if (current->last_txn_end_lsn == context->previousLSN)
+	{
+		current->last_txn_processed = true;
+	}
+
+	current->run_end_lsn = context->previousLSN;
+
+	if (!stream_apply_sync_sentinel(context, false))
+	{
+		log_warn("Failed to sync sentinel after xid %u at %X/%X, "
+				 "will retry on next iteration",
+				 context->groupLastXid,
+				 LSN_FORMAT_ARGS(context->previousLSN));
+	}
+
+	return true;
+}
+
+
+/*
+ * stream_apply_txn_body sends the rows of one committed source transaction
+ * into the open group. A member after the first that holds a ROLLBACK row or
+ * a TRUNCATE (which deferred trigger events of earlier members can refuse)
+ * sends nothing more and sets *degrade: the caller re-applies ungrouped.
+ */
+static bool
+stream_apply_txn_body(StreamApplyContext *context,
+					  uint32_t xid,
+					  uint64_t begin_id,
+					  uint64_t commitLSN,
+					  bool *degrade)
+{
+	PGSQL *applyPgConn = &(context->applyPgConn);
+	DatabaseCatalog *replayDB = context->replayDB;
+
+	*degrade = false;
 
 	ReplayDBReplayTxnIterator iter = { 0 };
 
@@ -832,12 +1091,13 @@ stream_apply_transaction(StreamApplyContext *context,
 	if (!ld_store_iter_replay_txn_init(&iter))
 	{
 		/* errors have already been logged */
-		(void) pgsql_execute(applyPgConn, "ROLLBACK");
-		context->transactionInProgress = false;
+		(void) stream_apply_group_rollback(context);
 		return false;
 	}
 
 	bool success = true;
+	bool rolledBack = false;
+	int rows = 0;
 	char commitTimestamp[PG_MAX_TIMESTAMP] = { 0 };
 
 	/*
@@ -862,7 +1122,7 @@ stream_apply_transaction(StreamApplyContext *context,
 
 		if (s == NULL)
 		{
-			log_error("BUG: stream_apply_transaction: no COMMIT/ROLLBACK row "
+			log_error("BUG: stream_apply_txn_body: no COMMIT/ROLLBACK row "
 					  "found for xid %u (begin_id %lld commitLSN %X/%X)",
 					  xid, (long long) begin_id,
 					  LSN_FORMAT_ARGS(commitLSN));
@@ -882,6 +1142,19 @@ stream_apply_transaction(StreamApplyContext *context,
 			break;
 		}
 
+		if ((s->action == STREAM_ACTION_ROLLBACK ||
+			 s->action == STREAM_ACTION_TRUNCATE) &&
+			context->groupTxns > 0)
+		{
+			log_info("Transaction %u (%X/%X) holds a %s: applying the "
+					 "transactions after %X/%X one per target transaction",
+					 xid, LSN_FORMAT_ARGS(commitLSN),
+					 s->action == STREAM_ACTION_ROLLBACK ? "ROLLBACK" : "TRUNCATE",
+					 LSN_FORMAT_ARGS(context->previousLSN));
+			*degrade = true;
+			break;
+		}
+
 		if (s->action == STREAM_ACTION_ROLLBACK)
 		{
 			/*
@@ -891,27 +1164,12 @@ stream_apply_transaction(StreamApplyContext *context,
 			 */
 			log_notice("Rolling back transaction %u (rollback LSN %X/%X)",
 					   xid, LSN_FORMAT_ARGS(s->lsn));
-
-			(void) ld_store_iter_replay_txn_finish(&iter);
-
-			TargetRelkind *pr, *prTmp;
-			HASH_ITER(hh, sentRefresh, pr, prTmp)
-			{
-				HASH_DEL(sentRefresh, pr);
-				free(pr);
-			}
-
-			if (!pgsql_execute(applyPgConn, "ROLLBACK"))
-			{
-				/* errors have already been logged */
-				return false;
-			}
-
-			context->transactionInProgress = false;
-			return true;
+			rolledBack = true;
+			break;
 		}
 
 		/* DML row (INSERT / UPDATE / DELETE / TRUNCATE) */
+		++rows;
 
 		/*
 		 * If the target relation is a materialized view, skip the DML and
@@ -1012,11 +1270,16 @@ stream_apply_transaction(StreamApplyContext *context,
 		}
 	}
 
-	if (!success)
+	if (!success || rolledBack)
 	{
-		(void) pgsql_execute(applyPgConn, "ROLLBACK");
-		context->transactionInProgress = false;
-		return false;
+		bool rollbackSent = stream_apply_group_rollback(context);
+
+		return success && rollbackSent;
+	}
+
+	if (*degrade)
+	{
+		return true;
 	}
 
 	if (IS_EMPTY_STRING_BUFFER(commitTimestamp))
@@ -1028,33 +1291,17 @@ stream_apply_transaction(StreamApplyContext *context,
 										   sizeof(commitTimestamp));
 	}
 
-	log_debug("COMMIT xid %u LSN %X/%X", xid, LSN_FORMAT_ARGS(commitLSN));
-
-	if (!stream_apply_commit(context, commitLSN, commitTimestamp))
+	if (context->groupTxns == 0)
 	{
-		log_error("Failed to commit xid %u at %X/%X",
-				  xid, LSN_FORMAT_ARGS(commitLSN));
-		context->transactionInProgress = false;
-		return false;
+		context->groupFirstXid = xid;
 	}
 
-	context->transactionInProgress = false;
-	context->previousLSN = commitLSN;
+	context->groupLastXid = xid;
+	context->groupCursorLSN = commitLSN;
+	strlcpy(context->groupLastTs, commitTimestamp, sizeof(context->groupLastTs));
+	context->groupTxns++;
+	context->groupRows += rows;
 
-	bool findDurableLSN = false;
-
-	if (!stream_apply_sync_sentinel(context, findDurableLSN))
-	{
-		log_warn("Failed to sync sentinel after xid %u at %X/%X, "
-				 "will retry on next iteration",
-				 xid, LSN_FORMAT_ARGS(commitLSN));
-	}
-
-	/*
-	 * The driver loop (stream_apply_replaydb) records completion of this
-	 * transaction in its in-memory pipeline state once we return, and
-	 * checkpoints it to sourceDB periodically and at end of processing.
-	 */
 	return true;
 }
 

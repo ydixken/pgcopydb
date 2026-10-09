@@ -581,6 +581,23 @@ typedef struct StreamApplyContext
 
 	uint64_t previousLSN;       /* register COMMIT LSN progress */
 	uint64_t keepaliveLSN;      /* last KEEPALIVE consumed, cursor only */
+
+	/*
+	 * Source transactions applied in one target transaction (a group).
+	 * previousLSN moves only when the group commits; groupCursorLSN is the
+	 * commit LSN of the last member sent, and equals previousLSN otherwise.
+	 */
+	bool groupOpen;
+	uint64_t groupCursorLSN;
+	char groupLastTs[PG_MAX_TIMESTAMP];
+	uint32_t groupFirstXid;
+	uint32_t groupLastXid;
+	int groupTxns;
+	int groupRows;
+	int64_t groupStart;          /* feGetCurrentTimestamp() at group open */
+	uint64_t noGroupUntilLSN;   /* apply one per target txn up to here */
+	uint64_t groupsCommitted;
+	uint64_t groupedTxnsCommitted;
 	uint64_t switchLSN;         /* LSN of the most recent SWITCH WAL message */
 
 	LSNTracking *lsnTrackingList;
