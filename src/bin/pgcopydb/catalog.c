@@ -11987,7 +11987,7 @@ catalog_iter_s_table_batchable_init(SourceTableIterator *iter)
 		"    from s_table t "
 		"         left join s_table_size ts on ts.oid = t.oid "
 		"   where (select count(1) from s_index u "
-		"           where u.tableoid = t.oid and u.isunique = 1) = 1 "
+		"           where u.tableoid = t.oid and u.isunique = 1) >= 1 "
 		"     and exists "
 		"         (select 1 from s_index i "
 		"           where i.tableoid = t.oid and i.isunique = 1 "
