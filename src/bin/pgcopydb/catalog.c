@@ -1584,6 +1584,20 @@ catalog_init(DatabaseCatalog *catalog)
 		return false;
 	}
 
+	/*
+	 * Apply rebuilds replay.db from output.db above the target origin, so a
+	 * power loss that drops its newest commits only costs a re-transform.
+	 * The pragma is per connection: set it on every open.
+	 */
+	if (catalog->type == DATABASE_CATALOG_TYPE_REPLAY &&
+		!catalog_execute(catalog, "PRAGMA synchronous = NORMAL"))
+	{
+		/* errors have already been logged */
+		sqlite3_close(catalog->db);
+		catalog->db = NULL;
+		return false;
+	}
+
 	if (createSchema)
 	{
 		/*
