@@ -4291,6 +4291,7 @@ pgsql_start_replication(LogicalStreamClient *client)
 		return false;
 	}
 
+	PQclear(res);
 	log_sql("streaming initiated");
 
 	destroyPQExpBuffer(query);
@@ -4711,6 +4712,7 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 		goto error;
 	}
 
+	PQclear(res);
 	clear_results(pgsql);
 	pgsql_finish(pgsql);
 

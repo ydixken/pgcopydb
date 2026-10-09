@@ -132,6 +132,7 @@ jobs:
           - cdc-truncate-multi
           - cdc-origin-abort
           - cdc-receive-drain-error
+          - cdc-receive-reconnect-dying-source
           - follow-wal2json
           - follow-9.6
           - follow-data-only
