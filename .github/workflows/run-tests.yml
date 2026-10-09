@@ -146,6 +146,7 @@ jobs:
           - cdc-commit-order-resume
           - cdc-copy-multi-insert
           - cdc-receive-crash
+          - cdc-update-batch
         exclude:
           # timescaledb uses timescale/timescaledb:latest-pg13 for both source
           # and target. pg_restore from PG17+ emits "SET transaction_timeout = 0"

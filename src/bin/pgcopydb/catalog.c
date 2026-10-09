@@ -11890,3 +11890,123 @@ catalog_iter_s_table_keyless_init(SourceTableIterator *iter)
 
 	return true;
 }
+
+
+/*
+ * catalog_iter_s_table_batchable iterates over the tables whose only unique
+ * index is their primary key or replica identity index, and whose other
+ * indexes back no constraint.  Several rows of such a table can be updated in
+ * one statement, since no other unique or exclusion check sees the rows in an
+ * order that differs from the source.
+ */
+bool
+catalog_iter_s_table_batchable(DatabaseCatalog *catalog,
+							   void *context,
+							   SourceTableIterFun *callback)
+{
+	SourceTableIterator *iter =
+		(SourceTableIterator *) calloc(1, sizeof(SourceTableIterator));
+
+	if (iter == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	iter->catalog = catalog;
+
+	if (!catalog_iter_s_table_batchable_init(iter))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	for (;;)
+	{
+		if (!catalog_iter_s_table_next(iter))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		SourceTable *table = iter->table;
+
+		if (table == NULL)
+		{
+			if (!catalog_iter_s_table_finish(iter))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+
+			break;
+		}
+
+		if (!(*callback)(context, table))
+		{
+			log_error("Failed to iterate over list of tables, "
+					  "see above for details");
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
+/*
+ * catalog_iter_s_table_batchable_init initializes an Iterator over our
+ * catalog of SourceTable entries whose UPDATEs can be batched.  A table that
+ * has no s_index rows is not batchable: a missing catalog must not read as safe.
+ */
+bool
+catalog_iter_s_table_batchable_init(SourceTableIterator *iter)
+{
+	sqlite3 *db = iter->catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: Failed to initialize "
+				  "catalog_iter_s_table_batchable_init iterator: db is NULL");
+		return false;
+	}
+
+	iter->table = (SourceTable *) calloc(1, sizeof(SourceTable));
+
+	if (iter->table == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	char *sql =
+		"  select t.oid, t.datname, qname, nspname, relname, amname, restore_list_name, "
+		"         relpages, reltuples, ts.bytes, ts.bytes_pretty, "
+		"         exclude_data, part_key, "
+		"         (select count(1) from s_table_part p where p.oid = t.oid) "
+		"    from s_table t "
+		"         left join s_table_size ts on ts.oid = t.oid "
+		"   where (select count(1) from s_index u "
+		"           where u.tableoid = t.oid and u.isunique = 1) = 1 "
+		"     and exists "
+		"         (select 1 from s_index i "
+		"           where i.tableoid = t.oid and i.isunique = 1 "
+		"             and (i.isprimary = 1 or i.isreplident = 1)) "
+		"     and not exists "
+		"         (select 1 from s_constraint c "
+		"                   join s_index ci on ci.oid = c.indexoid "
+		"           where ci.tableoid = t.oid and ci.isunique = 0)";
+
+	SQLiteQuery *query = &(iter->query);
+
+	query->context = iter->table;
+	query->fetchFunction = &catalog_s_table_fetch;
+
+	if (!catalog_sql_prepare(db, sql, query))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	return true;
+}
