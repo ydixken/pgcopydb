@@ -154,12 +154,23 @@ typedef struct LogicalMessageInsert
 	LogicalMessageTupleArray new;   /* {"columns": ...} */
 } LogicalMessageInsert;
 
+/* the identity values of a row in a batched UPDATE, see UpdateBatchKey */
+typedef struct UpdateBatchKey
+{
+	char *key;                      /* malloc'ed area */
+	UT_hash_handle hh;
+} UpdateBatchKey;
+
 typedef struct LogicalMessageUpdate
 {
 	LogicalMessageRelation table;
 	bool rowsMayRepeat;             /* no PK or RI index: touch one row */
 	LogicalMessageTupleArray old;   /* {"identity": ...} */
 	LogicalMessageTupleArray new;   /* {"columns": ...} */
+
+	/* JSON of the row's identity values, NULL when the row cannot be batched */
+	char *batchKey;                 /* malloc'ed area */
+	UpdateBatchKey *batchKeys;      /* identity values of the batched rows */
 } LogicalMessageUpdate;
 
 typedef struct LogicalMessageDelete
@@ -350,6 +361,23 @@ typedef struct KeylessTable
 
 
 /*
+ * BatchableTable is a table whose only unique index is its identity index, so
+ * that several of its UPDATE rows can share one statement.  The key columns
+ * are the identity index columns, normalized like GeneratedColumnSet names.
+ */
+typedef struct BatchableTable
+{
+	char nspname[PG_NAMEDATALEN];
+	char relname[PG_NAMEDATALEN];
+
+	int keyCount;
+	char keys[INDEX_MAX_KEYS][PG_NAMEDATALEN];
+
+	UT_hash_handle hh;           /* makes this structure hashable */
+} BatchableTable;
+
+
+/*
  * TestDecodingAttrCache caches per-column attributes needed by the
  * test_decoding parser hot path (replica-identity classification of each
  * column on UPDATE messages, and the columns of a keyless table's old row).
@@ -439,6 +467,9 @@ typedef struct StreamContext
 
 	/* tables without PK or RI index: UPDATE and DELETE touch one row */
 	KeylessTable *keylessTables;
+
+	/* tables whose UPDATE rows can be batched in one statement */
+	BatchableTable *batchableTables;
 
 	/* per-table cache for the test_decoding parser hot path */
 	TestDecodingTableCache *testDecodingTableCache;

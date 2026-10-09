@@ -45,6 +45,11 @@ static bool canCoalesceLogicalTransactionStatement(LogicalTransaction *txn,
 												   LogicalTransactionStatement *new);
 static bool coalesceLogicalTransactionStatement(LogicalTransaction *txn,
 												LogicalTransactionStatement *new);
+static bool sameAttributeNames(LogicalMessageTuple *a, LogicalMessageTuple *b);
+static bool addUpdateBatchKey(LogicalMessageUpdate *update, char *key);
+
+/* power-of-two chunks keep at most 11 prepared statements per table shape */
+#define UPDATE_BATCH_MAX_ROWS 1024
 
 static bool markGeneratedColumnsFromTransaction(GeneratedColumnsCache *cache,
 												LogicalTransaction *txn);
@@ -57,6 +62,9 @@ static bool prepareGeneratedColumnsCache(StreamSpecs *specs);
 static bool prepareKeylessTables(StreamSpecs *specs);
 static void markRowsMayRepeat(StreamContext *privateContext,
 							  LogicalTransactionStatement *stmt);
+static bool prepareBatchableTables(StreamSpecs *specs);
+static bool markUpdateBatchable(StreamContext *privateContext,
+								LogicalTransactionStatement *stmt);
 
 static GeneratedColumnSet * lookupGeneratedColumnsForTable(GeneratedColumnsCache *cache,
 														   const char *nspname,
@@ -75,6 +83,15 @@ static bool stream_write_insert(ReplayDBStmt *replayStmt,
 static bool stream_write_update(bool replayNoOpUpdates,
 								ReplayDBStmt *replayStmt,
 								LogicalMessageUpdate *update);
+
+static int updateBatchRows(LogicalMessageUpdate *update);
+static int updateBatchChunkRows(int remaining);
+static bool stream_write_update_chunk(bool replayNoOpUpdates,
+									  ReplayDBStmt *replayStmt,
+									  LogicalMessageUpdate *update,
+									  int first,
+									  int count);
+static bool stream_write_file_stmt(FILE *out, ReplayDBStmt *replayStmt);
 
 static bool stream_write_delete(ReplayDBStmt *replayStmt,
 								LogicalMessageDelete *delete);
@@ -161,6 +178,12 @@ stream_transform_context_init(StreamSpecs *specs)
 	}
 
 	if (!prepareKeylessTables(specs))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!prepareBatchableTables(specs))
 	{
 		/* errors have already been logged */
 		return false;
@@ -381,6 +404,13 @@ stream_transform_prepare_message(StreamSpecs *specs,
 				return false;
 			}
 			markRowsMayRepeat(privateContext, pgstmt);
+
+			if (!markUpdateBatchable(privateContext, pgstmt))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+
 			(void) streamLogicalTransactionAppendStatement(
 				&(mesg->command.tx), pgstmt);
 		}
@@ -550,9 +580,30 @@ stream_write_file_txn(FILE *out, LogicalTransaction *txn, bool replayNoOpUpdates
 
 			case STREAM_ACTION_UPDATE:
 			{
-				if (!stream_write_update(replayNoOpUpdates,
+				LogicalMessageUpdate *update = &(currentStmt->stmt.update);
+				int rows = updateBatchRows(update);
+
+				for (int first = 0; rows > 1 && first < rows;)
+				{
+					int count = updateBatchChunkRows(rows - first);
+					ReplayDBStmt chunk = replayStmt;
+
+					if (!stream_write_update_chunk(replayNoOpUpdates,
+												   &chunk, update,
+												   first, count) ||
+						!stream_write_file_stmt(out, &chunk))
+					{
+						/* errors have already been logged */
+						return false;
+					}
+
+					first += count;
+				}
+
+				if (rows == 1 &&
+					!stream_write_update(replayNoOpUpdates,
 										 &replayStmt,
-										 &(currentStmt->stmt.update)))
+										 update))
 				{
 					/* errors have already been logged */
 					return false;
@@ -590,21 +641,10 @@ stream_write_file_txn(FILE *out, LogicalTransaction *txn, bool replayNoOpUpdates
 			}
 		}
 
-		if (replayStmt.stmt != NULL)
+		if (!stream_write_file_stmt(out, &replayStmt))
 		{
-			char hash[9] = { 0 };
-
-			sformat(hash, sizeof(hash), "%x", replayStmt.hash);
-
-			FFORMAT(out, "PREPARE %s AS %s;\n", hash, replayStmt.stmt);
-
-			if (replayStmt.data != NULL)
-			{
-				FFORMAT(out, "EXECUTE %s%s;\n", hash, replayStmt.data);
-			}
-
-			free(replayStmt.stmt);
-			free(replayStmt.data);
+			/* errors have already been logged */
+			return false;
 		}
 	}
 
@@ -637,6 +677,38 @@ stream_write_file_txn(FILE *out, LogicalTransaction *txn, bool replayNoOpUpdates
 	return true;
 
 #undef FFORMAT
+}
+
+
+/*
+ * stream_write_file_stmt writes a DML statement as PREPARE and EXECUTE to an
+ * open SQL FILE, and releases its stmt and data.
+ */
+static bool
+stream_write_file_stmt(FILE *out, ReplayDBStmt *replayStmt)
+{
+	if (replayStmt->stmt == NULL)
+	{
+		return true;
+	}
+
+	char hash[9] = { 0 };
+
+	sformat(hash, sizeof(hash), "%x", replayStmt->hash);
+
+	bool success = fformat(out, "PREPARE %s AS %s;\n", hash, replayStmt->stmt) != -1 &&
+				   (replayStmt->data == NULL ||
+					fformat(out, "EXECUTE %s%s;\n", hash, replayStmt->data) != -1);
+
+	free(replayStmt->stmt);
+	free(replayStmt->data);
+
+	if (!success)
+	{
+		log_error("Failed to write to stream: %m");
+	}
+
+	return success;
 }
 
 
@@ -1445,6 +1517,12 @@ parseMessage(StreamContext *privateContext, char *message, JSON_Value *json)
 				return false;
 			}
 
+			if (!markUpdateBatchable(privateContext, stmt))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+
 			(void) streamLogicalTransactionAppendStatement(txn, stmt);
 
 			break;
@@ -1535,6 +1613,24 @@ coalesceLogicalTransactionStatement(LogicalTransaction *txn,
 	{
 		return appendValuesArray(&(last->stmt.delete.old.array->values),
 								 &(new->stmt.delete.old.array->values));
+	}
+	else if (last->action == STREAM_ACTION_UPDATE)
+	{
+		LogicalMessageUpdate *lastUpdate = &(last->stmt.update);
+		LogicalMessageUpdate *newUpdate = &(new->stmt.update);
+
+		if ((lastUpdate->batchKeys == NULL &&
+			 !addUpdateBatchKey(lastUpdate, lastUpdate->batchKey)) ||
+			!addUpdateBatchKey(lastUpdate, newUpdate->batchKey))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		return appendValuesArray(&(lastUpdate->old.array->values),
+								 &(newUpdate->old.array->values)) &&
+			   appendValuesArray(&(lastUpdate->new.array->values),
+								 &(newUpdate->new.array->values));
 	}
 
 	/* should not be reached */
@@ -1698,7 +1794,100 @@ canCoalesceLogicalTransactionStatement(LogicalTransaction *txn,
 		return true;
 	}
 
+	if (last->action == STREAM_ACTION_UPDATE)
+	{
+		LogicalMessageUpdate *lastUpdate = &(last->stmt.update);
+		LogicalMessageUpdate *newUpdate = &(new->stmt.update);
+
+		/* markUpdateBatchable checked each row on its own */
+		if (lastUpdate->batchKey == NULL || newUpdate->batchKey == NULL)
+		{
+			return false;
+		}
+
+		if (!streq(lastUpdate->table.nspname, newUpdate->table.nspname) ||
+			!streq(lastUpdate->table.relname, newUpdate->table.relname))
+		{
+			return false;
+		}
+
+		LogicalMessageTuple *lastOld = lastUpdate->old.array;
+		LogicalMessageTuple *lastNew = lastUpdate->new.array;
+
+		int rows = lastNew->values.count;
+		int cols = lastOld->attributes.count + lastNew->attributes.count;
+
+		if (rows >= UPDATE_BATCH_MAX_ROWS ||
+			(rows + 1) * cols > PQ_QUERY_PARAM_MAX_LIMIT)
+		{
+			return false;
+		}
+
+		/* one SET list for all rows: unchanged TOAST columns must match */
+		if (!sameAttributeNames(lastOld, newUpdate->old.array) ||
+			!sameAttributeNames(lastNew, newUpdate->new.array))
+		{
+			return false;
+		}
+
+		/* the join applies one row per key, so a repeated key ends the batch */
+		if (lastUpdate->batchKeys == NULL)
+		{
+			return !streq(lastUpdate->batchKey, newUpdate->batchKey);
+		}
+
+		UpdateBatchKey *found = NULL;
+		HASH_FIND_STR(lastUpdate->batchKeys, newUpdate->batchKey, found);
+
+		return found == NULL;
+	}
+
 	return false;
+}
+
+
+/*
+ * sameAttributeNames returns true when both tuples have the same column names
+ * in the same order.
+ */
+static bool
+sameAttributeNames(LogicalMessageTuple *a, LogicalMessageTuple *b)
+{
+	if (a->attributes.count != b->attributes.count)
+	{
+		return false;
+	}
+
+	for (int i = 0; i < a->attributes.count; i++)
+	{
+		if (!streq(a->attributes.array[i].attname, b->attributes.array[i].attname))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
+/*
+ * addUpdateBatchKey adds a row's identity values to the set of an UPDATE batch.
+ */
+static bool
+addUpdateBatchKey(LogicalMessageUpdate *update, char *key)
+{
+	UpdateBatchKey *item = (UpdateBatchKey *) calloc(1, sizeof(UpdateBatchKey));
+
+	if (item == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	item->key = key;
+	HASH_ADD_KEYPTR(hh, update->batchKeys, item->key, strlen(item->key), item);
+
+	return true;
 }
 
 
@@ -1984,13 +2173,39 @@ stream_transform_write_replay_txn_rows(StreamSpecs *specs)
 
 			case STREAM_ACTION_UPDATE:
 			{
-				if (!stream_write_update(specs->replayNoOpUpdates,
-										 &stmt, &(currentStmt->stmt.update)))
+				LogicalMessageUpdate *update = &(currentStmt->stmt.update);
+				int rows = updateBatchRows(update);
+
+				if (rows == 1)
 				{
-					/* errors have already been logged */
-					return false;
+					if (!stream_write_update(specs->replayNoOpUpdates,
+											 &stmt, update))
+					{
+						/* errors have already been logged */
+						return false;
+					}
+					break;
 				}
-				break;
+
+				/* a batch goes in chunks of the same lsn, in id order */
+				for (int first = 0; first < rows;)
+				{
+					int count = updateBatchChunkRows(rows - first);
+					ReplayDBStmt chunk = stmt;
+
+					if (!stream_write_update_chunk(specs->replayNoOpUpdates,
+												   &chunk, update,
+												   first, count) ||
+						!ld_store_insert_replay_stmt(specs->replayDB, &chunk))
+					{
+						/* errors have already been logged */
+						return false;
+					}
+
+					first += count;
+				}
+
+				continue;
 			}
 
 			case STREAM_ACTION_DELETE:
@@ -2432,6 +2647,210 @@ stream_write_update(bool replayNoOpUpdates,
 		destroyPQExpBuffer(buf);
 		json_free_serialized_string(serialized_string);
 	}
+
+	return true;
+}
+
+
+/*
+ * updateBatchRows returns the number of rows of a batched UPDATE, and 1 for an
+ * UPDATE that stream_write_update writes on its own.
+ */
+static int
+updateBatchRows(LogicalMessageUpdate *update)
+{
+	return update->batchKeys != NULL ? update->new.array[0].values.count : 1;
+}
+
+
+/*
+ * updateBatchChunkRows returns the largest power of two at most remaining.
+ */
+static int
+updateBatchChunkRows(int remaining)
+{
+	int count = 1;
+
+	while (count * 2 <= remaining)
+	{
+		count *= 2;
+	}
+
+	return count;
+}
+
+
+/*
+ * stream_write_update_chunk writes rows first to first + count - 1 of a
+ * batched UPDATE as one statement:
+ *
+ *   UPDATE ns.rel t SET c = v.c, g = DEFAULT
+ *     FROM (VALUES (coalesce($1, (null::ns.rel).k), coalesce($2, (null::ns.rel).c)),
+ *                  ($3, $4)) v(k, c)
+ *    WHERE t.k = v.k
+ *
+ * The first row casts each VALUES column to the type of its table column, so
+ * that the untyped parameters of the other rows resolve to it too.
+ * markUpdateBatchable makes sure no key changes, so the SET list only differs
+ * from stream_write_update's in that it applies to every row of the chunk.
+ */
+static bool
+stream_write_update_chunk(bool replayNoOpUpdates,
+						  ReplayDBStmt *replayStmt,
+						  LogicalMessageUpdate *update,
+						  int first,
+						  int count)
+{
+	LogicalMessageTuple *old = &(update->old.array[0]);
+	LogicalMessageTuple *new = &(update->new.array[0]);
+	char *nspname = update->table.nspname;
+	char *relname = update->table.relname;
+
+	strlcpy(replayStmt->nspname, nspname, sizeof(replayStmt->nspname));
+	strlcpy(replayStmt->relname, relname, sizeof(replayStmt->relname));
+
+	/* new columns that VALUES carries next to the key columns */
+	bool *inValues = (bool *) calloc(new->attributes.count, sizeof(bool));
+	PQExpBuffer set = createPQExpBuffer();
+
+	if (inValues == NULL || set == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		free(inValues);
+		destroyPQExpBuffer(set);
+		return false;
+	}
+
+	for (int c = 0; c < new->attributes.count; c++)
+	{
+		LogicalMessageAttribute *attr = &(new->attributes.array[c]);
+		bool isKey = false;
+
+		for (int k = 0; k < old->attributes.count; k++)
+		{
+			isKey = isKey || streq(old->attributes.array[k].attname, attr->attname);
+		}
+
+		if ((isKey && !replayNoOpUpdates) || attr->isidentityalways)
+		{
+			continue;
+		}
+
+		appendPQExpBuffer(set, "%s%s = %s%s",
+						  set->len > 0 ? ", " : "",
+						  attr->attname,
+						  attr->isgenerated ? "DEFAULT" : "v.",
+						  attr->isgenerated ? "" : attr->attname);
+
+		inValues[c] = !isKey && !attr->isgenerated;
+	}
+
+	/* every column is unchanged: same no-op as stream_write_update */
+	if (set->len == 0)
+	{
+		free(inValues);
+		destroyPQExpBuffer(set);
+		return true;
+	}
+
+	PQExpBuffer buf = createPQExpBuffer();
+	JSON_Value *js = json_value_init_array();
+	JSON_Array *jsArray = json_value_get_array(js);
+
+	appendPQExpBuffer(buf, "UPDATE %s.%s t SET %s FROM (VALUES ",
+					  nspname, relname, set->data);
+
+	int pos = 0;
+
+	for (int r = first; r < first + count; r++)
+	{
+		appendPQExpBufferStr(buf, r > first ? ", (" : "(");
+
+		for (int c = 0; c < old->attributes.count + new->attributes.count; c++)
+		{
+			bool isOld = c < old->attributes.count;
+			int col = isOld ? c : c - old->attributes.count;
+			LogicalMessageTuple *tuple = isOld ? old : new;
+
+			if (!isOld && !inValues[col])
+			{
+				continue;
+			}
+
+			char *attname = tuple->attributes.array[col].attname;
+
+			if (r == first)
+			{
+				appendPQExpBuffer(buf, "%scoalesce($%d, (null::%s.%s).%s)",
+								  c > 0 ? ", " : "", ++pos,
+								  nspname, relname, attname);
+			}
+			else
+			{
+				appendPQExpBuffer(buf, "%s$%d", c > 0 ? ", " : "", ++pos);
+			}
+
+			if (!stream_add_value_in_json_array(&(tuple->values.array[r].array[col]),
+												jsArray))
+			{
+				/* errors have already been logged */
+				free(inValues);
+				destroyPQExpBuffer(set);
+				destroyPQExpBuffer(buf);
+				json_value_free(js);
+				return false;
+			}
+		}
+
+		appendPQExpBufferStr(buf, ")");
+	}
+
+	appendPQExpBufferStr(buf, ") v(");
+
+	for (int c = 0; c < old->attributes.count + new->attributes.count; c++)
+	{
+		bool isOld = c < old->attributes.count;
+		int col = isOld ? c : c - old->attributes.count;
+
+		if (isOld || inValues[col])
+		{
+			appendPQExpBuffer(buf, "%s%s", c > 0 ? ", " : "",
+							  isOld ?
+							  old->attributes.array[col].attname :
+							  new->attributes.array[col].attname);
+		}
+	}
+
+	appendPQExpBufferStr(buf, ") WHERE ");
+
+	for (int k = 0; k < old->attributes.count; k++)
+	{
+		char *attname = old->attributes.array[k].attname;
+
+		appendPQExpBuffer(buf, "%st.%s = v.%s", k > 0 ? " and " : "",
+						  attname, attname);
+	}
+
+	free(inValues);
+	destroyPQExpBuffer(set);
+
+	if (PQExpBufferBroken(buf))
+	{
+		log_error("Failed to transform UPDATE statement: Out of Memory");
+		destroyPQExpBuffer(buf);
+		json_value_free(js);
+		return false;
+	}
+
+	char *serialized_string = json_serialize_to_string(js);
+
+	replayStmt->hash = hashlittle(buf->data, buf->len, 5381);
+	replayStmt->stmt = strdup(buf->data);
+	replayStmt->data = strdup(serialized_string);
+
+	destroyPQExpBuffer(buf);
+	json_free_serialized_string(serialized_string);
+	json_value_free(js);
 
 	return true;
 }
@@ -3200,4 +3619,204 @@ markRowsMayRepeat(StreamContext *privateContext, LogicalTransactionStatement *st
 			  sizeof(key.nspname) + sizeof(key.relname), item);
 
 	*rowsMayRepeat = item != NULL;
+}
+
+
+/*
+ * prepareBatchableTables_hook adds a table to the batchable tables set, keyed
+ * on its identity columns: the replica identity index when there is one,
+ * the primary key otherwise.
+ */
+static bool
+prepareBatchableTables_hook(void *ctx, SourceTable *table)
+{
+	StreamContext *privateContext = (StreamContext *) ctx;
+
+	if (!catalog_s_table_fetch_attrs(privateContext->sourceDB, table))
+	{
+		log_error("Failed to fetch attributes for table %s.%s",
+				  table->nspname, table->relname);
+		return false;
+	}
+
+	bool hasReplident = false;
+
+	for (int i = 0; i < table->attributes.count; i++)
+	{
+		hasReplident = hasReplident || table->attributes.array[i].attisreplident;
+	}
+
+	BatchableTable *item = (BatchableTable *) calloc(1, sizeof(BatchableTable));
+
+	if (item == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	for (int i = 0; i < table->attributes.count; i++)
+	{
+		SourceTableAttribute *attr = &(table->attributes.array[i]);
+		bool isKey = hasReplident ? attr->attisreplident : attr->attisprimary;
+
+		if (!isKey)
+		{
+			continue;
+		}
+
+		if (item->keyCount == INDEX_MAX_KEYS)
+		{
+			free(item);
+			return true;
+		}
+
+		NORMALIZED_PG_NAMEDATA_COPY(item->keys[item->keyCount], attr->attname);
+		++item->keyCount;
+	}
+
+	if (item->keyCount == 0)
+	{
+		free(item);
+		return true;
+	}
+
+	NORMALIZED_PG_NAMEDATA_COPY(item->nspname, table->nspname);
+	NORMALIZED_PG_NAMEDATA_COPY(item->relname, table->relname);
+
+	/* the key spans the adjacent nspname and relname arrays */
+	HASH_ADD(hh, privateContext->batchableTables, nspname,
+			 sizeof(item->nspname) + sizeof(item->relname), item);
+
+	return true;
+}
+
+
+/*
+ * prepareBatchableTables fills-in the set of tables whose UPDATE rows can be
+ * batched in one statement.
+ */
+static bool
+prepareBatchableTables(StreamSpecs *specs)
+{
+	StreamContext *privateContext = &(specs->private);
+
+	if (!catalog_iter_s_table_batchable(specs->sourceDB,
+										privateContext,
+										&prepareBatchableTables_hook))
+	{
+		log_error("Failed to prepare the set of tables where UPDATE rows "
+				  "can be batched, see above for details");
+		return false;
+	}
+
+	log_info("Batching UPDATE rows on %u tables whose only unique index "
+			 "is the primary key or replica identity index",
+			 HASH_COUNT(privateContext->batchableTables));
+
+	return true;
+}
+
+
+/*
+ * markUpdateBatchable sets the batchKey of an UPDATE row that can share a
+ * statement with other rows of its table: the table is batchable, the old row
+ * holds exactly the identity columns, none of them NULL or changed.  A row
+ * that changes its key, or comes with REPLICA IDENTITY FULL or an unchanged
+ * TOASTed key, keeps a NULL batchKey and is written on its own.
+ */
+static bool
+markUpdateBatchable(StreamContext *privateContext, LogicalTransactionStatement *stmt)
+{
+	if (stmt->action != STREAM_ACTION_UPDATE)
+	{
+		return true;
+	}
+
+	LogicalMessageUpdate *update = &(stmt->stmt.update);
+
+	if (update->rowsMayRepeat ||
+		update->old.count != 1 ||
+		update->new.count != 1 ||
+		update->old.array[0].values.count != 1 ||
+		update->new.array[0].values.count != 1)
+	{
+		return true;
+	}
+
+	BatchableTable key = { 0 };
+	BatchableTable *table = NULL;
+
+	NORMALIZED_PG_NAMEDATA_COPY(key.nspname, update->table.nspname);
+	NORMALIZED_PG_NAMEDATA_COPY(key.relname, update->table.relname);
+
+	HASH_FIND(hh, privateContext->batchableTables, key.nspname,
+			  sizeof(key.nspname) + sizeof(key.relname), table);
+
+	LogicalMessageTuple *old = &(update->old.array[0]);
+	LogicalMessageTuple *new = &(update->new.array[0]);
+
+	if (table == NULL ||
+		old->attributes.count != table->keyCount ||
+		old->values.array[0].cols != old->attributes.count ||
+		new->values.array[0].cols != new->attributes.count)
+	{
+		return true;
+	}
+
+	JSON_Value *js = json_value_init_array();
+	JSON_Array *jsArray = json_value_get_array(js);
+
+	for (int k = 0; k < old->attributes.count; k++)
+	{
+		char *attname = old->attributes.array[k].attname;
+		LogicalMessageValue *value = &(old->values.array[0].array[k]);
+
+		char normalized[PG_NAMEDATALEN] = { 0 };
+		NORMALIZED_PG_NAMEDATA_COPY(normalized, attname);
+
+		bool isKey = false;
+
+		for (int i = 0; i < table->keyCount; i++)
+		{
+			isKey = isKey || streq(table->keys[i], normalized);
+		}
+
+		bool changed = false;
+
+		for (int c = 0; c < new->attributes.count; c++)
+		{
+			changed = changed ||
+					  (streq(new->attributes.array[c].attname, attname) &&
+					   !LogicalMessageValueEq(value,
+											  &(new->values.array[0].array[c])));
+		}
+
+		if (!isKey || value->isNull || changed)
+		{
+			json_value_free(js);
+			return true;
+		}
+
+		if (!stream_add_value_in_json_array(value, jsArray))
+		{
+			/* errors have already been logged */
+			json_value_free(js);
+			return false;
+		}
+	}
+
+	char *serialized_string = json_serialize_to_string(js);
+
+	update->batchKey = strdup(serialized_string);
+
+	json_free_serialized_string(serialized_string);
+	json_value_free(js);
+
+	if (update->batchKey == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	return true;
 }
