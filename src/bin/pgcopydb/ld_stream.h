@@ -692,7 +692,8 @@ struct StreamSpecs
 	 * Downstream reads it once; EOF (n==0) means upstream crashed.
 	 *
 	 * upstream_done_lsn == InvalidXLogRecPtr means "not yet received".
-	 * upstream_done     == true once the signal has been read.
+	 * upstream_done     == true once the done-LSN has been read; EOF
+	 * without it leaves upstream_done false.
 	 */
 	uint64_t upstream_done_lsn;   /* final LSN signalled by upstream */
 	bool upstream_done;           /* have we received the upstream signal? */

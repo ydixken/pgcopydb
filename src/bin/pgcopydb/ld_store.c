@@ -2465,11 +2465,11 @@ ld_store_iter_output(StreamSpecs *specs, ReplayDBOutputIterFun *callback)
 			uint64_t end_lsn = specs->upstream_done_lsn;
 
 			/*
-			 * Cross-check with the pipeline_state table.  This catches the
-			 * race where the pipe was closed by EOF (receive crash) without
-			 * the 8-byte lifecycle payload, giving upstream_done_lsn == 0,
-			 * and also gives the canonical run_end_lsn when the in-memory
-			 * value is zero.
+			 * Cross-check with the pipeline_state table.  A receive crash
+			 * closes the pipe without the 8-byte lifecycle payload and leaves
+			 * upstream_done false, so this durable record is then the only
+			 * done signal.  It also gives the canonical run_end_lsn when the
+			 * in-memory value is zero.
 			 */
 			PipelineStateEntry recv_state = { 0 };
 

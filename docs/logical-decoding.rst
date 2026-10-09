@@ -286,9 +286,10 @@ signal.
 
 That single fact is delivered over a one-way pipe from ``receive`` to ``apply``.
 The pipe carries exactly one message for its whole lifetime: the final LSN that
-``receive`` stopped at — in effect, *"I am done, at position X"*. ``apply`` waits
-on the pipe while it drains the store, so it wakes immediately when the signal
-arrives instead of discovering completion by polling.
+``receive`` stopped at — in effect, *"I am done, at position X"*. ``apply``
+checks the pipe on every pass and waits on it, up to 100 ms, only after a pass
+that found nothing to do, so it wakes immediately when the signal arrives
+instead of discovering completion by polling.
 
 This follows the pattern PostgreSQL uses for postmaster-death detection — the
 "death watch" pipe behind ``PostmasterIsAlive()``. The upstream process holds
@@ -302,6 +303,9 @@ downstream process watches the read end for readiness:
 pgcopydb layers the final-LSN payload on top of that bare death-watch so that
 ``apply`` can also drain cleanly up to the right transaction boundary, rather
 than merely learning *that* the upstream is gone.
+``apply`` never reads end-of-file as *"done"*: it stops watching the pipe and
+falls back to the durable ``pipeline_state`` record, which a crashed ``receive``
+never marks done.
 
 The pipe is purely a latency optimisation, and it exists only when ``receive``
 and ``apply`` run together under the same follow supervisor. When ``apply`` (or

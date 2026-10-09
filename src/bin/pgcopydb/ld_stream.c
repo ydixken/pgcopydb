@@ -470,8 +470,9 @@ stream_signal_upstream_done(int pipe_write_fd, uint64_t done_lsn)
  * stream_recv_upstream_done reads the lifecycle signal from pipe_read_fd.
  * Should be called once select() reports the fd readable.
  *
- * Sets specs->upstream_done = true and specs->upstream_done_lsn.
- * On EOF without data (upstream crashed), sets upstream_done_lsn = 0.
+ * Sets specs->upstream_done = true and specs->upstream_done_lsn only when
+ * the done-LSN arrived. EOF without it means receive died short of endpos,
+ * so upstream_done stays false and callers fall back to pipeline_state.
  */
 bool
 stream_recv_upstream_done(StreamSpecs *specs, int pipe_read_fd)
@@ -479,17 +480,15 @@ stream_recv_upstream_done(StreamSpecs *specs, int pipe_read_fd)
 	uint64_t wire = 0;
 	ssize_t n = read(pipe_read_fd, &wire, sizeof(wire));
 
-	specs->upstream_done = true;
-
 	if (n == (ssize_t) sizeof(wire))
 	{
+		specs->upstream_done = true;
 		specs->upstream_done_lsn = pg_ntoh64(wire);
 		log_info("Upstream done signal received: final LSN %X/%X",
 				 LSN_FORMAT_ARGS(specs->upstream_done_lsn));
 	}
 	else if (n == 0)
 	{
-		/* EOF: upstream closed without writing — treat as "done at 0" */
 		specs->upstream_done_lsn = 0;
 		log_warn("Upstream pipe closed without done-LSN (upstream crashed?)");
 	}

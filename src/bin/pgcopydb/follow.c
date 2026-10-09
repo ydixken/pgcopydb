@@ -621,13 +621,11 @@ followDB(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs)
 
 	/*
 	 * Close pipe ends which follow is not using. Otherwise the apply process
-	 * which reads from the pipe during replay will never see EOF.
+	 * which reads from the pipe will never see EOF when receive exits.
 	 */
-	if (streamSpecs->stdOut)
-	{
-		close_fd_or_exit(streamSpecs->pipe_rt[1]);
-		close_fd_or_exit(streamSpecs->pipe_rt[0]);
-	}
+	follow_close_pipe_fd(streamSpecs->pipe_rt[1], "pipe_rt[1]");
+	follow_close_pipe_fd(streamSpecs->pipe_rt[0], "pipe_rt[0]");
+	streamSpecs->pipe_rt[0] = streamSpecs->pipe_rt[1] = -1;
 
 	/*
 	 * Finally wait until the process are finished.
@@ -791,6 +789,10 @@ follow_start_catchup(StreamSpecs *specs)
 		 */
 		specs->stdIn = false;
 		specs->stdOut = false;
+
+		/* apply only reads pipe_rt: its own write end would hide receive's EOF */
+		follow_close_pipe_fd(specs->pipe_rt[1], "pipe_rt[1]");
+		specs->pipe_rt[1] = -1;
 
 		bool success = stream_apply_catchup(specs);
 
