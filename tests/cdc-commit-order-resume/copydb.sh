@@ -86,8 +86,9 @@ drain() {
 }
 
 # run catchup under gdb and kill it at the breakpoint given in $1
+# The cases kill between two source transactions, so each one commits alone.
 kill_catchup_at() {
-    timeout 120s gdb -q -batch -ex "break $1" -ex "ignore 1 $2" \
+    PGCOPYDB_APPLY_GROUP_TXNS=1 timeout 120s gdb -q -batch -ex "break $1" -ex "ignore 1 $2" \
         -x /usr/src/pgcopydb/kill-at.gdb \
         --args pgcopydb stream catchup --resume --endpos "$3" --notice \
         > "${TMPDIR}/gdb.log" 2>&1 || fail "gdb exited $?"

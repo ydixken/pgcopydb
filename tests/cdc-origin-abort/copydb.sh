@@ -221,7 +221,7 @@ target_sql "create constraint trigger oa_reject after insert on oa deferrable in
 xids_d=() commits_d=()
 for i in $(seq 1 10); do
     v=$(test "${i}" = 3 && echo dup || echo "d${i}")
-    xid=$(source_sql "begin; select pg_current_xact_id(); insert into oa values (400${i}, ${i}, '${v}'); commit")
+    xid=$(source_sql "begin; select pg_current_xact_id(); insert into oa values ($((4000 + i)), ${i}, '${v}'); commit")
     xids_d+=("${xid}")
 done
 timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
@@ -261,7 +261,7 @@ check "D: rows after resume" "$(source_sql "$(digest 'id > 4000')")" "$(target_s
 #
 xids_f=() commits_f=()
 for i in $(seq 1 5); do
-    xids_f+=("$(source_sql "begin; select pg_current_xact_id(); insert into oa values (600${i}, ${i}, 'f${i}'); commit")")
+    xids_f+=("$(source_sql "begin; select pg_current_xact_id(); insert into oa values ($((6000 + i)), ${i}, 'f${i}'); commit")")
 done
 timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
 for xid in "${xids_f[@]}"; do commits_f+=("$(commit_lsn "${xid}")"); done

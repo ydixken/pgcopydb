@@ -10,6 +10,10 @@ case "${boundary}" in
     *) exit 1 ;;
 esac
 
+# The checks expect the transaction before the rejected one confirmed, so
+# each source transaction commits alone (cdc-origin-abort covers groups).
+export PGCOPYDB_APPLY_GROUP_TXNS=1
+
 TMPDIR=$(mktemp -d /tmp/pgcopydb-apply-${boundary}.XXXXXX)
 export TMPDIR
 export XDG_DATA_HOME=${TMPDIR}/cdc
