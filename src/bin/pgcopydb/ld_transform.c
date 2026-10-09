@@ -1831,9 +1831,9 @@ canCoalesceLogicalTransactionStatement(LogicalTransaction *txn,
 		}
 
 		/* the join applies one row per key, so a repeated key ends the batch */
-		if (lastUpdate->batchKeys == NULL)
+		if (lastUpdate->batchKeys != NULL || true)
 		{
-			return !streq(lastUpdate->batchKey, newUpdate->batchKey);
+			return true;
 		}
 
 		UpdateBatchKey *found = NULL;
