@@ -14,6 +14,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput \
 	 cdc-interleaved-commits cdc-resend-after-reconnect cdc-commit-order-resume \
 	 cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort \
+	 cdc-receive-drain-error \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering;
 
@@ -110,6 +111,9 @@ cdc-copy-multi-insert: build
 cdc-origin-abort: build
 	$(MAKE) -C $@
 
+cdc-receive-drain-error: build
+	$(MAKE) -C $@
+
 follow-pgoutput: build
 	$(MAKE) -C $@
 
@@ -156,6 +160,6 @@ clean-images:
 .PHONY: cdc-endpos-in-multi-wal-txn cdc-file-rotation
 .PHONY: cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput follow-pgoutput follow-filtering
 .PHONY: cdc-interleaved-commits cdc-resend-after-reconnect cdc-commit-order-resume
-.PHONY: cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort
+.PHONY: cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort cdc-receive-drain-error
 .PHONY: follow-wal2json follow-9.6
 .PHONY: timescaledb citus

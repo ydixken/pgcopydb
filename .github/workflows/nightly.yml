@@ -131,6 +131,7 @@ jobs:
           - cdc-filtering-pgoutput
           - cdc-truncate-multi
           - cdc-origin-abort
+          - cdc-receive-drain-error
           - follow-wal2json
           - follow-9.6
           - follow-data-only
