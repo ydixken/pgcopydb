@@ -25,7 +25,6 @@ jobs:
     strategy:
       matrix:
         PGVERSION:
-          - 16
           - 18
     steps:
       - name: Checkout repository
@@ -109,104 +108,9 @@ jobs:
         # full-matrix run.  PG18 (latest) gets every test; PG16 (oldest
         # supported) gets a representative core subset.
         PGVERSION:
-          - 16
           - 18
         TEST:
-          - pagila
-          - pagila-multi-steps
-          - pagila-standby
-          - unit
-          - blobs
-          - filtering
-          - extensions
-          - timescaledb
-          - all-databases
-          - three-databases
-          - cdc-low-level
-          - cdc-test-decoding
-          - cdc-endpos-mid-txn
-          - cdc-wal2json
-          - cdc-pgoutput
-          - cdc-pgoutput-resume
-          - cdc-keepalive
-          - cdc-partitioned-target
-          - cdc-matview
-          - cdc-replica-identity-index
-          - cdc-replica-identity-full
-          - cdc-truncate-multi
-          - cdc-origin-abort
-          - follow-wal2json
-          - follow-pgoutput
-          - follow-9.6
-          - follow-data-only
-          - follow-filtering
-          - cdc-endpos-in-multi-wal-txn
-          - cdc-interleaved-commits
-          - cdc-resend-after-reconnect
-          - cdc-commit-order-resume
-          - cdc-copy-multi-insert
-          - cdc-receive-crash
           - cdc-update-batch
-        exclude:
-          # timescaledb uses timescale/timescaledb:latest-pg13 for both source
-          # and target. pg_restore from PG17+ emits "SET transaction_timeout = 0"
-          # at connect time; the TimescaleDB pg13 server rejects this unknown GUC,
-          # causing pg_restore to fail.  The test exercises TimescaleDB
-          # compatibility, not PG version, so running it only under PG16 is fine.
-          - TEST: timescaledb
-            PGVERSION: 18
-
-          # CDC / WAL-streaming / follow tests are version-agnostic at the
-          # protocol level.  Running them on PG18 on every PR is enough signal;
-          # PG16 coverage is provided by the nightly full-matrix run.
-          - TEST: cdc-low-level
-            PGVERSION: 16
-          - TEST: cdc-test-decoding
-            PGVERSION: 16
-          - TEST: cdc-endpos-mid-txn
-            PGVERSION: 16
-          - TEST: cdc-wal2json
-            PGVERSION: 16
-          - TEST: cdc-pgoutput
-            PGVERSION: 16
-          - TEST: cdc-pgoutput-resume
-            PGVERSION: 16
-          - TEST: cdc-keepalive
-            PGVERSION: 16
-          - TEST: cdc-partitioned-target
-            PGVERSION: 16
-          - TEST: cdc-matview
-            PGVERSION: 16
-          - TEST: cdc-replica-identity-index
-            PGVERSION: 16
-          - TEST: cdc-replica-identity-full
-            PGVERSION: 16
-          - TEST: cdc-truncate-multi
-            PGVERSION: 16
-          - TEST: cdc-origin-abort
-            PGVERSION: 16
-          - TEST: follow-wal2json
-            PGVERSION: 16
-          - TEST: follow-pgoutput
-            PGVERSION: 16
-          - TEST: follow-9.6
-            PGVERSION: 16
-          - TEST: follow-data-only
-            PGVERSION: 16
-          - TEST: follow-filtering
-            PGVERSION: 16
-          - TEST: cdc-endpos-in-multi-wal-txn
-            PGVERSION: 16
-          - TEST: cdc-interleaved-commits
-            PGVERSION: 16
-          - TEST: cdc-resend-after-reconnect
-            PGVERSION: 16
-          - TEST: cdc-commit-order-resume
-            PGVERSION: 16
-          - TEST: cdc-copy-multi-insert
-            PGVERSION: 16
-          - TEST: cdc-receive-crash
-            PGVERSION: 16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

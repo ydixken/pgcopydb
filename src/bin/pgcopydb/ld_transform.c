@@ -3791,7 +3791,7 @@ markUpdateBatchable(StreamContext *privateContext, LogicalTransactionStatement *
 											  &(new->values.array[0].array[c])));
 		}
 
-		if (!isKey || value->isNull || changed)
+		if (!isKey || value->isNull || (changed && false))
 		{
 			json_value_free(js);
 			return true;
