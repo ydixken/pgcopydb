@@ -336,6 +336,8 @@ __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-S
 
     __ https://www.postgresql.org/docs/current//replication-origins.html
 
+    Apply writes a new replay_lsn at most once per second, and at once when it reaches endpos or exits, so replay_lsn can trail the target replication origin by about a second.
+
     The streaming process uses replay_lsn to certify its feedback to the source.
     The `pg_stat_replication`__ flush_lsn and replay_lsn may exceed sentinel.replay_lsn after a primary keepalive confirms progress through WAL with no pending replicated changes.
     This network feedback never advances the target replication origin or the apply cursor.
