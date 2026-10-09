@@ -640,6 +640,7 @@ startLogicalStreaming(StreamSpecs *specs)
 	stream.closeFunction = &streamClose;
 	stream.feedbackFunction = &streamFeedback;
 	stream.keepaliveFunction = &streamKeepalive;
+	stream.idleFunction = &streamIdle;
 
 	/*
 	 * Read possibly already existing file to initialize the start LSN from a
@@ -668,6 +669,7 @@ startLogicalStreaming(StreamSpecs *specs)
 		return false;
 	}
 	privateContext->commitLSNInitialized = true;
+	privateContext->committedWrittenLSN = specs->startpos;
 
 	log_notice("Connecting to logical decoding replication stream");
 
@@ -729,9 +731,16 @@ startLogicalStreaming(StreamSpecs *specs)
 		/* ignore errors, try again unless asked to stop */
 		bool cleanExit = pgsql_stream_logical(&stream, &context);
 
-		if (!cleanExit && !ld_store_output_rollback(specs->outputDB))
+		if (!cleanExit)
 		{
-			return false;
+			if (!ld_store_output_rollback(specs->outputDB))
+			{
+				return false;
+			}
+
+			/* run_end_lsn and the progress check must not cover lost txns */
+			privateContext->batchTxns = 0;
+			context.tracking->written_lsn = privateContext->committedWrittenLSN;
 		}
 
 		if ((cleanExit && context.endpos != InvalidXLogRecPtr) ||
@@ -896,6 +905,60 @@ streamCheckResumePosition(StreamSpecs *specs)
 }
 
 
+/* ponytail: fixed 50 ms ceiling on added apply latency while saturated */
+#define STREAM_BATCH_MAX_AGE_MS 50
+
+enum
+{
+	BATCH_IDLE, BATCH_AGE, BATCH_FLUSH, BATCH_ROTATE
+};
+
+
+/*
+ * stream_commit_batch commits the open output.db batch.  Every receive-side
+ * commit goes through here so the batch counters stay true.
+ */
+static bool
+stream_commit_batch(LogicalStreamContext *context, int trigger)
+{
+	StreamContext *privateContext = (StreamContext *) context->private;
+
+	if (!ld_store_output_commit(privateContext->outputDB))
+	{
+		return false;
+	}
+
+	if (privateContext->batchTxns > 0)
+	{
+		privateContext->batchCount[trigger]++;
+		privateContext->batchTxnSum[trigger] += privateContext->batchTxns;
+	}
+
+	privateContext->batchTxns = 0;
+	privateContext->committedWrittenLSN = context->tracking->written_lsn;
+
+	return true;
+}
+
+
+/*
+ * streamIdle is a callback function for our LogicalStreamClient, called when
+ * the replication socket is drained: commit the transactions received so far.
+ */
+bool
+streamIdle(LogicalStreamContext *context)
+{
+	StreamContext *privateContext = (StreamContext *) context->private;
+
+	if (privateContext->batchTxns == 0)
+	{
+		return true;
+	}
+
+	return stream_commit_batch(context, BATCH_IDLE);
+}
+
+
 /*
  * streamWrite is a callback function for our LogicalStreamClient.
  *
@@ -999,15 +1062,19 @@ streamWrite(LogicalStreamContext *context)
 	}
 	else if (metadata->action == STREAM_ACTION_COMMIT)
 	{
-		if (!ld_store_output_commit(replayDB))
-		{
-			return false;
-		}
-
+		/*
+		 * The batch commits later (idle, age, flush, rotate).  Raise
+		 * lastDurableCommitLSN now: the keepalive guard needs it ahead.
+		 */
 		if (!metadata->skipping)
 		{
 			privateContext->lastDurableCommitLSN =
 				Max(privateContext->lastDurableCommitLSN, metadata->lsn);
+
+			if (privateContext->batchTxns++ == 0)
+			{
+				privateContext->batchStart = feGetCurrentTimestamp();
+			}
 		}
 
 		privateContext->transactionInProgress = false;
@@ -1038,7 +1105,8 @@ streamWrite(LogicalStreamContext *context)
 						 (long long) st.st_size,
 						 (unsigned long long) specs->maxReplayDBSize);
 
-				if (!ld_store_rotate_outputdb(specs,
+				if (!stream_commit_batch(context, BATCH_ROTATE) ||
+					!ld_store_rotate_outputdb(specs,
 											  context->cur_record_lsn))
 				{
 					/* errors have already been logged */
@@ -1063,6 +1131,15 @@ streamWrite(LogicalStreamContext *context)
 	{
 		log_error("BUG: STREAM_ACTION_ROLLBACK is not expected here");
 		return false;
+	}
+
+	/* the socket may never drain under load: cap the batch age */
+	if (privateContext->batchTxns > 0 &&
+		feTimestampDifferenceExceeds(privateContext->batchStart,
+									 feGetCurrentTimestamp(),
+									 STREAM_BATCH_MAX_AGE_MS))
+	{
+		return stream_commit_batch(context, BATCH_AGE);
 	}
 
 	return true;
@@ -1323,9 +1400,25 @@ streamFlush(LogicalStreamContext *context)
 	}
 
 	/* A repeated LSN can still leave an open keepalive transaction. */
-	if (!ld_store_output_commit(privateContext->outputDB))
+	if (!stream_commit_batch(context, BATCH_FLUSH))
 	{
 		return false;
+	}
+
+	uint64_t *n = privateContext->batchCount;
+	uint64_t *t = privateContext->batchTxnSum;
+
+	if (n[0] + n[1] + n[2] + n[3] > 0)
+	{
+		log_info("Receive group commit batches/txns: idle %llu/%llu, "
+				 "age %llu/%llu, flush %llu/%llu, rotate %llu/%llu",
+				 (unsigned long long) n[0], (unsigned long long) t[0],
+				 (unsigned long long) n[1], (unsigned long long) t[1],
+				 (unsigned long long) n[2], (unsigned long long) t[2],
+				 (unsigned long long) n[3], (unsigned long long) t[3]);
+
+		memset(n, 0, sizeof(privateContext->batchCount));
+		memset(t, 0, sizeof(privateContext->batchTxnSum));
 	}
 
 	if (context->tracking->flushed_lsn < context->tracking->written_lsn)

@@ -4409,6 +4409,28 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 		}
 
 		r = PQgetCopyData(conn, &copybuf, 1);
+
+		/* read what the kernel holds before deciding the stream is idle */
+		if (r == 0)
+		{
+			if (PQconsumeInput(conn) == 0)
+			{
+				(void) pgsql_stream_log_error(
+					pgsql,
+					NULL,
+					"could not receive data from WAL stream");
+				goto error;
+			}
+
+			r = PQgetCopyData(conn, &copybuf, 1);
+
+			if (r == 0 && client->idleFunction != NULL &&
+				!(*client->idleFunction)(context))
+			{
+				goto error;
+			}
+		}
+
 		if (r == 0)
 		{
 			/*

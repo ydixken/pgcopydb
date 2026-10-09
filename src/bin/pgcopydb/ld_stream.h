@@ -423,11 +423,19 @@ typedef struct StreamContext
 	LogicalTransactionStatement *stmt;
 
 	uint64_t maxWrittenLSN;     /* max LSN written so far to the JSON files */
+	/* highest COMMIT received, maybe not yet committed to output.db */
 	uint64_t lastDurableCommitLSN;
 	uint64_t feedbackLSN;       /* certified floor once apply initializes */
 	bool commitLSNInitialized;
 
 	uint64_t lastWriteTime;
+
+	/* group commit of output.db: complete source txns in the open batch */
+	uint32_t batchTxns;
+	TimestampTz batchStart;
+	uint64_t committedWrittenLSN;   /* written_lsn at the last batch commit */
+	uint64_t batchCount[4];         /* per trigger: idle, age, flush, rotate */
+	uint64_t batchTxnSum[4];
 
 	/* transform needs some catalog lookups (pkey, type oid) */
 	DatabaseCatalog *sourceDB;
@@ -758,6 +766,7 @@ bool streamWrite(LogicalStreamContext *context);
 bool streamFlush(LogicalStreamContext *context);
 bool streamKeepalive(LogicalStreamContext *context);
 bool streamClose(LogicalStreamContext *context);
+bool streamIdle(LogicalStreamContext *context);
 bool streamFeedback(LogicalStreamContext *context);
 
 bool streamRotateFile(LogicalStreamContext *context);
