@@ -657,6 +657,26 @@ static char *replayDBcreateDDLs[] = {
 
 	"create index r_xid on replay(xid)",
 	"create index r_lsn on replay(lsn)",
+
+	/*
+	 * Partial indexes for ld_store_replay_next_event and the transaction body
+	 * iterator. SQLite only uses one when the query term implies its WHERE,
+	 * so keep those terms written exactly like this.
+	 */
+	"create index if not exists r_end on replay(lsn) where action in ('C', 'R')",
+	"create index if not exists r_k on replay(lsn) where action = 'K'",
+	"create index if not exists r_begin on replay(xid) where action = 'B'",
+	"create index if not exists r_end_xid on replay(xid) "
+	"where action in ('C', 'R')",
+};
+
+/* replay.db files from an older pgcopydb get the partial indexes on open */
+static char *replayDBupgradeDDLs[] = {
+	"create index if not exists r_end on replay(lsn) where action in ('C', 'R')",
+	"create index if not exists r_k on replay(lsn) where action = 'K'",
+	"create index if not exists r_begin on replay(xid) where action = 'B'",
+	"create index if not exists r_end_xid on replay(xid) "
+	"where action in ('C', 'R')",
 };
 
 
@@ -748,6 +768,7 @@ static char *replayDBdropDDLs[] = {
 };
 
 static bool catalog_upgrade_schema(DatabaseCatalog *catalog);
+static bool catalog_upgrade_replay_schema(DatabaseCatalog *catalog);
 
 
 /*
@@ -1642,6 +1663,11 @@ catalog_init(DatabaseCatalog *catalog)
 static bool
 catalog_upgrade_schema(DatabaseCatalog *catalog)
 {
+	if (catalog->type == DATABASE_CATALOG_TYPE_REPLAY)
+	{
+		return catalog_upgrade_replay_schema(catalog);
+	}
+
 	if (catalog->type != DATABASE_CATALOG_TYPE_SOURCE &&
 		catalog->type != DATABASE_CATALOG_TYPE_FILTER &&
 		catalog->type != DATABASE_CATALOG_TYPE_TARGET)
@@ -1706,6 +1732,47 @@ catalog_upgrade_schema(DatabaseCatalog *catalog)
 	(void) semaphore_unlock(&(catalog->sema));
 
 	return true;
+}
+
+
+/*
+ * catalog_upgrade_replay_schema adds the replay.db indexes that a file written
+ * by an older pgcopydb lacks. A crash during the build rolls it back.
+ */
+static bool
+catalog_upgrade_replay_schema(DatabaseCatalog *catalog)
+{
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!catalog_begin(catalog, true))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	int count = sizeof(replayDBupgradeDDLs) / sizeof(replayDBupgradeDDLs[0]);
+
+	for (int i = 0; i < count; i++)
+	{
+		if (!catalog_execute(catalog, replayDBupgradeDDLs[i]))
+		{
+			/* errors have already been logged */
+			(void) catalog_rollback(catalog);
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
+	}
+
+	bool committed = catalog_commit(catalog);
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return committed;
 }
 
 
