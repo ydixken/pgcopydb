@@ -402,6 +402,7 @@ wal_first_commit_end() {
 # commits.  Apply is killed before T5's COMMIT, then replay.db keeps only the
 # first commit of its WAL (truncate) or none (delete).  The resumed apply must
 # transform T5 and T6 again.
+# T1 to T4 must each commit alone for the kill to fall between them and T5.
 replay_wal_loss() {
     begin_case "replay-wal-$1"
     local i xid end db
@@ -420,7 +421,8 @@ replay_wal_loss() {
 
     prefetch "$(wal_lsn)"
     end=$(last_commit)
-    kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"$(commit_of "${xid}")\")" 0 "${end}"
+    PGCOPYDB_APPLY_GROUP_TXNS=1 \
+        kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"$(commit_of "${xid}")\")" 0 "${end}"
     test "$(count 'ta where id > 1000')" = 4 || fail 'T1 to T4 were not applied before the kill'
 
     db=$(outdb replay)
