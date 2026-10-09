@@ -134,6 +134,7 @@ jobs:
           - cdc-receive-drain-error
           - cdc-receive-reconnect-dying-source
           - cdc-receive-status-interval
+          - cdc-apply-wakeup
           - follow-wal2json
           - follow-9.6
           - follow-data-only
