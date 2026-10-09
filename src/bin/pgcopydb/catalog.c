@@ -11243,8 +11243,7 @@ catalog_sql_bind(SQLiteQuery *query, BindParam *params, int count)
 		log_error("[SQLite] Failed to bind parameters in query: %s",
 				  query->sql);
 
-		(void) sqlite3_clear_bindings(query->ppStmt);
-		(void) sqlite3_finalize(query->ppStmt);
+		(void) catalog_sql_finalize(query);
 		return false;
 	}
 
@@ -11310,8 +11309,7 @@ catalog_sql_execute(SQLiteQuery *query)
 					  sqlite3_errstr(rc),
 					  sqlite3_errmsg(query->db));
 
-			(void) sqlite3_clear_bindings(query->ppStmt);
-			(void) sqlite3_finalize(query->ppStmt);
+			(void) catalog_sql_finalize(query);
 
 			return false;
 		}
@@ -11349,8 +11347,7 @@ catalog_sql_execute(SQLiteQuery *query)
 						  sqlite3_errstr(rc),
 						  sqlite3_errmsg(query->db));
 
-				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 
 				return false;
 			}
@@ -11360,8 +11357,7 @@ catalog_sql_execute(SQLiteQuery *query)
 			{
 				log_error("Failed to fetch current row, "
 						  "see above for details");
-				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 				return false;
 			}
 
@@ -11382,8 +11378,7 @@ catalog_sql_execute(SQLiteQuery *query)
 						  sqlite3_errstr(rc),
 						  sqlite3_errmsg(query->db));
 
-				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 
 				return false;
 			}
@@ -11464,6 +11459,14 @@ catalog_sql_step(SQLiteQuery *query)
 bool
 catalog_sql_finalize(SQLiteQuery *query)
 {
+	/* the cache owns this statement and reuses it, freeing it is a UAF */
+	if (query->fromCache)
+	{
+		(void) sqlite3_clear_bindings(query->ppStmt);
+		(void) sqlite3_reset(query->ppStmt);
+		return true;
+	}
+
 	if (sqlite3_finalize(query->ppStmt) != SQLITE_OK)
 	{
 		log_error("Failed to finalize SQLite statement: %s",

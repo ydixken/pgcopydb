@@ -139,6 +139,7 @@ jobs:
           - cdc-receive-reconnect-dying-source
           - cdc-receive-status-interval
           - cdc-apply-wakeup
+          - catalog-stmt-cache
           - follow-wal2json
           - follow-pgoutput
           - follow-9.6
@@ -194,6 +195,8 @@ jobs:
           - TEST: cdc-receive-status-interval
             PGVERSION: 16
           - TEST: cdc-apply-wakeup
+            PGVERSION: 16
+          - TEST: catalog-stmt-cache
             PGVERSION: 16
           - TEST: follow-wal2json
             PGVERSION: 16

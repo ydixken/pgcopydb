@@ -1,0 +1,10 @@
+services:
+  test:
+    image: catalog-stmt-cache
+    build:
+      # the build stage keeps the objects that stmt-cache.c links against
+      context: ../..
+      target: build
+      args:
+        PGVERSION: ${PGVERSION:-16}
+    command: /usr/src/pgcopydb/tests/catalog-stmt-cache/run.sh
