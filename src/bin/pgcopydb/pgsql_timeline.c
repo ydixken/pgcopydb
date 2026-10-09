@@ -58,9 +58,9 @@ pgsql_identify_system(PGSQL *pgsql, IdentifySystem *system, char *cdcPathDir)
 	{
 		log_error("Failed to IDENTIFY_SYSTEM: %s", PQerrorMessage(connection));
 		PQclear(result);
-		clear_results(pgsql);
 
-		PQfinish(connection);
+		/* pgsql owns the connection: PQfinish here would leave it dangling */
+		(void) pgsql_finish(pgsql);
 
 		return false;
 	}
@@ -70,7 +70,14 @@ pgsql_identify_system(PGSQL *pgsql, IdentifySystem *system, char *cdcPathDir)
 	(void) parseIdentifySystemResult((void *) &isContext, result);
 
 	PQclear(result);
-	clear_results(pgsql);
+
+	/* clear_results() finishes a broken connection, used again below */
+	if (!clear_results(pgsql))
+	{
+		log_error("Failed to IDENTIFY_SYSTEM: the connection was closed");
+		(void) pgsql_finish(pgsql);
+		return false;
+	}
 
 	log_sql("IDENTIFY_SYSTEM: timeline %d, xlogpos %s, systemid %" PRIu64,
 			system->timeline,
@@ -80,7 +87,7 @@ pgsql_identify_system(PGSQL *pgsql, IdentifySystem *system, char *cdcPathDir)
 	if (!isContext.parsedOk)
 	{
 		log_error("Failed to get result from IDENTIFY_SYSTEM");
-		PQfinish(connection);
+		(void) pgsql_finish(pgsql);
 		return false;
 	}
 
@@ -99,9 +106,7 @@ pgsql_identify_system(PGSQL *pgsql, IdentifySystem *system, char *cdcPathDir)
 			log_error("Failed to request TIMELINE_HISTORY: %s",
 					  PQerrorMessage(connection));
 			PQclear(result);
-			clear_results(pgsql);
-
-			PQfinish(connection);
+			(void) pgsql_finish(pgsql);
 
 			return false;
 		}
@@ -114,7 +119,7 @@ pgsql_identify_system(PGSQL *pgsql, IdentifySystem *system, char *cdcPathDir)
 		if (!hContext.parsedOk)
 		{
 			log_error("Failed to get result from TIMELINE_HISTORY");
-			PQfinish(connection);
+			(void) pgsql_finish(pgsql);
 			return false;
 		}
 
