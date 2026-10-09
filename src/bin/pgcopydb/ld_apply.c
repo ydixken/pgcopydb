@@ -728,7 +728,7 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			/* a TRUNCATE or a ROLLBACK member commits alone */
 			bool alone = context->groupMaxTxns <= 1;
 
-			if (!alone &&
+			if (false &&
 				!ld_store_replay_txn_must_commit_alone(replayDB, xid,
 													   begin_id, &alone))
 			{

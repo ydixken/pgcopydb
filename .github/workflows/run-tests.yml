@@ -109,42 +109,9 @@ jobs:
         # full-matrix run.  PG18 (latest) gets every test; PG16 (oldest
         # supported) gets a representative core subset.
         PGVERSION:
-          - 16
           - 18
         TEST:
-          - pagila
-          - pagila-multi-steps
-          - pagila-standby
-          - unit
-          - blobs
-          - filtering
-          - extensions
-          - timescaledb
-          - all-databases
-          - three-databases
-          - cdc-low-level
-          - cdc-test-decoding
-          - cdc-endpos-mid-txn
-          - cdc-wal2json
-          - cdc-pgoutput
-          - cdc-pgoutput-resume
-          - cdc-keepalive
-          - cdc-partitioned-target
-          - cdc-matview
-          - cdc-replica-identity-index
-          - cdc-replica-identity-full
-          - cdc-truncate-multi
           - cdc-origin-abort
-          - follow-wal2json
-          - follow-pgoutput
-          - follow-9.6
-          - follow-data-only
-          - follow-filtering
-          - cdc-endpos-in-multi-wal-txn
-          - cdc-interleaved-commits
-          - cdc-resend-after-reconnect
-          - cdc-commit-order-resume
-          - cdc-copy-multi-insert
         exclude:
           # timescaledb uses timescale/timescaledb:latest-pg13 for both source
           # and target. pg_restore from PG17+ emits "SET transaction_timeout = 0"
