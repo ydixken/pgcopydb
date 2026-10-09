@@ -100,11 +100,12 @@ test "${origin}" = "${confirmed}"
 test "${state}" = "done|${confirmed}"
 test "${actual}" = "${expected}"
 
-# The marker follows all INSERTs; the separate large UPDATE flushes it through libpq.
+# The marker follows all INSERTs; the large UPDATE flushes it through libpq.
+# It updates the same row, so the transform cannot batch the two into one statement.
 xid2=$(source_sql "begin; select pg_current_xact_id();
     insert into shutdown_guard select i, md5(i::text) from generate_series(1001, 2000) i;
     update shutdown_guard set payload = 'pre-commit marker' where id = 1;
-    update shutdown_guard set payload = repeat('x', 16384) where id = 2;
+    update shutdown_guard set payload = repeat('x', 16384) where id = 1;
     commit")
 receive_bound=$(source_sql 'select pg_current_wal_flush_lsn()')
 timeout 60s pgcopydb stream prefetch --resume --endpos "${receive_bound}"
