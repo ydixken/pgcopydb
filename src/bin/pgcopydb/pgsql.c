@@ -4276,6 +4276,39 @@ pgsql_start_replication(LogicalStreamClient *client)
 		return false;
 	}
 
+	/*
+	 * A receive slowed by its spool answers keepalive requests late, so send
+	 * status on our own within half of wal_sender_timeout. PG9.6 walsenders
+	 * run no SQL.
+	 */
+	if (PQserverVersion(pgsql->connection) >= 100000)
+	{
+		SingleValueResultContext context = { { 0 }, PGSQL_RESULT_INT, false };
+		const char *sql =
+			"select setting::int from pg_settings "
+			"where name = 'wal_sender_timeout'";
+
+		if (!pgsql_execute_with_params(pgsql, sql, 0, NULL, NULL,
+									   &context, &parseSingleValueResult) ||
+			!context.parsedOk)
+		{
+			log_error("Failed to read wal_sender_timeout from the source");
+			destroyPQExpBuffer(query);
+			return false;
+		}
+
+		int interval = Max(context.intVal / 2, 1);
+
+		if (context.intVal > 0 && interval < client->standby_message_timeout)
+		{
+			client->standby_message_timeout = interval;
+
+			log_info("Sending standby status every %d ms, "
+					 "wal_sender_timeout is %d ms",
+					 interval, context.intVal);
+		}
+	}
+
 	log_sql("%s", query->data);
 
 	PGresult *res = PQexec(pgsql->connection, query->data);
