@@ -84,6 +84,8 @@ Replication feedback and safe restart points
 ---------------------------------------------
 
 The `PostgreSQL streaming replication protocol <https://www.postgresql.org/docs/current/protocol-replication.html>`_ requires periodic standby status updates reporting received, flushed, and applied LSN positions.
+pgcopydb sends one every 10 seconds, or every half of the source ``wal_sender_timeout`` when that is shorter.
+A receive that is slow to write its spool reads the walsender's keepalive requests late, so it cannot rely on answering them in time.
 For logical replication, PostgreSQL uses the reported flush LSN to advance the slot's ``confirmed_flush_lsn``, which only increases.
 On reconnect, streaming starts at the greater of the requested start position and ``confirmed_flush_lsn``.
 The receiver must therefore account for changes already stored locally that the server may not send again.

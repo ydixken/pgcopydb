@@ -133,6 +133,7 @@ jobs:
           - cdc-origin-abort
           - cdc-receive-drain-error
           - cdc-receive-reconnect-dying-source
+          - cdc-receive-status-interval
           - follow-wal2json
           - follow-9.6
           - follow-data-only

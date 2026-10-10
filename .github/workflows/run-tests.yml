@@ -137,6 +137,7 @@ jobs:
           - cdc-origin-abort
           - cdc-receive-drain-error
           - cdc-receive-reconnect-dying-source
+          - cdc-receive-status-interval
           - follow-wal2json
           - follow-pgoutput
           - follow-9.6
@@ -188,6 +189,8 @@ jobs:
           - TEST: cdc-receive-drain-error
             PGVERSION: 16
           - TEST: cdc-receive-reconnect-dying-source
+            PGVERSION: 16
+          - TEST: cdc-receive-status-interval
             PGVERSION: 16
           - TEST: follow-wal2json
             PGVERSION: 16
