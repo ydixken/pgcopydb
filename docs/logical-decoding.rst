@@ -91,6 +91,7 @@ On reconnect, streaming starts at the greater of the requested start position an
 The receiver must therefore account for changes already stored locally that the server may not send again.
 
 ``sentinel.replay_lsn`` records durable target progress.
+Apply writes a new value at most once a second, and at once when it reaches endpos or exits, so it can trail the target origin by about a second and never leads it.
 The SQLite apply path uses ``synchronous_commit=on``, drains the pipeline, and sends ``SET CONSTRAINTS ALL IMMEDIATE``, the origin setup, and the COMMIT as one simple query before publishing the source COMMIT LSN.
 PostgreSQL 16 and later advance the origin when a transaction aborts after its origin setup.
 So the server never gets the setup without the COMMIT, and deferred triggers and constraint checks run before the setup.
@@ -330,7 +331,7 @@ Invariant summary
      - uncertified raw receive position as replay
      - source slot feedback
    * - ``sentinel.replay_lsn``
-     - origin initialization or confirmed target COMMIT
+     - origin initialization or confirmed target COMMIT, at most once a second
      - keepalive or fabricated endpos
      - ``follow_reached_endpos`` check (a)
    * - ``pipeline_state["apply"].run_state``

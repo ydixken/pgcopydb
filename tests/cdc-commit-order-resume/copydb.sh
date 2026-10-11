@@ -4,7 +4,8 @@
 # open newest BEGIN, a KEEPALIVE inside a transaction, a restart between two
 # overlapping transactions, a kill while replay.db is written, a replay.db
 # backlog above the target origin, a partial copy an older build left in
-# replay.db, and an output.db without o_begin.
+# replay.db, an output.db without o_begin, a replay.db that lost its last
+# commits, and a replay.db without the partial indexes.
 
 set -euo pipefail
 
@@ -142,6 +143,10 @@ begin_case() {
 end_case() {
     ctl "select dblink_disconnect('a'), dblink_disconnect('b')" > /dev/null
     compare
+    # apply writes replay_lsn once a second, but at once when it exits
+    local replay
+    replay=$(timeout 15s pgcopydb stream sentinel get --replay-lsn)
+    test "${replay}" = "$(origin)" || fail "sentinel replay_lsn ${replay} is not the origin $(origin)"
     pgcopydb stream cleanup > "${TMPDIR}/cleanup.log" 2>&1
     echo "PASS [${tc}]"
 }
@@ -368,9 +373,89 @@ obegin_upgrade() {
     end_case
 }
 
+# byte offset just past the first commit frame of the SQLite WAL file $1
+wal_first_commit_end() {
+    local page off size
+    page=$(od -An -tu1 -j8 -N4 "$1" | awk '{print $1*16777216 + $2*65536 + $3*256 + $4}')
+    size=$(stat -c %s "$1")
+    off=32
+    while test $((off + 24 + page)) -le "${size}"; do
+        off=$((off + 24 + page))
+        if test "$(od -An -tu1 -j$((off - 24 - page + 4)) -N4 "$1" | tr -d ' \n')" != 0000; then
+            echo "${off}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# replay.db runs with synchronous=NORMAL, so power loss can drop its last
+# commits.  Apply is killed before T5's COMMIT, then replay.db keeps only the
+# first commit of its WAL (truncate) or none (delete).  The resumed apply must
+# transform T5 and T6 again.
+replay_wal_loss() {
+    begin_case "replay-wal-$1"
+    local i xid end db
+    on a "insert into ta values (1000, 'checkpointed')"
+    on b "insert into tb values (1000, 'compare needs a row')"
+    prefetch "$(wal_lsn)"
+    catchup "$(last_commit)"
+    # pgcopydb commits the schema with a full sync: only later commits may go
+    lite replay 'pragma wal_checkpoint(truncate)' > /dev/null
+    for i in 1 2 3 4 5 6; do
+        on a begin
+        on a "insert into ta values (100${i}, 'T${i}')"
+        test "${i}" != 5 || xid=$(xid_of a)
+        on a commit
+    done
+
+    prefetch "$(wal_lsn)"
+    end=$(last_commit)
+    kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"$(commit_of "${xid}")\")" 0 "${end}"
+    test "$(count 'ta where id > 1000')" = 4 || fail 'T1 to T4 were not applied before the kill'
+
+    db=$(outdb replay)
+    test -s "${db}-wal" || fail 'the killed apply left no replay.db WAL'
+    rm -f "${db}-shm"
+    case "$1" in
+        truncate) truncate -s "$(wal_first_commit_end "${db}-wal")" "${db}-wal" ;;
+        delete) rm "${db}-wal" ;;
+    esac
+    test "$(lite replay "select count(*) from replay where xid = ${xid}")" = 0 ||
+        fail 'T5 is still in replay.db'
+
+    catchup "${end}"
+    test "$(origin)" = "${end}" || fail "origin $(origin) is not the last COMMIT ${end}"
+    end_case
+}
+
+# A replay.db written before the partial indexes existed gets them when apply
+# opens it, and the next-event lookups use them.
+replay_index_upgrade() {
+    begin_case replay-index-upgrade
+    local plan i
+    on a "insert into ta values (1101, 'one')"
+    prefetch "$(wal_lsn)"
+    catchup "$(last_commit)"
+    lite replay 'drop index r_end; drop index r_k; drop index r_begin; drop index r_end_xid'
+    on b "insert into tb values (111, 'two')"
+    prefetch "$(wal_lsn)"
+    catchup "$(last_commit)"
+    plan=$(lite replay "explain query plan select max(id) from replay where action = 'B' and xid = 1;
+                        explain query plan select id from replay where action in ('C', 'R') and lsn > 1 order by lsn limit 1;
+                        explain query plan select id from replay where action = 'K' and lsn > 1 order by lsn limit 1;
+                        explain query plan select min(id) from replay where xid = 1 and action in ('C', 'R') and id > 1")
+    echo "plans after apply opened the file: ${plan}"
+    for i in r_begin r_end r_k r_end_xid; do
+        grep -q "INDEX ${i} " <<<"${plan}" || fail "apply did not create or use ${i}"
+    done
+    end_case
+}
+
 for c in ${CASE:-all}; do
     case "${c}" in
-        all) open_begin; keepalive_in_txn; restart_interleaved; replay_kill; replay_backlog; old_partial; obegin_upgrade ;;
+        all) open_begin; keepalive_in_txn; restart_interleaved; replay_kill; replay_backlog; old_partial; obegin_upgrade
+             replay_wal_loss truncate; replay_wal_loss delete; replay_index_upgrade ;;
         open-begin) open_begin ;;
         keepalive-in-txn) keepalive_in_txn ;;
         restart-interleaved) restart_interleaved ;;
@@ -378,6 +463,9 @@ for c in ${CASE:-all}; do
         replay-backlog) replay_backlog ;;
         old-partial) old_partial ;;
         obegin-upgrade) obegin_upgrade ;;
+        replay-wal-truncate) replay_wal_loss truncate ;;
+        replay-wal-delete) replay_wal_loss delete ;;
+        replay-index-upgrade) replay_index_upgrade ;;
         *) fail "unknown case ${c}" ;;
     esac
 done

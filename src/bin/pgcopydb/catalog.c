@@ -657,6 +657,15 @@ static char *replayDBcreateDDLs[] = {
 
 	"create index r_xid on replay(xid)",
 	"create index r_lsn on replay(lsn)",
+
+	/*
+	 * Used by ld_store_replay_next_event and ld_store_iter_replay_txn_init
+	 * only while their action terms imply these WHERE clauses.
+	 */
+	"create index r_end on replay(lsn) where action in ('C', 'R')",
+	"create index r_k on replay(lsn) where action = 'K'",
+	"create index r_begin on replay(xid) where action = 'B'",
+	"create index r_end_xid on replay(xid) where action in ('C', 'R')",
 };
 
 
@@ -748,6 +757,7 @@ static char *replayDBdropDDLs[] = {
 };
 
 static bool catalog_upgrade_schema(DatabaseCatalog *catalog);
+static bool catalog_upgrade_replay_schema(DatabaseCatalog *catalog);
 
 
 /*
@@ -1605,11 +1615,23 @@ catalog_init(DatabaseCatalog *catalog)
 			catalog->db = NULL;
 			return false;
 		}
-
-		return true;
+	}
+	else if (!catalog_upgrade_schema(catalog))
+	{
+		/* errors have already been logged */
+		sqlite3_close(catalog->db);
+		catalog->db = NULL;
+		return false;
 	}
 
-	if (!catalog_upgrade_schema(catalog))
+	/*
+	 * Power loss can drop the last replay.db transactions, never part of one.
+	 * Apply resumes from the target origin and transforms them again from
+	 * output.db, so replay.db does not need an fsync per transaction.  The
+	 * schema above is still committed with a full sync.
+	 */
+	if (catalog->type == DATABASE_CATALOG_TYPE_REPLAY &&
+		!catalog_execute(catalog, "PRAGMA synchronous = NORMAL"))
 	{
 		/* errors have already been logged */
 		sqlite3_close(catalog->db);
@@ -1628,6 +1650,11 @@ catalog_init(DatabaseCatalog *catalog)
 static bool
 catalog_upgrade_schema(DatabaseCatalog *catalog)
 {
+	if (catalog->type == DATABASE_CATALOG_TYPE_REPLAY)
+	{
+		return catalog_upgrade_replay_schema(catalog);
+	}
+
 	if (catalog->type != DATABASE_CATALOG_TYPE_SOURCE &&
 		catalog->type != DATABASE_CATALOG_TYPE_FILTER &&
 		catalog->type != DATABASE_CATALOG_TYPE_TARGET)
@@ -1692,6 +1719,56 @@ catalog_upgrade_schema(DatabaseCatalog *catalog)
 	(void) semaphore_unlock(&(catalog->sema));
 
 	return true;
+}
+
+
+/*
+ * catalog_upgrade_replay_schema adds the partial indexes of replayDBcreateDDLs
+ * to a replay.db that an older pgcopydb created.
+ */
+static bool
+catalog_upgrade_replay_schema(DatabaseCatalog *catalog)
+{
+	char *ddls[] = {
+		"create index if not exists r_end on replay(lsn) "
+		"where action in ('C', 'R')",
+		"create index if not exists r_k on replay(lsn) where action = 'K'",
+		"create index if not exists r_begin on replay(xid) where action = 'B'",
+		"create index if not exists r_end_xid on replay(xid) "
+		"where action in ('C', 'R')"
+	};
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!catalog_begin(catalog, true))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	int count = sizeof(ddls) / sizeof(ddls[0]);
+
+	for (int i = 0; i < count; i++)
+	{
+		if (!catalog_execute(catalog, ddls[i]))
+		{
+			/* errors have already been logged */
+			(void) catalog_rollback(catalog);
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
+	}
+
+	bool committed = catalog_commit(catalog);
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return committed;
 }
 
 
@@ -11243,8 +11320,7 @@ catalog_sql_bind(SQLiteQuery *query, BindParam *params, int count)
 		log_error("[SQLite] Failed to bind parameters in query: %s",
 				  query->sql);
 
-		(void) sqlite3_clear_bindings(query->ppStmt);
-		(void) sqlite3_finalize(query->ppStmt);
+		(void) catalog_sql_finalize(query);
 		return false;
 	}
 
@@ -11310,8 +11386,7 @@ catalog_sql_execute(SQLiteQuery *query)
 					  sqlite3_errstr(rc),
 					  sqlite3_errmsg(query->db));
 
-			(void) sqlite3_clear_bindings(query->ppStmt);
-			(void) sqlite3_finalize(query->ppStmt);
+			(void) catalog_sql_finalize(query);
 
 			return false;
 		}
@@ -11349,8 +11424,7 @@ catalog_sql_execute(SQLiteQuery *query)
 						  sqlite3_errstr(rc),
 						  sqlite3_errmsg(query->db));
 
-				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 
 				return false;
 			}
@@ -11360,8 +11434,7 @@ catalog_sql_execute(SQLiteQuery *query)
 			{
 				log_error("Failed to fetch current row, "
 						  "see above for details");
-				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 				return false;
 			}
 
@@ -11382,8 +11455,7 @@ catalog_sql_execute(SQLiteQuery *query)
 						  sqlite3_errstr(rc),
 						  sqlite3_errmsg(query->db));
 
-				(void) sqlite3_clear_bindings(query->ppStmt);
-				(void) sqlite3_finalize(query->ppStmt);
+				(void) catalog_sql_finalize(query);
 
 				return false;
 			}
@@ -11464,6 +11536,14 @@ catalog_sql_step(SQLiteQuery *query)
 bool
 catalog_sql_finalize(SQLiteQuery *query)
 {
+	/* the cache owns this statement and reuses it, freeing it is a UAF */
+	if (query->fromCache)
+	{
+		(void) sqlite3_clear_bindings(query->ppStmt);
+		(void) sqlite3_reset(query->ppStmt);
+		return true;
+	}
+
 	if (sqlite3_finalize(query->ppStmt) != SQLITE_OK)
 	{
 		log_error("Failed to finalize SQLite statement: %s",
