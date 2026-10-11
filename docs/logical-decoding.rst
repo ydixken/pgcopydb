@@ -146,6 +146,22 @@ This is why startup cannot initialize ``C`` to zero without checking old spool f
 On a connection retry, the receiver clears ``K`` but retains ``C`` and its certified feedback floor.
 A process restart reconstructs ``C`` from the retained catalogs and requires a new primary keepalive before promoting feedback beyond ``P``.
 
+.. _apply_groups:
+
+Apply groups
+------------
+
+Apply commits several source transactions in one target transaction, a group.
+A group closes after 100 source transactions, 10000 rows or 200 ms (``PGCOPYDB_APPLY_GROUP_TXNS``, ``PGCOPYDB_APPLY_GROUP_ROWS``, ``PGCOPYDB_APPLY_GROUP_MS``).
+It also closes at endpos, before a KEEPALIVE, and when the transform has no further complete transaction to hand over.
+A group commits through the single query described above (``SET CONSTRAINTS ALL IMMEDIATE``, the origin setup and the COMMIT) with the origin at the last member's COMMIT LSN, and ``previousLSN`` moves only when it succeeds.
+So a refused group leaves none of its rows on the target and the origin before the group.
+A stop signal leaves an open group uncommitted, and the next run applies it again from the origin.
+PostgreSQL refuses a TRUNCATE while deferred trigger events are pending in its transaction, so a member after the first that holds a TRUNCATE or a ROLLBACK row starts a new group.
+The members before it commit first; when rows of that member were already sent, the group rolls back and they are applied again without it.
+Deferred triggers on the target fire at the group COMMIT, so they see the rows of every member.
+``PGCOPYDB_APPLY_GROUP_TXNS=1`` commits every source transaction on its own.
+
 Why pgcopydb supports endpos mid-transaction
 ---------------------------------------------
 

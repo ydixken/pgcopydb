@@ -567,6 +567,13 @@ PGCOPYDB_SNAPSHOT
 
   Postgres snapshot identifier to re-use, see also ``--snapshot``.
 
+PGCOPYDB_APPLY_GROUP_TXNS, PGCOPYDB_APPLY_GROUP_ROWS, PGCOPYDB_APPLY_GROUP_MS
+
+  Apply commits up to this many source transactions, rows, or milliseconds
+  of apply work in one target transaction, 100, 10000 and 200 by default.
+  Set ``PGCOPYDB_APPLY_GROUP_TXNS`` to 1 to commit every source transaction
+  on its own. See :ref:`apply_groups`.
+
 TMPDIR
 
   The pgcopydb command creates all its work files and directories in
