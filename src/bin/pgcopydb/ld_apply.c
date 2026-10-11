@@ -254,6 +254,9 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 	int syncCounter = 0;
 	int stalledPasses = 0;
 
+	/* block on the pipe only after a pass that found nothing to do */
+	bool idle = false;
+
 	for (;;)
 	{
 		if (asked_to_stop || asked_to_stop_fast || asked_to_quit)
@@ -268,7 +271,7 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			fd_set rfds;
 			FD_ZERO(&rfds);
 			FD_SET(pipe_rd, &rfds);
-			struct timeval tv = { .tv_sec = 0, .tv_usec = 100 * 1000 };
+			struct timeval tv = { .tv_sec = 0, .tv_usec = idle ? 100 * 1000 : 0 };
 
 			int nready = select(pipe_rd + 1, &rfds, NULL, NULL, &tv);
 			if (nready < 0 && errno != EINTR)
@@ -291,6 +294,8 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 				}
 			}
 		}
+
+		idle = false;
 
 		/*
 		 * Lock the replayDB only while querying for the next event.
@@ -547,6 +552,7 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			{
 				pg_usleep(100 * 1000);  /* 100 ms */
 			}
+			idle = true;
 			continue;
 		}
 

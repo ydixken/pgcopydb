@@ -288,9 +288,10 @@ signal.
 
 That single fact is delivered over a one-way pipe from ``receive`` to ``apply``.
 The pipe carries exactly one message for its whole lifetime: the final LSN that
-``receive`` stopped at — in effect, *"I am done, at position X"*. ``apply`` waits
-on the pipe while it drains the store, so it wakes immediately when the signal
-arrives instead of discovering completion by polling.
+``receive`` stopped at, in effect *"I am done, at position X"*. ``apply``
+checks the pipe on every pass and waits on it, up to 100 ms, only after a pass
+that found nothing to do, so it wakes immediately when the signal arrives
+instead of discovering completion by polling.
 
 This follows the pattern PostgreSQL uses for postmaster-death detection — the
 "death watch" pipe behind ``PostmasterIsAlive()``. The upstream process holds
