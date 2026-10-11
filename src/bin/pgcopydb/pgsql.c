@@ -4364,6 +4364,7 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 	context->timeline = client->system.timeline;
 	context->tracking = &(client->current);
 	context->serverKeepaliveLSN = InvalidXLogRecPtr;
+	context->stopRecordLSN = InvalidXLogRecPtr;
 
 	client->now = feGetCurrentTimestamp();
 
@@ -4637,6 +4638,16 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 				client->last_status = client->now;
 			}
 
+			/* that flush re-read endpos from the sentinel */
+			if (endposReached && cur_record_lsn < client->endpos)
+			{
+				log_info("endpos moved to %X/%X, past the keepalive at %X/%X: "
+						 "streaming on",
+						 LSN_FORMAT_ARGS(client->endpos),
+						 LSN_FORMAT_ARGS(cur_record_lsn));
+				endposReached = false;
+			}
+
 			if (endposReached)
 			{
 				prepareToTerminate(client, true, InvalidXLogRecPtr);
@@ -4688,9 +4699,24 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 			{
 				goto error;
 			}
-			prepareToTerminate(client, false, cur_record_lsn);
-			time_to_abort = true;
-			break;
+
+			/* that flush re-read endpos from the sentinel */
+			if (cur_record_lsn <= client->endpos)
+			{
+				log_info("endpos moved to %X/%X, past the record at %X/%X: "
+						 "streaming on",
+						 LSN_FORMAT_ARGS(client->endpos),
+						 LSN_FORMAT_ARGS(cur_record_lsn));
+			}
+			else
+			{
+				prepareToTerminate(client, false, cur_record_lsn);
+
+				/* cur_record_lsn in context still names the last record written */
+				context->stopRecordLSN = cur_record_lsn;
+				time_to_abort = true;
+				break;
+			}
 		}
 
 		/* call the consumer function */

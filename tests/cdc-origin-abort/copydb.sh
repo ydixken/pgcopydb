@@ -4,7 +4,11 @@
 # Case A kills the apply once everything before its COMMIT ran on the target.
 # Case B makes the COMMIT itself fail in a deferred trigger only the target has.
 # Case C terminates the target backend while such a trigger runs at COMMIT.
-# Each case then resumes and expects the transaction applied, none skipped.
+# Cases D to G apply several transactions in one target transaction (a group):
+# a refused group, TRUNCATEs after deferred trigger events, endpos inside a
+# group, and a kill before a group COMMIT. Case H runs a group on a target
+# that ends idle (and on PG17+ any) transactions after 100 ms.
+# Each case then resumes and expects the transactions applied, none skipped.
 
 set -euxo pipefail
 
@@ -55,6 +59,84 @@ check() {
     fi
 }
 
+# kill_before_commit <case> <endpos>: SIGKILL the apply once the target ran
+# everything sent before the COMMIT at endpos, then resume to endpos
+kill_before_commit() {
+    local endpos=$2 origin_before digest_before barrier_dir paused_lsn apply_backend deadline
+    origin_before=$(origin)
+    digest_before=$(target_sql "$(digest true)")
+
+    barrier_dir=$(mktemp -d "${TMPDIR}/barrier.XXXXXX")
+    timeout 120s gdb -q -batch \
+        -ex "set \$barrier_dir = \"${barrier_dir}\"" \
+        -ex "set \$expected_lsn = \"${endpos}\"" \
+        -x /usr/src/pgcopydb/kill-at-commit.gdb \
+        --args pgcopydb stream catchup --resume --endpos "${endpos}" >"${TMPDIR}/gdb.log" 2>&1 &
+    debugger_pid=$!
+    deadline=$((SECONDS + 60))
+    while ! test -s "${barrier_dir}/paused"; do
+        kill -0 "${debugger_pid}"
+        test "${SECONDS}" -lt "${deadline}"
+        sleep 0.1
+    done
+    read -r apply_pid paused_lsn <"${barrier_dir}/paused"
+    [[ ${apply_pid} =~ ^[1-9][0-9]*$ ]]
+    test "${paused_lsn}" = "${endpos}"
+
+    # The apply backend has written rows and waits for input: all it was sent ran.
+    deadline=$((SECONDS + 45))
+    while true; do
+        apply_backend=$(target_sql "select pid from pg_stat_activity
+         where application_name like 'pgcopydb[${apply_pid}] %'
+           and backend_xid is not null and wait_event = 'ClientRead'
+           and (state = 'idle in transaction'
+                or query like '%pg_replication_origin_xact_setup%')")
+        if [[ ${apply_backend} =~ ^[1-9][0-9]*$ ]]; then break; fi
+        kill -0 "${debugger_pid}" "${apply_pid}"
+        test "${SECONDS}" -lt "${deadline}"
+        sleep 0.1
+    done
+    target_sql "select state, query from pg_stat_activity where pid = ${apply_backend}"
+    printf '%s\n' "${apply_pid}" >"${barrier_dir}/kill.tmp"
+    mv "${barrier_dir}/kill.tmp" "${barrier_dir}/kill"
+    wait "${debugger_pid}"
+    debugger_pid= apply_pid=
+    cat "${TMPDIR}/gdb.log"
+    deadline=$((SECONDS + 60))
+    while test "$(target_sql "select count(*) from pg_stat_activity where pid = ${apply_backend}")" != 0; do
+        test "${SECONDS}" -lt "${deadline}"
+        sleep 0.1
+    done
+
+    check "$1: origin after kill before COMMIT" "${origin_before}" "$(origin)"
+    check "$1: rows after kill before COMMIT" "${digest_before}" "$(target_sql "$(digest true)")"
+    timeout 60s pgcopydb stream catchup --resume --endpos "${endpos}"
+    check "$1: origin after resume" "${endpos}" "$(origin)"
+    check "$1: rows after resume" "$(source_sql "$(digest true)")" "$(target_sql "$(digest true)")"
+}
+
+# keepalives_between <xid> <xid>: KEEPALIVE rows between the two COMMITs;
+# each one commits the group, so a case that needs one group checks for none
+keepalives_between() {
+    local file
+    for file in "${XDG_DATA_HOME}/pgcopydb"/*-output.db; do
+        sqlite3 -readonly -init /dev/null -batch -noheader -list "${file}" \
+            "select count(*) from output where action = 'K'
+                and lsn > (select lsn from output where xid = $1 and action = 'C')
+                and lsn < (select lsn from output where xid = $2 and action = 'C')"
+    done | awk '{ n += $1 } END { print n + 0 }'
+}
+
+# txns <first id> <count> <v of the 3rd>: one single-row transaction per id
+txns() {
+    local i v
+    for ((i = $1; i < $1 + $2; i++)); do
+        v=row
+        test "${i}" -ne $(($1 + 2)) || v=$3
+        source_sql "begin; select pg_current_xact_id(); insert into oa values (${i}, ${i}, '${v}'); commit"
+    done
+}
+
 pgcopydb ping
 source_sql 'drop table if exists oa; create table oa (id integer primary key, k integer, v text)'
 source_sql "insert into oa select i, i, md5(i::text) from generate_series(1, 10) i"
@@ -82,56 +164,7 @@ xid=$(source_sql "begin; select pg_current_xact_id();
 timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
 commit_a=$(commit_lsn "${xid}")
 pgcopydb stream sentinel set endpos "${commit_a}"
-origin_before=$(origin)
-digest_before=$(target_sql "$(digest true)")
-
-barrier_dir=$(mktemp -d "${TMPDIR}/barrier.XXXXXX")
-timeout 120s gdb -q -batch \
-    -ex "set \$barrier_dir = \"${barrier_dir}\"" \
-    -ex "set \$expected_lsn = \"${commit_a}\"" \
-    -x /usr/src/pgcopydb/kill-at-commit.gdb \
-    --args pgcopydb stream catchup --resume --endpos "${commit_a}" >"${TMPDIR}/gdb.log" 2>&1 &
-debugger_pid=$!
-deadline=$((SECONDS + 60))
-while ! test -s "${barrier_dir}/paused"; do
-    kill -0 "${debugger_pid}"
-    test "${SECONDS}" -lt "${deadline}"
-    sleep 0.1
-done
-read -r apply_pid paused_lsn <"${barrier_dir}/paused"
-[[ ${apply_pid} =~ ^[1-9][0-9]*$ ]]
-test "${paused_lsn}" = "${commit_a}"
-
-# The apply backend has written rows and waits for input: all it was sent ran.
-deadline=$((SECONDS + 45))
-while true; do
-    apply_backend=$(target_sql "select pid from pg_stat_activity
-     where application_name like 'pgcopydb[${apply_pid}] %'
-       and backend_xid is not null and wait_event = 'ClientRead'
-       and (state = 'idle in transaction'
-            or query like '%pg_replication_origin_xact_setup%')")
-    if [[ ${apply_backend} =~ ^[1-9][0-9]*$ ]]; then break; fi
-    kill -0 "${debugger_pid}" "${apply_pid}"
-    test "${SECONDS}" -lt "${deadline}"
-    sleep 0.1
-done
-target_sql "select state, query from pg_stat_activity where pid = ${apply_backend}"
-printf '%s\n' "${apply_pid}" >"${barrier_dir}/kill.tmp"
-mv "${barrier_dir}/kill.tmp" "${barrier_dir}/kill"
-wait "${debugger_pid}"
-debugger_pid= apply_pid=
-cat "${TMPDIR}/gdb.log"
-deadline=$((SECONDS + 60))
-while test "$(target_sql "select count(*) from pg_stat_activity where pid = ${apply_backend}")" != 0; do
-    test "${SECONDS}" -lt "${deadline}"
-    sleep 0.1
-done
-
-check "A: origin after kill before COMMIT" "${origin_before}" "$(origin)"
-check "A: rows after kill before COMMIT" "${digest_before}" "$(target_sql "$(digest true)")"
-timeout 60s pgcopydb stream catchup --resume --endpos "${commit_a}"
-check "A: origin after resume" "${commit_a}" "$(origin)"
-check "A: rows after resume" "$(source_sql "$(digest true)")" "$(target_sql "$(digest true)")"
+kill_before_commit A "${commit_a}"
 
 #
 # Case B: the COMMIT fails, the conflict is removed, and the apply resumes
@@ -201,6 +234,135 @@ target_sql 'drop trigger oa_stall on oa'
 timeout 60s pgcopydb stream catchup --resume --endpos "${commit_c}"
 check "C: origin after resume" "${commit_c}" "$(origin)"
 check "C: rows after resume" "$(source_sql "$(digest 'id > 2000')")" "$(target_sql "$(digest 'id > 2000')")"
+
+#
+# The groups below must not be cut short by the clock on a slow runner.
+export PGCOPYDB_APPLY_GROUP_MS=60000
+
+#
+# Case D: the target refuses the 3rd of ten transactions applied as one group
+#
+target_sql "create constraint trigger oa_reject after insert on oa deferrable initially deferred
+    for each row when (new.v = 'dup') execute function oa_reject();
+    alter table oa enable always trigger oa_reject"
+mapfile -t xids < <(txns 3001 10 dup)
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+commit_d=$(commit_lsn "${xids[9]}")
+check "D: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[9]}")"
+pgcopydb stream sentinel set endpos "${commit_d}"
+origin_before=$(origin)
+
+status=0
+timeout 60s pgcopydb stream catchup --resume --endpos "${commit_d}" >"${TMPDIR}/group.log" 2>&1 || status=$?
+grep -E 'ERROR|FATAL' "${TMPDIR}/group.log" | cut -c1-300 || true
+test "${status}" -ne 0
+grep -q 'oa_reject refuses row 3003' "${TMPDIR}/group.log"
+grep -q "Failed to commit 10 transactions, xid ${xids[0]} to ${xids[9]}" "${TMPDIR}/group.log"
+check "D: origin after refused group" "${origin_before}" "$(origin)"
+check "D: group rows after refused group" 0 "$(target_sql 'select count(*) from oa where id > 3000')"
+
+target_sql 'drop trigger oa_reject on oa'
+timeout 60s pgcopydb stream catchup --resume --endpos "${commit_d}"
+check "D: origin after resume" "${commit_d}" "$(origin)"
+check "D: rows after resume" "$(source_sql "$(digest 'id > 3000')")" "$(target_sql "$(digest 'id > 3000')")"
+
+#
+# Case E: TRUNCATEs after transactions that queued deferred trigger events
+#
+# In one target transaction a TRUNCATE fails on the pending events. The
+# transactions before it commit as one group, and the TRUNCATE starts the next.
+target_sql "create function oa_note() returns trigger language plpgsql as \$\$
+    begin return null; end \$\$;
+    create constraint trigger oa_note after insert on oa deferrable initially deferred
+    for each row when (new.v = 'note') execute function oa_note();
+    alter table oa enable always trigger oa_note"
+
+# truncate_case <case> <first id> <statements before the TRUNCATE> <grep>
+truncate_case() {
+    local first=$2 before after commit
+    mapfile -t before < <(txns "${first}" 10 note)
+    source_sql "begin; $3 truncate oa; insert into oa values ($((first + 10)), 0, 'after truncate'); commit"
+    mapfile -t after < <(txns $((first + 11)) 10 row)
+    timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+    commit=$(commit_lsn "${after[9]}")
+    check "$1: KEEPALIVE rows inside the groups" 0 "$(keepalives_between "${before[0]}" "${after[9]}")"
+    pgcopydb stream sentinel set endpos "${commit}"
+    timeout 60s pgcopydb stream catchup --resume --endpos "${commit}" >"${TMPDIR}/truncate-$1.log" 2>&1 || {
+        cat "${TMPDIR}/truncate-$1.log"
+        exit 1
+    }
+    grep -o "holds a TRUNCATE.*" "${TMPDIR}/truncate-$1.log" || true
+    check "$1: TRUNCATE ends the first group" 1 "$(grep -c "$4" "${TMPDIR}/truncate-$1.log")"
+    # one target transaction before the TRUNCATE and one from it on
+    check "$1: target transactions" "Applied 21 transactions in 2 target transactions" \
+        "$(grep -o 'Applied [0-9]* transactions in [0-9]* target transactions' "${TMPDIR}/truncate-$1.log")"
+    check "$1: origin after TRUNCATE" "${commit}" "$(origin)"
+    check "$1: rows after TRUNCATE" "$(source_sql "$(digest true)")" "$(target_sql "$(digest true)")"
+}
+
+# Nothing of the TRUNCATE transaction was sent yet: the group just commits.
+truncate_case E 4001 '' 'after 0 of its rows: committing the 10 transactions'
+# A row went out first: the group rolls back, then commits without it.
+truncate_case E2 4101 "insert into oa values (4100, 0, 'before truncate');" \
+    'after 1 of its rows: rolling back and re-applying the 10 transactions'
+target_sql 'drop trigger oa_note on oa'
+
+#
+# Case F: endpos at the 3rd of six transactions ends the group there
+#
+mapfile -t xids < <(txns 5001 6 row)
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+commit_f3=$(commit_lsn "${xids[2]}")
+commit_f=$(commit_lsn "${xids[5]}")
+check "F: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[5]}")"
+pgcopydb stream sentinel set endpos "${commit_f3}"
+timeout 60s pgcopydb stream catchup --resume --endpos "${commit_f3}"
+check "F: origin at endpos" "${commit_f3}" "$(origin)"
+check "F: rows at endpos" "5001,5002,5003" "$(target_sql "select string_agg(id::text, ',' order by id) from oa where id > 5000")"
+pgcopydb stream sentinel set endpos "${commit_f}"
+timeout 60s pgcopydb stream catchup --resume --endpos "${commit_f}"
+check "F: rows after resume" "$(source_sql "$(digest 'id > 5000')")" "$(target_sql "$(digest 'id > 5000')")"
+
+#
+# Case G: SIGKILL before the COMMIT of a group of three
+#
+mapfile -t xids < <(txns 6001 3 row)
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+commit_g=$(commit_lsn "${xids[2]}")
+check "G: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[2]}")"
+pgcopydb stream sentinel set endpos "${commit_g}"
+kill_before_commit G "${commit_g}"
+
+#
+# Case H: the target ends transactions that idle, or on PG17+ run, 100 ms
+#
+# The 2000 rows of the first transaction fill the client's pipeline buffer,
+# so the group is open on the target while apply transforms the 200000 rows
+# of the second one. With no sync inside the group, the idle timeout never
+# arms; apply turns transaction_timeout off for its session.
+xids=()
+xids+=("$(source_sql "begin; select pg_current_xact_id();
+    insert into oa select i, i, md5(i::text) from generate_series(7001, 9000) i; commit")")
+xids+=("$(source_sql "begin; select pg_current_xact_id();
+    insert into oa select i, i, md5(i::text) from generate_series(9001, 209000) i; commit")")
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+commit_h=$(commit_lsn "${xids[1]}")
+check "H: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[1]}")"
+pgcopydb stream sentinel set endpos "${commit_h}"
+target_sql "alter role current_user set idle_in_transaction_session_timeout = '100ms'"
+test "$(target_sql 'show server_version_num')" -lt 170000 ||
+    target_sql "alter role current_user set transaction_timeout = '100ms'"
+# An invalid group limit is reported, and the default applies.
+status=0
+PGCOPYDB_APPLY_GROUP_ROWS=0 timeout 120s pgcopydb stream catchup --resume --endpos "${commit_h}" \
+    >"${TMPDIR}/timeout.log" 2>&1 || status=$?
+target_sql 'alter role current_user reset all'
+grep -E 'ERROR|FATAL' "${TMPDIR}/timeout.log" | cut -c1-300 || true
+grep -o 'Applied [0-9]* transactions in [0-9]* target transactions' "${TMPDIR}/timeout.log" || true
+check "H: catchup exit status" 0 "${status}"
+check "H: invalid limit reported" 1 "$(grep -c 'Ignoring PGCOPYDB_APPLY_GROUP_ROWS="0", which is not a positive integer, using 10000' "${TMPDIR}/timeout.log")"
+check "H: origin" "${commit_h}" "$(origin)"
+check "H: rows" "$(source_sql "$(digest 'id > 7000')")" "$(target_sql "$(digest 'id > 7000')")"
 
 pgcopydb stream cleanup
 echo "RESULT failures=${failures}"

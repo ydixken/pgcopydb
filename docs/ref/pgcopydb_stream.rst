@@ -157,7 +157,7 @@ transforms the changes prefetched into the CDC *output* database into replay
 statements (stored in the CDC *replay* database), and applies them to the
 target. Progress is tracked using the Postgres replication origin.
 
-The SQLite apply path pipelines statements within each source transaction, uses ``synchronous_commit=on``, and checks the target's COMMIT result before publishing applied progress.
+The SQLite apply path pipelines the statements of several source transactions into one target transaction (see :ref:`apply_groups`), uses ``synchronous_commit=on``, and checks the target's COMMIT result before publishing applied progress.
 SQL errors fail catchup without advancing progress past the rejected transaction.
 Acknowledged transactions are durable before either an endpos-triggered stop or a shutdown signal, so stopping between transactions requires no additional target query.
 Interrupted in-flight work may require resuming from the target replication origin; a shutdown request does not guarantee that every received transaction was applied.
@@ -487,6 +487,14 @@ PGCOPYDB_WAL2JSON_NUMERIC_AS_STRING
 
   When ``--wal2json-numeric-as-string`` is ommitted from the command line
   then this environment variable is used.
+
+PGCOPYDB_APPLY_GROUP_TXNS, PGCOPYDB_APPLY_GROUP_ROWS, PGCOPYDB_APPLY_GROUP_MS
+
+  Apply commits up to this many source transactions, rows, or milliseconds
+  of apply work in one target transaction, 100, 10000 and 200 by default.
+  Set ``PGCOPYDB_APPLY_GROUP_TXNS`` to 1 to commit every source transaction
+  on its own. A value that is not a positive integer is ignored with a
+  warning. See :ref:`apply_groups`.
 
 TMPDIR
 

@@ -146,6 +146,24 @@ This is why startup cannot initialize ``C`` to zero without checking old spool f
 On a connection retry, the receiver clears ``K`` but retains ``C`` and its certified feedback floor.
 A process restart reconstructs ``C`` from the retained catalogs and requires a new primary keepalive before promoting feedback beyond ``P``.
 
+.. _apply_groups:
+
+Apply groups
+------------
+
+Apply commits several source transactions in one target transaction, a group.
+A group closes after 100 source transactions, 10000 rows or 200 ms (``PGCOPYDB_APPLY_GROUP_TXNS``, ``PGCOPYDB_APPLY_GROUP_ROWS``, ``PGCOPYDB_APPLY_GROUP_MS``).
+It also closes at endpos, before a KEEPALIVE, and when the transform has no further complete transaction to hand over.
+A group commits through the single query described above (``SET CONSTRAINTS ALL IMMEDIATE``, the origin setup and the COMMIT) with the origin at the last member's COMMIT LSN, and ``previousLSN`` moves only when it succeeds.
+So a refused group leaves none of its rows on the target and the origin before the group.
+A stop signal leaves an open group uncommitted, and the next run applies it again from the origin.
+PostgreSQL refuses a TRUNCATE while deferred trigger events are pending in its transaction, so a member after the first that holds a TRUNCATE or a ROLLBACK row starts a new group.
+The members before it commit first; when rows of that member were already sent, the group rolls back and they are applied again without it.
+Deferred triggers on the target fire at the group COMMIT, so they see the rows of every member.
+A group can stay open on the target while apply transforms the next source transaction, so on PostgreSQL 17 and later the apply session sets ``transaction_timeout`` to 0.
+Apply sends no pipeline sync inside a group, so the target never reports it idle and ``idle_in_transaction_session_timeout`` does not end it.
+``PGCOPYDB_APPLY_GROUP_TXNS=1`` commits every source transaction on its own.
+
 Why pgcopydb supports endpos mid-transaction
 ---------------------------------------------
 
@@ -314,14 +332,19 @@ downstream process watches the read end for readiness:
 pgcopydb layers the final-LSN payload on top of that bare death-watch so that
 ``apply`` can also drain cleanly up to the right transaction boundary, rather
 than merely learning *that* the upstream is gone.
+Receive stops at the first record past endpos without writing it, and then the
+payload is endpos itself.
+Before it stops, receive reads endpos from the sentinel again, and when endpos
+has moved to or past that record it streams on.
 
 The pipe is purely a latency optimisation, and it exists only when ``receive``
 and ``apply`` run together under the same follow supervisor. When ``apply`` (or
 ``stream catchup``) runs on its own, there is no live pipe; it instead consults
 the durable ``pipeline_state`` record that ``receive`` leaves behind in the
 source catalog to decide when the upstream has finished. Unexpected upstream
-death is, in the live case, ultimately caught by the supervisor monitoring its
-children, with the pipe end-of-file serving as a belt-and-suspenders fallback.
+death is, in the live case, caught by the supervisor monitoring its children.
+The follow supervisor keeps the write end open, so there the pipe never reaches
+end-of-file.
 
 Invariant summary
 -----------------

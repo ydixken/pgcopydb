@@ -1322,11 +1322,16 @@ streamCloseFile(LogicalStreamContext *context, bool time_to_abort)
 			   LSN_FORMAT_ARGS(privateContext->endpos),
 			   replayDB);
 
+	/*
+	 * The flush on the way out re-reads endpos. One raised to or past the
+	 * unwritten stop record must not claim records receive never got.
+	 */
 	if (time_to_abort &&
 		privateContext->endpos != InvalidXLogRecPtr &&
-		privateContext->endpos <= context->cur_record_lsn)
+		(privateContext->endpos <= context->cur_record_lsn ||
+		 privateContext->endpos < context->stopRecordLSN))
 	{
-		uint64_t done_lsn = context->cur_record_lsn;
+		uint64_t done_lsn = Max(context->cur_record_lsn, privateContext->endpos);
 
 		log_info("streamCloseFile: receive done at %X/%X, signalling transform",
 				 LSN_FORMAT_ARGS(done_lsn));
