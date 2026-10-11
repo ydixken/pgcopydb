@@ -160,6 +160,8 @@ A stop signal leaves an open group uncommitted, and the next run applies it agai
 PostgreSQL refuses a TRUNCATE while deferred trigger events are pending in its transaction, so a member after the first that holds a TRUNCATE or a ROLLBACK row starts a new group.
 The members before it commit first; when rows of that member were already sent, the group rolls back and they are applied again without it.
 Deferred triggers on the target fire at the group COMMIT, so they see the rows of every member.
+A group can stay open on the target while apply transforms the next source transaction, so on PostgreSQL 17 and later the apply session sets ``transaction_timeout`` to 0.
+Apply sends no pipeline sync inside a group, so the target never reports it idle and ``idle_in_transaction_session_timeout`` does not end it.
 ``PGCOPYDB_APPLY_GROUP_TXNS=1`` commits every source transaction on its own.
 
 Why pgcopydb supports endpos mid-transaction

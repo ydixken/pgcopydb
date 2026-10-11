@@ -51,6 +51,15 @@ GUC applySettings[] = {
 	{ NULL, NULL },
 };
 
+/*
+ * A group can stay open on the target across transform passes. No pipeline
+ * sync happens inside it, so idle_in_transaction_session_timeout never arms.
+ */
+static GUC applySessionSettings17[] = {
+	{ "transaction_timeout", "0" },
+	{ NULL, NULL },
+};
+
 static bool readTxnCommitLSN(LogicalMessageMetadata *metadata, const char *dir,
 							 bool *txnCommitLSNFound);
 static bool parseTxnMetadataFile(const char *filename, LogicalMessageMetadata *metadata);
@@ -195,13 +204,20 @@ apply_group_limit(const char *name, int fallback)
 	char value[BUFSIZE] = { 0 };
 	int limit = 0;
 
-	if (env_exists(name) &&
-		get_env_copy(name, value, sizeof(value)) &&
+	if (!env_exists(name))
+	{
+		return fallback;
+	}
+
+	if (get_env_copy(name, value, sizeof(value)) &&
 		stringToInt(value, &limit) &&
 		limit > 0)
 	{
 		return limit;
 	}
+
+	log_warn("Ignoring %s=\"%s\", which is not a positive integer, using %d",
+			 name, value, fallback);
 
 	return fallback;
 }
@@ -685,14 +701,17 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			{
 				CopyDBSentinel sentinel = { 0 };
 
-				if (!sentinel_get(context->sourceDB, &sentinel))
+				/* as stream_apply_sync_sentinel: keep the last endpos */
+				if (sentinel_get(context->sourceDB, &sentinel))
 				{
-					log_error("Failed to read endpos from the sentinel");
-					success = false;
-					break;
+					context->endpos = sentinel.endpos;
 				}
-
-				context->endpos = sentinel.endpos;
+				else
+				{
+					log_warn("Failed to read endpos from the sentinel, "
+							 "keeping %X/%X",
+							 LSN_FORMAT_ARGS(context->endpos));
+				}
 			}
 
 			/* Guard 2: endpos lies entirely before this transaction. */
@@ -2797,6 +2816,13 @@ setupReplicationOrigin(StreamApplyContext *context)
 	 */
 	PGSQL *applyPgConn = &(context->applyPgConn);
 	if (!setupConnection(applyPgConn, context))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (applyPgConn->pgversion_num >= 170000 &&
+		!pgsql_set_gucs(applyPgConn, applySessionSettings17))
 	{
 		/* errors have already been logged */
 		return false;

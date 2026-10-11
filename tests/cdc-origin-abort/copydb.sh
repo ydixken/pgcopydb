@@ -6,7 +6,8 @@
 # Case C terminates the target backend while such a trigger runs at COMMIT.
 # Cases D to G apply several transactions in one target transaction (a group):
 # a refused group, TRUNCATEs after deferred trigger events, endpos inside a
-# group, and a kill before a group COMMIT.
+# group, and a kill before a group COMMIT. Case H runs a group on a target
+# that ends idle (and on PG17+ any) transactions after 100 ms.
 # Each case then resumes and expects the transactions applied, none skipped.
 
 set -euxo pipefail
@@ -331,6 +332,37 @@ commit_g=$(commit_lsn "${xids[2]}")
 check "G: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[2]}")"
 pgcopydb stream sentinel set endpos "${commit_g}"
 kill_before_commit G "${commit_g}"
+
+#
+# Case H: the target ends transactions that idle, or on PG17+ run, 100 ms
+#
+# The 2000 rows of the first transaction fill the client's pipeline buffer,
+# so the group is open on the target while apply transforms the 200000 rows
+# of the second one. With no sync inside the group, the idle timeout never
+# arms; apply turns transaction_timeout off for its session.
+xids=()
+xids+=("$(source_sql "begin; select pg_current_xact_id();
+    insert into oa select i, i, md5(i::text) from generate_series(7001, 9000) i; commit")")
+xids+=("$(source_sql "begin; select pg_current_xact_id();
+    insert into oa select i, i, md5(i::text) from generate_series(9001, 209000) i; commit")")
+timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
+commit_h=$(commit_lsn "${xids[1]}")
+check "H: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[1]}")"
+pgcopydb stream sentinel set endpos "${commit_h}"
+target_sql "alter role current_user set idle_in_transaction_session_timeout = '100ms'"
+test "$(target_sql 'show server_version_num')" -lt 170000 ||
+    target_sql "alter role current_user set transaction_timeout = '100ms'"
+# An invalid group limit is reported, and the default applies.
+status=0
+PGCOPYDB_APPLY_GROUP_ROWS=0 timeout 120s pgcopydb stream catchup --resume --endpos "${commit_h}" \
+    >"${TMPDIR}/timeout.log" 2>&1 || status=$?
+target_sql 'alter role current_user reset all'
+grep -E 'ERROR|FATAL' "${TMPDIR}/timeout.log" | cut -c1-300 || true
+grep -o 'Applied [0-9]* transactions in [0-9]* target transactions' "${TMPDIR}/timeout.log" || true
+check "H: catchup exit status" 0 "${status}"
+check "H: invalid limit reported" 1 "$(grep -c 'Ignoring PGCOPYDB_APPLY_GROUP_ROWS="0", which is not a positive integer, using 10000' "${TMPDIR}/timeout.log")"
+check "H: origin" "${commit_h}" "$(origin)"
+check "H: rows" "$(source_sql "$(digest 'id > 7000')")" "$(target_sql "$(digest 'id > 7000')")"
 
 pgcopydb stream cleanup
 echo "RESULT failures=${failures}"
