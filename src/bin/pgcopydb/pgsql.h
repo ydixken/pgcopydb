@@ -450,6 +450,7 @@ typedef struct LogicalStreamContext
 	TimestampTz lastFeedbackSync;
 	TimestampTz sendTime;
 	XLogRecPtr endpos;          /* might be update at runtime */
+	bool stoppedBeforeRecord;   /* a record past endpos ended the stream */
 
 	LogicalTrackLSN *tracking;  /* expose LogicalStreamClient.current */
 

@@ -16,7 +16,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort \
 	 cdc-receive-drain-error cdc-receive-reconnect-dying-source \
 	 cdc-receive-status-interval cdc-apply-wakeup catalog-stmt-cache \
-	 cdc-receive-group-commit \
+	 cdc-receive-group-commit cdc-endpos-before-txn \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering;
 
@@ -128,6 +128,9 @@ cdc-apply-wakeup: build
 cdc-receive-group-commit: build
 	$(MAKE) -C $@
 
+cdc-endpos-before-txn: build
+	$(MAKE) -C $@
+
 # builds its own image from the build stage of the top-level Dockerfile
 catalog-stmt-cache:
 	$(MAKE) -C $@
@@ -180,6 +183,6 @@ clean-images:
 .PHONY: cdc-interleaved-commits cdc-resend-after-reconnect cdc-commit-order-resume
 .PHONY: cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort cdc-receive-drain-error
 .PHONY: cdc-receive-reconnect-dying-source cdc-receive-status-interval cdc-apply-wakeup
-.PHONY: catalog-stmt-cache cdc-receive-group-commit
+.PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn
 .PHONY: follow-wal2json follow-9.6
 .PHONY: timescaledb citus

@@ -4364,6 +4364,7 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 	context->timeline = client->system.timeline;
 	context->tracking = &(client->current);
 	context->serverKeepaliveLSN = InvalidXLogRecPtr;
+	context->stoppedBeforeRecord = false;
 
 	client->now = feGetCurrentTimestamp();
 
@@ -4689,6 +4690,9 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 				goto error;
 			}
 			prepareToTerminate(client, false, cur_record_lsn);
+
+			/* cur_record_lsn in context still names the last record written */
+			context->stoppedBeforeRecord = true;
 			time_to_abort = true;
 			break;
 		}

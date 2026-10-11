@@ -1324,9 +1324,10 @@ streamCloseFile(LogicalStreamContext *context, bool time_to_abort)
 
 	if (time_to_abort &&
 		privateContext->endpos != InvalidXLogRecPtr &&
-		privateContext->endpos <= context->cur_record_lsn)
+		(privateContext->endpos <= context->cur_record_lsn ||
+		 context->stoppedBeforeRecord))
 	{
-		uint64_t done_lsn = context->cur_record_lsn;
+		uint64_t done_lsn = Max(context->cur_record_lsn, privateContext->endpos);
 
 		log_info("streamCloseFile: receive done at %X/%X, signalling transform",
 				 LSN_FORMAT_ARGS(done_lsn));

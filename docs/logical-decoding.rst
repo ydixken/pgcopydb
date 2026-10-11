@@ -314,14 +314,17 @@ downstream process watches the read end for readiness:
 pgcopydb layers the final-LSN payload on top of that bare death-watch so that
 ``apply`` can also drain cleanly up to the right transaction boundary, rather
 than merely learning *that* the upstream is gone.
+Receive stops at the first record past endpos without writing it, and then the
+payload is endpos itself.
 
 The pipe is purely a latency optimisation, and it exists only when ``receive``
 and ``apply`` run together under the same follow supervisor. When ``apply`` (or
 ``stream catchup``) runs on its own, there is no live pipe; it instead consults
 the durable ``pipeline_state`` record that ``receive`` leaves behind in the
 source catalog to decide when the upstream has finished. Unexpected upstream
-death is, in the live case, ultimately caught by the supervisor monitoring its
-children, with the pipe end-of-file serving as a belt-and-suspenders fallback.
+death is, in the live case, caught by the supervisor monitoring its children.
+The follow supervisor keeps the write end open, so there the pipe never reaches
+end-of-file.
 
 Invariant summary
 -----------------
