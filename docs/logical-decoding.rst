@@ -332,6 +332,8 @@ pgcopydb layers the final-LSN payload on top of that bare death-watch so that
 than merely learning *that* the upstream is gone.
 Receive stops at the first record past endpos without writing it, and then the
 payload is endpos itself.
+Before it stops, receive reads endpos from the sentinel again, and when endpos
+has moved to or past that record it streams on.
 
 The pipe is purely a latency optimisation, and it exists only when ``receive``
 and ``apply`` run together under the same follow supervisor. When ``apply`` (or

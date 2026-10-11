@@ -3,6 +3,8 @@
 # endpos lies after one COMMIT and before the first record of the next
 # transaction.  Receive stops at that record without writing it, so no BEGIN
 # is open, and apply must still learn that receive is done and exit there.
+# Then endpos is raised while receive still holds the old one: receive must
+# stream on to the new endpos instead of stopping, or reporting it reached.
 
 set -euo pipefail
 
@@ -85,5 +87,43 @@ pgcopydb stream sentinel set endpos "$(source_sql 'select pg_current_wal_insert_
 follow_to resume
 test "$(rows)" = 1,2,3 || fail "rows $(rows) on the target after resume, expected 1,2,3"
 
+# Receive reads the sentinel endpos when it flushes, every 10 s while idle.
+# Raise endpos right after one such read, so receive still holds the old one
+# when WAL first passes it.  The old endpos is the last byte of the current
+# WAL segment, which nothing else reaches before pg_switch_wal().
+source_sql 'checkpoint'
+old_endpos=$(source_sql "select pg_lsn '0/0' + ((pg_current_wal_insert_lsn() - '0/0')::bigint / s + 1) * s - 1
+    from (select setting::bigint s from pg_settings where name = 'wal_segment_size') w")
+new_endpos=$(source_sql "select '${old_endpos}'::pg_lsn + 1 + 1024 * 1024")
+pgcopydb stream sentinel set endpos "${old_endpos}"
+setsid pgcopydb follow --resume --not-consistent --debug > "${TMPDIR}/raised.log" 2>&1 &
+follow_pid=$!
+timeout 60s bash -c "until grep -q 'stream_sync_sentinel: ' '${TMPDIR}/raised.log'; do sleep 0.1; done" ||
+    fail "receive did not read the sentinel within 60 s"
+pgcopydb stream sentinel set endpos "${new_endpos}"
+source_sql 'select pg_switch_wal()'
+source_sql "insert into t values (4, 'raised')"
+test "$(lsn "$(source_sql 'select pg_current_wal_insert_lsn()')")" -lt "$(lsn "${new_endpos}")" ||
+    fail "row 4 ends past the new endpos ${new_endpos}"
+source_sql 'select pg_switch_wal()'
+source_sql "insert into t values (5, 'past')"
+echo "endpos raised from ${old_endpos} to ${new_endpos} before WAL passed the old one"
+
+deadline=$((SECONDS + 120))
+while kill -0 "${follow_pid}" 2>/dev/null; do
+    test "${SECONDS}" -lt "${deadline}" ||
+        fail "raised: follow did not exit at endpos within 120 s, with rows $(rows) on the target"
+    sleep 0.2
+done
+rc=0
+wait "${follow_pid}" || rc=$?
+follow_pid=
+grep -E 'endpos moved to|receive done at' "${TMPDIR}/raised.log" | cut -c1-200 || true
+echo "raised: follow exited ${rc} with rows $(rows) on the target, origin $(origin)"
+test "${rc}" = 0 || fail "raised: follow exited ${rc}"
+grep -q "endpos moved to ${new_endpos}, past the" "${TMPDIR}/raised.log" ||
+    fail "receive never held the old endpos ${old_endpos} when WAL passed it"
+test "$(rows)" = 1,2,3,4 || fail "rows $(rows) on the target at the raised endpos, expected 1,2,3,4"
+
 pgcopydb stream cleanup > "${TMPDIR}/cleanup.log" 2>&1
-echo "PASS: apply exited at endpos ${endpos} with row 1, then resumed to rows 1,2,3"
+echo "PASS: apply exited at endpos ${endpos} with row 1, resumed to rows 1,2,3, and followed a raised endpos to row 4"
