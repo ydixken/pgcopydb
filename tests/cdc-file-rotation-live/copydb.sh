@@ -2,8 +2,9 @@
 
 # Apply runs live (no endpos) behind a receive that has already closed
 # several output.db files.  Receive rotates after every COMMIT and spools a
-# KEEPALIVE between transactions, so each closed file hands apply a marker
-# before its transaction: apply must not leave the file before applying it.
+# KEEPALIVE between transactions, so every closed file after the first hands
+# apply a marker before its transaction: apply must not leave the file before
+# applying it.
 
 set -euo pipefail
 
@@ -37,7 +38,7 @@ pretty() { printf '%X/%X' $(($1 >> 32)) $(($1 & 4294967295)); }
 spool() {
     local f
     for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
-        timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader -list "${f}" "$1" || true
+        timeout 10s sqlite3 -readonly -init /dev/null -cmd '.timeout 5000' -batch -noheader -list "${f}" "$1" || true
     done
 }
 
@@ -114,7 +115,7 @@ endpos=$(source_sql 'select pg_current_wal_flush_lsn()')
 
 verify markers-before-commits
 
-last=$(timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader -list \
+last=$(timeout 10s sqlite3 -readonly -init /dev/null -cmd '.timeout 5000' -batch -noheader -list \
     "${TMPDIR}/pgcopydb/schema/source.db" \
     "select filename from cdc_files where done_time_epoch is null")
 test -n "${last}" -a "$(wc -l <<<"${last}")" = 1 || fail "expected one open output.db, got: ${last}"
