@@ -126,6 +126,7 @@ jobs:
           - cdc-replica-identity-index
           - cdc-replica-identity-full
           - cdc-file-rotation
+          - cdc-file-rotation-live
           - cdc-pgoutput
           - cdc-keepalive
           - cdc-filtering-pgoutput

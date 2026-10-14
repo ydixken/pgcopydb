@@ -10,7 +10,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-wal2json cdc-test-decoding cdc-endpos-mid-txn cdc-low-level \
 	 cdc-replica-identity-index cdc-replica-identity-full \
 	 cdc-partitioned-target cdc-matview \
-	 cdc-endpos-in-multi-wal-txn cdc-file-rotation \
+	 cdc-endpos-in-multi-wal-txn cdc-file-rotation cdc-file-rotation-live \
 	 cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput \
 	 cdc-interleaved-commits cdc-resend-after-reconnect cdc-commit-order-resume \
 	 cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort \
@@ -81,6 +81,9 @@ cdc-endpos-in-multi-wal-txn: build
 	$(MAKE) -C $@
 
 cdc-file-rotation: build
+	$(MAKE) -C $@
+
+cdc-file-rotation-live: build
 	$(MAKE) -C $@
 
 cdc-pgoutput: build
@@ -178,7 +181,7 @@ clean-images:
 .PHONY: all-databases three-databases
 .PHONY: cdc-wal2json cdc-test-decoding cdc-endpos-mid-txn cdc-low-level cdc-replica-identity-index cdc-partitioned-target
 .PHONY: cdc-replica-identity-full
-.PHONY: cdc-endpos-in-multi-wal-txn cdc-file-rotation
+.PHONY: cdc-endpos-in-multi-wal-txn cdc-file-rotation cdc-file-rotation-live
 .PHONY: cdc-pgoutput cdc-pgoutput-resume cdc-keepalive cdc-filtering-pgoutput follow-pgoutput follow-filtering
 .PHONY: cdc-interleaved-commits cdc-resend-after-reconnect cdc-commit-order-resume
 .PHONY: cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort cdc-receive-drain-error
