@@ -142,6 +142,7 @@ jobs:
           - follow-data-only
           - follow-pgoutput
           - follow-filtering
+          - follow-resume-snapshot
           - cdc-endpos-in-multi-wal-txn
           - cdc-interleaved-commits
           - cdc-resend-after-reconnect
