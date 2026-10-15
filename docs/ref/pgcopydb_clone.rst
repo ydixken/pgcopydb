@@ -410,6 +410,11 @@ needs to be done again because it failed or was interrupted (table copy,
 index creation, resuming replication slot consuming, resuming applying
 changes at the right LSN position, etc).
 
+A run that re-uses the replication slot of an interrupted run cannot import
+that slot's snapshot anymore. When table data is still left to copy,
+``pgcopydb clone --follow --resume --not-consistent`` refuses to start, see
+``--resume`` below.
+
 Here is an example implement the previous steps:
 
 .. code-block:: bash
@@ -681,6 +686,12 @@ The following options are available to ``pgcopydb clone``:
   Existing sentinel positions, endpos, and apply mode are preserved during setup.
   A retry that reuses a retained slot requires a valid sentinel in its source catalog; missing or unreadable recovery state causes an error rather than reinitialization.
 
+  With ``--follow``, a retry that creates a new replication slot copies table data under that slot's snapshot, even with ``--not-consistent``.
+  A retry that reuses a retained slot cannot import its snapshot, which ended with the run that created the slot, and apply replays every change since the slot LSN.
+  When table data is still left to copy, such a retry with ``--not-consistent`` exits with code 3 before it copies anything, and its error starts with ``Refusing to resume the copy:``.
+  To recover, run ``pgcopydb stream cleanup`` and start over with ``--restart``, adding ``--drop-if-exists`` when the target already has the schema.
+  Resuming without ``--not-consistent`` works only while a ``pgcopydb snapshot --follow`` process still holds the snapshot.
+
 --not-consistent
 
   In order to be consistent, pgcopydb exports a Postgres snapshot by calling
@@ -703,6 +714,8 @@ The following options are available to ``pgcopydb clone``:
   exported does not exists anymore. The pgcopydb command can only resume
   operations with a new snapshot, and thus can not ensure consistency of the
   whole data set, because each run is now using their own snapshot.
+
+  With ``--follow``, a replication slot that the same command creates comes with a live snapshot, and the copy uses it even with ``--not-consistent``, because apply replays every change from that slot's LSN.
 
 --snapshot
 
