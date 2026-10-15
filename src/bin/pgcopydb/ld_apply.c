@@ -522,19 +522,24 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			}
 
 			/*
-			 * No new work from the transform stage.  What outputDB still holds
-			 * below endpos decides two things: whether the current CDC file may
-			 * be retired, and whether the drain is finished.  Ask once.
+			 * No new work from the transform stage.  What outputDB still holds,
+			 * up to endpos when one is set, decides two things: whether the
+			 * current CDC file may be retired, and whether the drain is
+			 * finished.  Ask once.
 			 *
 			 * Only complete transactions count, so an endpos falling inside an
 			 * open transaction still drains empty and the loop terminates.
 			 */
 			ReplayDBOutputMessage pending = { 0 };
 
-			if (context->endpos != InvalidXLogRecPtr &&
-				!ld_store_lookup_output_complete_txn(specs->outputDB,
+			/* binds as INT64: UINT64_MAX would read as -1 and match nothing */
+			uint64_t bound = context->endpos != InvalidXLogRecPtr
+							 ? context->endpos
+							 : INT64_MAX;
+
+			if (!ld_store_lookup_output_complete_txn(specs->outputDB,
 													 context->previousLSN,
-													 context->endpos,
+													 bound,
 													 &pending))
 			{
 				log_error("Failed to look up the transactions left to apply "
@@ -546,11 +551,11 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			/*
 			 * Receive rotates to a new output.db once it has closed the current
 			 * one (done_time_epoch IS NOT NULL in cdc_files); follow it rather
-			 * than spin.  Not while this file still holds committed work below
-			 * endpos, though: every later pass asks the drain question of
-			 * whichever file is open, so moving on would hide that work and let
-			 * the drain report success.  Receive only closes a file it has
-			 * finished writing, so this cannot wait on rows that never arrive.
+			 * than spin.  Not while this file still holds committed work, with
+			 * or without an endpos: later passes read only the next file, so
+			 * moving on would skip that work for good, and a drain to endpos
+			 * would report success.  Receive only closes a file it has finished
+			 * writing, so this cannot wait on rows that never arrive.
 			 */
 			if (pending.lsn == InvalidXLogRecPtr)
 			{

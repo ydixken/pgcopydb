@@ -1591,11 +1591,11 @@ ld_store_cleanup_cdc_files(StreamSpecs *specs,
 
 
 /*
- * ld_store_advance_cdc_files is called by the apply process when
- * stream_transform_from_outputdb() returns no new rows and no progress was
- * made.  It checks whether the current output.db has been closed by the
- * receive process (done_time_epoch IS NOT NULL) and, if so, opens the next
- * output.db / replay.db file pair.
+ * ld_store_advance_cdc_files is called by the apply process when the inline
+ * transform made no progress and the current output.db holds no complete
+ * transaction left to apply.  It checks whether the current output.db has
+ * been closed by the receive process (done_time_epoch IS NOT NULL) and, if
+ * so, opens the next output.db / replay.db file pair.
  *
  * Sets *advanced to true when a new file pair was successfully opened;
  * false when the current pair is still the latest (caller should wait).
