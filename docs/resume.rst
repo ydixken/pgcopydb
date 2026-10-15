@@ -139,8 +139,8 @@ Bypassing consistency issues
 
 When the ``--resume --not-consistent`` options are used, then there is no
 restrictions around snapshot re-use when trying to resume interrupted
-operations. The exception is ``pgcopydb clone --follow`` with table data
-left to copy, see below.
+operations. The exception is ``pgcopydb clone --follow`` on a re-used
+replication slot with table data left to copy, see below.
 
 Consistent copy of the data
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -185,13 +185,11 @@ operations consistently requires the following situation:
      replication slot; from there on, all the client has to do is consume
      from the replication slot.
 
-When the snapshot is gone, ``pgcopydb clone --follow --resume
---not-consistent`` refuses to copy the tables that are left, because apply
-replays every change since the slot LSN and rows copied without the slot
-snapshot would then be applied twice. The command exits with code 3, and its
-error starts with ``Refusing to resume the copy:``. Run ``pgcopydb stream
-cleanup`` and start over with ``--restart``, adding ``--drop-if-exists`` when
-the target already has the schema.
+When it re-uses an existing replication slot, ``pgcopydb clone --follow --not-consistent`` refuses to copy the tables that are left, because apply replays every change since the slot LSN and rows copied without the slot snapshot would then be applied twice.
+That includes a slot whose snapshot a ``pgcopydb snapshot --follow`` process still holds, because ``--not-consistent`` imports no snapshot.
+The command exits with code 3, and its error starts with ``Refusing to resume the copy:``.
+While the ``pgcopydb snapshot --follow`` process runs, resume without ``--not-consistent`` to copy under its snapshot.
+Otherwise run ``pgcopydb stream cleanup`` and start over with ``--restart``, adding ``--drop-if-exists`` when the target already has the schema.
 
 A retry that creates a new replication slot copies under that slot's
 snapshot, even with ``--not-consistent``.

@@ -412,8 +412,8 @@ changes at the right LSN position, etc).
 
 A run that re-uses the replication slot of an interrupted run cannot import
 that slot's snapshot anymore. When table data is still left to copy,
-``pgcopydb clone --follow --resume --not-consistent`` refuses to start, see
-``--resume`` below.
+``pgcopydb clone --follow --resume --not-consistent`` exits before it copies
+any table, see ``--resume`` below.
 
 Here is an example implement the previous steps:
 
@@ -679,7 +679,7 @@ The following options are available to ``pgcopydb clone``:
   ``--resume`` run only if known to have run through to completion on the
   previous one.
 
-  Finally, using ``--resume`` requires the use of ``--not-consistent``.
+  Finally, ``--resume`` requires either ``--not-consistent`` or a snapshot that is still live, given with ``--snapshot`` or found in the work directory.
 
   With ``--follow``, a retry that creates a new replication slot can initialize a missing sentinel at that slot's start LSN.
   This covers failures before initial slot creation, without discarding the work directory.
@@ -687,7 +687,7 @@ The following options are available to ``pgcopydb clone``:
   A retry that reuses a retained slot requires a valid sentinel in its source catalog; missing or unreadable recovery state causes an error rather than reinitialization.
 
   With ``--follow``, a retry that creates a new replication slot copies table data under that slot's snapshot, even with ``--not-consistent``.
-  A retry that reuses a retained slot cannot import its snapshot, which ended with the run that created the slot, and apply replays every change since the slot LSN.
+  A retry that reuses a retained slot cannot import its snapshot once the process that created the slot has ended, and apply replays every change since the slot LSN.
   When table data is still left to copy, such a retry with ``--not-consistent`` exits with code 3 before it copies anything, and its error starts with ``Refusing to resume the copy:``.
   To recover, run ``pgcopydb stream cleanup`` and start over with ``--restart``, adding ``--drop-if-exists`` when the target already has the schema.
   Resuming without ``--not-consistent`` works only while a ``pgcopydb snapshot --follow`` process still holds the snapshot.
@@ -716,6 +716,8 @@ The following options are available to ``pgcopydb clone``:
   whole data set, because each run is now using their own snapshot.
 
   With ``--follow``, a replication slot that the same command creates comes with a live snapshot, and the copy uses it even with ``--not-consistent``, because apply replays every change from that slot's LSN.
+  With a slot that the command re-uses, left by an interrupted run or held by ``pgcopydb snapshot --follow``, ``--not-consistent`` imports no snapshot.
+  While table data is left to copy, the command then exits with code 3 before it copies any table, and its error starts with ``Refusing to resume the copy:``.
 
 --snapshot
 
