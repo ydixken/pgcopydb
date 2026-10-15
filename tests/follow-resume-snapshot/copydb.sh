@@ -11,12 +11,12 @@ scenario=${1:-all}
 case "${scenario}" in
     all)
         status=0
-        for scenario in guard fresh; do
+        for scenario in guard fresh rejoin; do
             bash "$0" "${scenario}" || status=1
         done
         exit "${status}"
         ;;
-    guard|fresh) ;;
+    guard|fresh|rejoin) ;;
     *) echo "Unknown scenario: ${scenario}" >&2; exit 1 ;;
 esac
 
@@ -29,6 +29,7 @@ mkdir -p "${TMPDIR}"
 clone_args=(--dir "${workdir}" --table-jobs 1 --drop-if-exists
     --follow --plugin pgoutput --slot-name "${slot}" --origin "${slot}")
 clone_pid='' gate_pid=''
+tables=(done_c gate_a pending_b)
 free_gate="select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'copy_gate'"
 
 cleanup() {
@@ -117,20 +118,29 @@ wait_exit() {
     equal "${rc}" 0 "the ${name} clone exit status"
 }
 
+kill_clone() {
+    kill -KILL -- "-${clone_pid}"
+    wait "${clone_pid}" || true
+    clone_pid=
+    poll 'the killed run to leave the slot' slot_idle
+}
+
+# the single COPY worker takes the largest table first: done_c is copied,
+# then gate_a waits on the gate while pending_b is still to be copied
 seed() {
-    source_sql "drop table if exists gate_a, pending_b;
+    source_sql "drop table if exists done_c, gate_a, pending_b;
         drop function if exists copy_gate();
         create function copy_gate() returns boolean language plpgsql
             as \$\$ begin perform pg_advisory_xact_lock_shared(42); return true; end \$\$;
+        create table done_c(id integer primary key, payload text not null);
+        insert into done_c select g, repeat(md5(g::text), 8) from generate_series(1, 20000) g;
         create table gate_a(id integer primary key, payload text not null check (copy_gate()));
         insert into gate_a select g, repeat(md5(g::text), 4) from generate_series(1, 5000) g;
         create table pending_b(id integer primary key, payload text not null);
         insert into pending_b select g, 'before the slot' from generate_series(1, 10) g;
-        analyze gate_a, pending_b"
+        analyze done_c, gate_a, pending_b"
 }
 
-# gate_a is the larger table, so the single COPY worker takes it first and
-# pending_b is still waiting when rows land behind the slot
 follow_through() {
     local name=$1 first=$2
     shift 2
@@ -139,11 +149,18 @@ follow_through() {
     poll "the ${name} COPY of gate_a to wait on the gate" copy_blocked
     equal "$(source_slots '')" 1 "the ${name} run created its slot"
     source_sql "insert into pending_b select g, 'after the slot' from generate_series(${first}, ${first} + 9) g"
+    equal "$(target_sql 'select count(*) from pending_b')" 0 "${name}: pending_b is not copied yet"
     release_gate
+    finish "${name}"
+}
+
+# stop the clone at the current source LSN, then compare every table
+finish() {
+    local name=$1
     poll "the ${name} clone steps" steps_done "${name}"
     pgcopydb stream sentinel set endpos --current --dir "${workdir}" >>"${TMPDIR}/endpos.log" 2>&1
     wait_exit "${name}"
-    for table in gate_a pending_b; do
+    for table in "${tables[@]}"; do
         equal "$(target_sql "$(digest "${table}")")" "$(source_sql "$(digest "${table}")")" "${name}: ${table} on the target matches the source"
     done
 }
@@ -164,17 +181,31 @@ if test "${scenario}" = fresh; then
     exit 0
 fi
 
+if test "${scenario}" = rejoin; then
+    # a runner restart during CDC: the copy is done, so a resume on the
+    # retained slot goes on with apply instead of refusing
+    start_clone first
+    poll 'the first clone steps' steps_done first
+    kill_clone
+    source_sql "insert into pending_b select g, 'after the kill' from generate_series(4001, 4010) g"
+    start_clone rejoin --resume --not-consistent
+    finish rejoin
+    grep -F "Re-using replication slot \"${slot}\"" "${TMPDIR}/rejoin.log" || fail 'the rejoin did not re-use the slot'
+    ! grep -F 'Refusing to resume the copy: ' "${TMPDIR}/rejoin.log" || fail 'the rejoin refused a finished copy'
+    cleanup_replication
+    echo 'PASS [rejoin]: a resume after the copy re-uses its slot and applies the new rows'
+    exit 0
+fi
+
 hold_gate
 start_clone attempt --restart
 poll 'the first COPY of gate_a to wait on the gate' copy_blocked
-kill -KILL -- "-${clone_pid}"
-wait "${clone_pid}" || true
-clone_pid=
-poll 'the killed run to leave the slot' slot_idle
+kill_clone
 target_sql "select pg_terminate_backend(pid) from pg_locks where locktype = 'advisory' and objid = 42 and not granted" >/dev/null
 poll 'the killed COPY to end on the target' copy_ended
 equal "$(sqlite 'select slot_name from replication_slot')" "${slot}" 'the work directory kept the slot'
-equal "$(sqlite 'select count(*) from summary where tableoid is not null and done_time_epoch is not null')" 0 'no table copy finished before the kill'
+equal "$(sqlite 'select group_concat(t.relname) from summary s join s_table t on t.oid = s.tableoid where s.done_time_epoch is not null')" done_c 'only done_c finished before the kill'
+equal "$(target_sql 'select count(*) from done_c')" 20000 'done_c is on the target'
 equal "$(target_sql 'select count(*) from pending_b')" 0 'pending_b is still empty on the target'
 
 source_sql "insert into pending_b select g, 'after the slot' from generate_series(1001, 1010) g"
@@ -185,7 +216,7 @@ status=0
 timeout 90s pgcopydb clone "${clone_args[@]}" --resume --not-consistent >"${TMPDIR}/resume.log" 2>&1 || status=$?
 equal "$(target_sql 'select count(*) from pending_b')" 0 'the resume copied pending_b without the slot snapshot'
 equal "${status}" 3 'the resume exit status'
-grep -F 'Refusing to resume the copy: ' "${TMPDIR}/resume.log" || fail 'the resume did not say why it refused'
+grep -F 'Refusing to resume the copy: 2 of 3 tables still need their data' "${TMPDIR}/resume.log" || fail 'the resume did not say why it refused'
 equal "$(sqlite 'select * from replication_slot')" "${slot_before}" 'the refused resume kept the saved slot'
 equal "$(source_slots '')" 1 'the refused resume kept the source slot'
 equal "$(origin)" "${origin_before}" 'the refused resume kept the target origin'
