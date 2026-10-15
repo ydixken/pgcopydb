@@ -189,7 +189,7 @@ When it re-uses an existing replication slot, ``pgcopydb clone --follow --not-co
 That includes a slot whose snapshot a ``pgcopydb snapshot --follow`` process still holds, because ``--not-consistent`` imports no snapshot.
 The command exits with code 3, and its error starts with ``Refusing to resume the copy:``.
 While the ``pgcopydb snapshot --follow`` process runs, resume without ``--not-consistent`` to copy under its snapshot.
-Otherwise run ``pgcopydb stream cleanup`` and start over with ``--restart``, adding ``--drop-if-exists`` when the target already has the schema.
+Otherwise run ``pgcopydb stream cleanup`` with the same ``--dir``, ``--slot-name`` and ``--origin`` as the failed run, and start over with ``--restart``, adding ``--drop-if-exists`` when the target already has the schema.
 
 A retry that creates a new replication slot copies under that slot's
 snapshot, even with ``--not-consistent``.

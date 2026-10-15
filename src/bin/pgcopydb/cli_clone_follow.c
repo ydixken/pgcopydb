@@ -718,10 +718,12 @@ clone_and_follow(CopyDataSpec *copySpecs)
 					  slot->snapshot,
 					  slot->slotName,
 					  LSN_FORMAT_ARGS(slot->lsn));
-			log_info("Run pgcopydb stream cleanup, then start over with "
-					 "--restart (and --drop-if-exists when the target already "
-					 "has the schema), or resume without --not-consistent "
-					 "while pgcopydb snapshot --follow keeps the snapshot alive");
+			log_info("Run pgcopydb stream cleanup with the same --dir, "
+					 "--slot-name and --origin as this run, then start over "
+					 "with --restart (and --drop-if-exists when the target "
+					 "already has the schema), or resume without "
+					 "--not-consistent while pgcopydb snapshot --follow keeps "
+					 "the snapshot alive");
 			exit(EXIT_CODE_BAD_STATE);
 		}
 	}
