@@ -686,6 +686,49 @@ clone_and_follow(CopyDataSpec *copySpecs)
 	}
 
 	/*
+	 * A re-used slot's snapshot is not imported under --not-consistent, and
+	 * apply replays every change since the slot LSN, so a table copied now
+	 * would get the rows written since then twice.
+	 */
+	if (!copySpecs->consistent &&
+		!copySpecs->sourceSnapshot.exportedCreateSlotSnapshot &&
+		!copySpecs->runState.tableCopyIsDone)
+	{
+		DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
+		CatalogCounts count = { 0 };
+		CatalogProgressCount done = { 0 };
+
+		if (!catalog_count_objects(sourceDB, &count) ||
+			!catalog_count_summary_done(sourceDB, &done))
+		{
+			/* errors have already been logged */
+			exit(EXIT_CODE_INTERNAL_ERROR);
+		}
+
+		if (count.tables > done.table)
+		{
+			ReplicationSlot *slot = &(streamSpecs.slot);
+
+			log_fatal("Refusing to resume the copy: "
+					  "%lld of %lld tables still need their data, "
+					  "and --not-consistent would copy them without snapshot \"%s\" "
+					  "of the re-used replication slot \"%s\" created at %X/%X",
+					  (long long) (count.tables - done.table),
+					  (long long) count.tables,
+					  slot->snapshot,
+					  slot->slotName,
+					  LSN_FORMAT_ARGS(slot->lsn));
+			log_info("Run pgcopydb stream cleanup with the same --dir, "
+					 "--slot-name and --origin as this run, then start over "
+					 "with --restart (and --drop-if-exists when the target "
+					 "already has the schema), or resume without "
+					 "--not-consistent while pgcopydb snapshot --follow keeps "
+					 "the snapshot alive");
+			exit(EXIT_CODE_BAD_STATE);
+		}
+	}
+
+	/*
 	 * Preparation and snapshot are now done, time to fork our two main worker
 	 * processes.
 	 *

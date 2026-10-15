@@ -162,7 +162,11 @@ copydb_set_snapshot(CopyDataSpec *copySpecs)
 		return false;
 	}
 
-	if (copySpecs->consistent)
+	/*
+	 * Apply replays every change since the slot LSN, so a copy for a slot this
+	 * process created reads through its snapshot even under --not-consistent.
+	 */
+	if (copySpecs->consistent || snapshot->exportedCreateSlotSnapshot)
 	{
 		/*
 		 * As Postgres docs for SET TRANSACTION SNAPSHOT say:

@@ -18,7 +18,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-receive-status-interval cdc-apply-wakeup catalog-stmt-cache \
 	 cdc-receive-group-commit cdc-endpos-before-txn \
 	 follow-wal2json follow-9.6 follow-data-only \
-	 follow-pgoutput follow-filtering;
+	 follow-pgoutput follow-filtering follow-resume-snapshot;
 
 pagila: build
 	$(MAKE) -C $@
@@ -144,6 +144,9 @@ follow-pgoutput: build
 follow-filtering: build
 	$(MAKE) -C $@
 
+follow-resume-snapshot: build
+	$(MAKE) -C $@
+
 timescaledb: build
 	$(MAKE) -C $@
 
@@ -187,5 +190,5 @@ clean-images:
 .PHONY: cdc-truncate-multi cdc-copy-multi-insert cdc-origin-abort cdc-receive-drain-error
 .PHONY: cdc-receive-reconnect-dying-source cdc-receive-status-interval cdc-apply-wakeup
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn
-.PHONY: follow-wal2json follow-9.6
+.PHONY: follow-wal2json follow-9.6 follow-resume-snapshot
 .PHONY: timescaledb citus
