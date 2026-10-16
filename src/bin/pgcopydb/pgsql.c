@@ -471,6 +471,18 @@ log_connection_error(PGconn *connection, int logLevel)
 
 
 /*
+ * A target backend whose client vanished without FIN or RST keeps its locks
+ * until the server notices: 70 s with these, about 2 h at kernel defaults.
+ */
+static GUC targetKeepaliveSettings[] = {
+	{ "tcp_keepalives_idle", "10" },
+	{ "tcp_keepalives_interval", "10" },
+	{ "tcp_keepalives_count", "6" },
+	{ NULL, NULL }
+};
+
+
+/*
  * pgsql_open_connection opens a PostgreSQL connection, given a PGSQL client
  * instance. If a connection is already open in the client (it's not NULL),
  * then this errors, unless we are inside a transaction opened by pgsql_begin.
@@ -595,6 +607,24 @@ pgsql_open_connection(PGSQL *pgsql)
 	PQsetNoticeProcessor(pgsql->connection,
 						 &pgAutoCtlDefaultNoticeProcessor,
 						 NULL);
+
+	/* a single-statement connection would close after the first SET */
+	if (pgsql->connectionType == PGSQL_CONN_TARGET)
+	{
+		ConnectionStatementType statementType = pgsql->connectionStatementType;
+
+		pgsql->connectionStatementType = PGSQL_CONNECTION_MULTI_STATEMENT;
+		bool keepalivesSet = pgsql_set_gucs(pgsql, targetKeepaliveSettings);
+		pgsql->connectionStatementType = statementType;
+
+		if (!keepalivesSet)
+		{
+			log_error("Failed to set TCP keepalives on the target connection, "
+					  "see above for details");
+			pgsql_finish(pgsql);
+			return NULL;
+		}
+	}
 
 	return pgsql->connection;
 }
