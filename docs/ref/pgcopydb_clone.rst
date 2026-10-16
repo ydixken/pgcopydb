@@ -457,9 +457,13 @@ The following options are available to ``pgcopydb clone``:
 
   Connection string to the target Postgres instance.
 
-  Every session that pgcopydb opens on the target sets ``tcp_keepalives_idle`` and ``tcp_keepalives_interval`` to 10 seconds and ``tcp_keepalives_count`` to 6.
-  When a pgcopydb process dies and its connection close never reaches the target, the target ends that session and releases its locks within about 70 seconds, instead of after the kernel default of about two hours.
-  The ``pg_dump`` and ``pg_restore`` sessions do not get these settings.
+  pgcopydb sets ``tcp_keepalives_idle`` and ``tcp_keepalives_interval`` to 10 seconds and ``tcp_keepalives_count`` to 6 on its target sessions, over any server, role or connection string value.
+  The ``pg_dump`` and ``pg_restore`` sessions, and the session in which ``pgcopydb compare`` reads the target's catalogs, do not get these settings.
+  When a session waits on its client, for example in ``COPY FROM STDIN`` or idle in a transaction, and the client stays unreachable for about 70 seconds, the target ends the session and releases its locks.
+  That covers a pgcopydb process that died without its connection close reaching the target, which the target would otherwise notice only after about two hours at the kernel defaults.
+  It also ends a live session whose client is unreachable for that long, such as across a network partition.
+  A session busy in a long statement, such as ``CREATE INDEX``, keeps its locks until that statement ends.
+  Behind a connection pooler, these settings apply only to the connection between the pooler and the target.
 
 --dir
 
