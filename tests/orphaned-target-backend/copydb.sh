@@ -74,12 +74,17 @@ copy_orphaned() {
     test "$(target_sql "select wait_event from pg_stat_activity where pid = ${copy_pid}")" = ClientRead
 }
 
+own_group() {
+    test "$(ps -o pgid= -p "${clone_pid}" | tr -d ' ')" = "${clone_pid}"
+}
+
 start_clone() {
     local name=$1
     shift
     setsid pgcopydb clone "${clone_args[@]}" "$@" >"${TMPDIR}/${name}.log" 2>&1 &
     clone_pid=$!
-    equal "$(ps -o pgid= -p "${clone_pid}" | tr -d ' ')" "${clone_pid}" 'pgcopydb owns its process group'
+    # $! is known before the child has called setsid()
+    poll 'pgcopydb to own its process group' own_group
 }
 
 # well beyond the socket buffers, so the run is still sending when it dies
