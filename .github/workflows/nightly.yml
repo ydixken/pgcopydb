@@ -117,6 +117,7 @@ jobs:
           - timescaledb
           - all-databases
           - three-databases
+          - orphaned-target-backend
           - cdc-low-level
           - cdc-test-decoding
           - cdc-endpos-mid-txn
