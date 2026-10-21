@@ -272,6 +272,7 @@ typedef struct MultiDbTableEntry
 	int64_t bytes;
 	bool excludeData;
 	int partCount;               /* 0 when not partitioned */
+	bool allPartsDone;           /* split, and every part done on a previous run */
 } MultiDbTableEntry;
 
 

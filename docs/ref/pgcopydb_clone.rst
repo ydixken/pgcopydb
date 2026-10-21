@@ -683,7 +683,7 @@ The following options are available to ``pgcopydb clone``:
   back.
 
   A table split for :ref:`same_table_concurrency` is kept as is when all its parts were copied.
-  Without ``--all-databases``, a table with only some of its parts copied is truncated and all its parts are copied again, because a part can commit its COPY before pgcopydb records it as done.
+  A table with only some of its parts copied is truncated and all its parts are copied again, because a part can commit its COPY before pgcopydb records it as done.
 
   Same reasonning applies to the CREATE INDEX commands and ALTER TABLE
   commands that pgcopydb issues, those commands are skipped on a

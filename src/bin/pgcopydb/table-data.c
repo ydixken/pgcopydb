@@ -27,6 +27,9 @@
 
 
 static bool copydb_copy_supervisor_add_table_hook(void *ctx, SourceTable *table);
+static bool copydb_prepare_split_table(DatabaseCatalog *sourceDB, PGSQL *dst,
+									   SourceTable *table, bool tableCopyIsDone,
+									   bool *allPartsDone);
 static bool copydb_update_copy_stats_hook(void *ctx, CopyStats *stats);
 
 /*
@@ -625,55 +628,16 @@ copydb_copy_supervisor_add_table_hook(void *ctx, SourceTable *table)
 		 * are, and queue one part: it elects the worker that queues the indexes,
 		 * which a worker taking two done parts would otherwise win twice.
 		 */
-		bool allPartsDone = specs->runState.tableCopyIsDone;
+		bool allPartsDone = false;
 
-		if (!allPartsDone)
-		{
-			CopyTableDataSpec tableSpecs = { .sourceTable = table };
-
-			if (!summary_table_count_parts_done(&(specs->catalogs.source),
-												&tableSpecs))
-			{
-				/* errors have already been logged */
-				return false;
-			}
-
-			allPartsDone =
-				tableSpecs.countPartsDone == table->partition.partCount;
-		}
-
-		bool granted = false;
-
-		if (allPartsDone)
-		{
-			log_info("Skipping TRUNCATE of %s, all %d parts already done "
-					 "on a previous run",
-					 table->qname,
-					 table->partition.partCount);
-		}
-		else if (!pgsql_has_table_privilege(dst, table->qname, "TRUNCATE",
-											&granted))
+		if (!copydb_prepare_split_table(&(specs->catalogs.source),
+										dst,
+										table,
+										specs->runState.tableCopyIsDone,
+										&allPartsDone))
 		{
 			/* errors have already been logged */
 			return false;
-		}
-
-		if (granted)
-		{
-			char relkind = '\0';
-
-			/*
-			 * Best-effort: on lookup failure relkind stays '\0' and we issue
-			 * TRUNCATE ONLY (the original behavior). pgsql_get_table_relkind
-			 * has already logged the underlying error.
-			 */
-			(void) pgsql_get_table_relkind(dst, table->qname, &relkind);
-
-			if (!pgsql_truncate(dst, table->qname, relkind, table->datname))
-			{
-				/* errors have already been logged */
-				return false;
-			}
 		}
 
 		int queuedParts = allPartsDone ? 1 : table->partition.partCount;
@@ -687,6 +651,80 @@ copydb_copy_supervisor_add_table_hook(void *ctx, SourceTable *table)
 				/* errors have already been logged */
 				return false;
 			}
+		}
+	}
+
+	return true;
+}
+
+
+/*
+ * copydb_prepare_split_table truncates a split table on the target unless all
+ * its parts were done on a previous run, which it reports in allPartsDone.
+ */
+static bool
+copydb_prepare_split_table(DatabaseCatalog *sourceDB, PGSQL *dst,
+						   SourceTable *table, bool tableCopyIsDone,
+						   bool *allPartsDone)
+{
+	*allPartsDone = tableCopyIsDone;
+
+	if (!*allPartsDone)
+	{
+		CopyTableDataSpec tableSpecs = { .sourceTable = table };
+
+		if (!summary_table_count_parts_done(sourceDB, &tableSpecs))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		*allPartsDone = tableSpecs.countPartsDone == table->partition.partCount;
+	}
+
+	if (*allPartsDone)
+	{
+		if (table->datname[0] != '\0')
+		{
+			log_info("%s: Skipping TRUNCATE of %s, all %d parts already done "
+					 "on a previous run",
+					 table->datname,
+					 table->qname,
+					 table->partition.partCount);
+		}
+		else
+		{
+			log_info("Skipping TRUNCATE of %s, all %d parts already done "
+					 "on a previous run",
+					 table->qname,
+					 table->partition.partCount);
+		}
+		return true;
+	}
+
+	bool granted = false;
+
+	if (!pgsql_has_table_privilege(dst, table->qname, "TRUNCATE", &granted))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (granted)
+	{
+		char relkind = '\0';
+
+		/*
+		 * Best-effort: on lookup failure relkind stays '\0' and we issue
+		 * TRUNCATE ONLY (the original behavior). pgsql_get_table_relkind
+		 * has already logged the underlying error.
+		 */
+		(void) pgsql_get_table_relkind(dst, table->qname, &relkind);
+
+		if (!pgsql_truncate(dst, table->qname, relkind, table->datname))
+		{
+			/* errors have already been logged */
+			return false;
 		}
 	}
 
@@ -1829,10 +1867,9 @@ compare_multidb_table_entry_by_bytes(const void *a, const void *b)
 
 
 /*
- * copydb_copy_worker_queue_tables_multidb is the supervisor process for the
- * global COPY phase.  It opens each per-database source catalog, collects all
- * tables with their sizes, sorts them by size descending, enqueues them, then
- * sends STOP messages.
+ * copydb_copy_worker_queue_tables_multidb reads every per-database catalog,
+ * truncates on the target each split table not fully copied before, enqueues
+ * all tables largest first, then sends the STOP messages.
  */
 bool
 copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
@@ -1869,7 +1906,7 @@ copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
 		log_info("Global COPY supervisor: reading table catalog for \"%s\"",
 				 info->datname);
 
-		/* open the per-database source catalog read-only */
+		/* open the per-database source catalog, which the filler only reads */
 		DatabaseCatalog sdb = { 0 };
 		sdb.type = DATABASE_CATALOG_TYPE_SOURCE;
 		strlcpy(sdb.dbfile, info->topdir, sizeof(sdb.dbfile));
@@ -1894,6 +1931,17 @@ copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
 			return false;
 		}
 
+		/* connects per statement, only for split tables not fully copied */
+		PGSQL dst = { 0 };
+
+		if (!pgsql_init(&dst, info->target_pguri, PGSQL_CONN_TARGET))
+		{
+			/* errors have already been logged */
+			catalog_close(&sdb);
+			free(entries);
+			return false;
+		}
+
 		/* iterate tables in this database's catalog */
 		SourceTableIterator iter = { .catalog = &sdb, .table = NULL };
 
@@ -1914,6 +1962,7 @@ copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
 						  info->datname);
 				catalog_iter_s_table_finish(&iter);
 				catalog_close(&sdb);
+				pgsql_finish(&dst);
 				free(entries);
 				return false;
 			}
@@ -1937,6 +1986,7 @@ copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
 					log_error(ALLOCATION_FAILED_ERROR);
 					catalog_iter_s_table_finish(&iter);
 					catalog_close(&sdb);
+					pgsql_finish(&dst);
 					free(entries);
 					return false;
 				}
@@ -1949,7 +1999,25 @@ copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
 			e->bytes = table->bytes;
 			e->excludeData = table->excludeData;
 			e->partCount = table->partition.partCount;
+			e->allPartsDone = false;
+
+			/* before any part is queued, as the single-database filler does */
+			if (e->partCount > 0 && !e->excludeData &&
+				!copydb_prepare_split_table(&sdb, &dst, table, false,
+											&(e->allPartsDone)))
+			{
+				log_error("Failed to prepare split table %s of database \"%s\"",
+						  table->qname,
+						  info->datname);
+				catalog_iter_s_table_finish(&iter);
+				catalog_close(&sdb);
+				pgsql_finish(&dst);
+				free(entries);
+				return false;
+			}
 		}
+
+		pgsql_finish(&dst);
 
 		if (!catalog_iter_s_table_finish(&iter))
 		{
@@ -1959,8 +2027,10 @@ copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
 
 		if (!catalog_close(&sdb))
 		{
-			log_warn("Failed to close source catalog for database \"%s\"",
-					 info->datname);
+			log_error("Failed to close source catalog for database \"%s\"",
+					  info->datname);
+			free(entries);
+			return false;
 		}
 	}
 
@@ -1998,8 +2068,13 @@ copydb_copy_worker_queue_tables_multidb(CopyDataSpec *parentSpecs)
 		}
 		else
 		{
-			/* partitioned table: enqueue each partition separately */
-			for (int p = 1; p <= e->partCount; p++)
+			/*
+			 * partitioned table: enqueue each partition separately, or only
+			 * the first one when all are done, to elect its index worker once
+			 */
+			int queuedParts = e->allPartsDone ? 1 : e->partCount;
+
+			for (int p = 1; p <= queuedParts; p++)
 			{
 				if (!copydb_add_copy_for_db(parentSpecs, e->oid, p, e->datname))
 				{
