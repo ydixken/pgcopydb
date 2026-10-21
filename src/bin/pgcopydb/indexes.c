@@ -99,12 +99,19 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	}
 
 	/*
-	 * Remove stale process table entries from any previous run before workers
-	 * start.  Entries left by crashed workers or by a prior container whose
-	 * PID namespace was reset would cause resume logic to misidentify live
-	 * PIDs (issue #692) and could block retried index creation (issue #881).
+	 * Remove stale process table entries, and the summary rows of unfinished
+	 * index builds, from any previous run before workers start.  Entries left
+	 * by crashed workers or by a prior container whose PID namespace was reset
+	 * would cause resume logic to misidentify live PIDs (issue #692) and could
+	 * block retried index creation (issue #881).
 	 */
 	if (!catalog_delete_all_process_entries(sourceDB))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!summary_delete_incomplete_index_build(sourceDB))
 	{
 		/* errors have already been logged */
 		return false;

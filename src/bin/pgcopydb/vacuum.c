@@ -389,6 +389,19 @@ vacuum_analyze_table_by_oid(CopyDataSpec *specs, uint32_t oid)
 		return false;
 	}
 
+	if (!summary_lookup_vacuum(sourceDB, &tableSpecs))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (tableSpecs.vSummary.doneTime > 0)
+	{
+		log_info("Skipping VACUUM ANALYZE %s, already done on a previous run",
+				 table.qname);
+		return true;
+	}
+
 	PGSQL dst = { 0 };
 
 	/* initialize our connection to the target database */
