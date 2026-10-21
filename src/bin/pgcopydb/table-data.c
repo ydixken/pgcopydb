@@ -298,8 +298,8 @@ copydb_copy_supervisor(CopyDataSpec *specs)
 	DatabaseCatalog *sourceDB = &(specs->catalogs.source);
 
 	/*
-	 * Before forking any workers, open the catalog briefly to clear two kinds
-	 * of stale state left by a previous run:
+	 * Before forking any workers, open the catalog briefly to clear three
+	 * kinds of stale state left by a previous run:
 	 *
 	 *  1. process table entries: written by workers that crashed without
 	 *     calling catalog_delete_process.  Stale entries make the progress
@@ -311,6 +311,9 @@ copydb_copy_supervisor(CopyDataSpec *specs)
 	 *     Inside a Docker container whose PID namespace was reset the same
 	 *     numeric PID is often recycled by an unrelated process, so kill()
 	 *     returns 0 and pgcopydb wrongly refuses to copy the table (#692).
+	 *
+	 *  3. split tables with only some parts done, and the parts-done
+	 *     election, see summary_reset_split_tables.
 	 *
 	 * After cleanup, close the catalog again so that table-data workers
 	 * (forked next) open their own fresh connections (#881).
@@ -328,6 +331,12 @@ copydb_copy_supervisor(CopyDataSpec *specs)
 	}
 
 	if (!summary_delete_incomplete_table_copy(sourceDB))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!summary_reset_split_tables(sourceDB))
 	{
 		/* errors have already been logged */
 		return false;
@@ -611,10 +620,39 @@ copydb_copy_supervisor_add_table_hook(void *ctx, SourceTable *table)
 		 *
 		 * Before adding the table to be processed by workers, truncate it on
 		 * the target database now, avoiding concurrency issues.
+		 *
+		 * Workers skip parts done on a previous run, so keep a table when all
+		 * are, and queue one part: it elects the worker that queues the indexes,
+		 * which a worker taking two done parts would otherwise win twice.
 		 */
+		bool allPartsDone = specs->runState.tableCopyIsDone;
+
+		if (!allPartsDone)
+		{
+			CopyTableDataSpec tableSpecs = { .sourceTable = table };
+
+			if (!summary_table_count_parts_done(&(specs->catalogs.source),
+												&tableSpecs))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+
+			allPartsDone =
+				tableSpecs.countPartsDone == table->partition.partCount;
+		}
+
 		bool granted = false;
 
-		if (!pgsql_has_table_privilege(dst, table->qname, "TRUNCATE", &granted))
+		if (allPartsDone)
+		{
+			log_info("Skipping TRUNCATE of %s, all %d parts already done "
+					 "on a previous run",
+					 table->qname,
+					 table->partition.partCount);
+		}
+		else if (!pgsql_has_table_privilege(dst, table->qname, "TRUNCATE",
+											&granted))
 		{
 			/* errors have already been logged */
 			return false;
@@ -638,7 +676,9 @@ copydb_copy_supervisor_add_table_hook(void *ctx, SourceTable *table)
 			}
 		}
 
-		for (int i = 0; i < table->partition.partCount; i++)
+		int queuedParts = allPartsDone ? 1 : table->partition.partCount;
+
+		for (int i = 0; i < queuedParts; i++)
 		{
 			int partNumber = i + 1;
 

@@ -403,6 +403,114 @@ summary_delete_incomplete_table_copy(DatabaseCatalog *catalog)
 
 
 /*
+ * summary_delete_incomplete_index_build removes the index rows a previous run
+ * left without a done time, for the reason given at
+ * summary_delete_incomplete_table_copy: their pid may be reused (#692).
+ */
+bool
+summary_delete_incomplete_index_build(DatabaseCatalog *catalog)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: summary_delete_incomplete_index_build: db is NULL");
+		return false;
+	}
+
+	char *sql =
+		"delete from summary "
+		" where indexoid is not null "
+		"   and done_time_epoch is null";
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	SQLiteQuery query = { 0 };
+
+	if (!catalog_sql_prepare(db, sql, &query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	if (!catalog_sql_execute_once(&query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return true;
+}
+
+
+/*
+ * summary_reset_split_tables forgets the parts of a split table that has only
+ * some parts done, so that all of them are copied again after its TRUNCATE,
+ * and clears s_table_parts_done, whose pids belong to a previous run.
+ */
+bool
+summary_reset_split_tables(DatabaseCatalog *catalog)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: summary_reset_split_tables: db is NULL");
+		return false;
+	}
+
+	char *sqls[] = {
+		/* a part can commit its COPY and die before its done row is written */
+		"delete from summary "
+		" where tableoid in "
+		"       (select p.oid "
+		"          from s_table_part p "
+		"               left join summary s "
+		"                      on s.tableoid = p.oid "
+		"                     and s.partnum = p.partnum "
+		"                     and s.pid > 0 and s.done_time_epoch > 0 "
+		"      group by p.oid "
+		"        having count(s.tableoid) between 1 and count(*) - 1)",
+
+		"delete from s_table_parts_done"
+	};
+
+	int count = sizeof(sqls) / sizeof(sqls[0]);
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	for (int i = 0; i < count; i++)
+	{
+		SQLiteQuery query = { 0 };
+
+		if (!catalog_sql_prepare(db, sqls[i], &query) ||
+			!catalog_sql_execute_once(&query))
+		{
+			/* errors have already been logged */
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
+	}
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return true;
+}
+
+
+/*
  * summary_add_table INSERTs a SourceTable summary entry to our internal
  * catalogs database.
  */
@@ -911,6 +1019,89 @@ summary_table_parts_done_fetch(SQLiteQuery *query)
 
 
 /*
+ * summary_lookup_vacuum looks-up for a table vacuum summary in our catalogs,
+ * in case the given table has already been vacuumed in a previous run.
+ */
+bool
+summary_lookup_vacuum(DatabaseCatalog *catalog, CopyTableDataSpec *tableSpecs)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: summary_lookup_vacuum: db is NULL");
+		return false;
+	}
+
+	char *sql =
+		"select coalesce(done_time_epoch, 0) from vacuum_summary "
+		" where tableoid = $1";
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	SQLiteQuery query = {
+		.context = &(tableSpecs->vSummary),
+		.fetchFunction = &summary_vacuum_fetch
+	};
+
+	if (!catalog_sql_prepare(db, sql, &query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	/* bind our parameters now */
+	BindParam params[] = {
+		{
+			BIND_PARAMETER_TYPE_INT64, "tableoid",
+			tableSpecs->sourceTable->oid, NULL
+		}
+	};
+
+	int count = sizeof(params) / sizeof(params[0]);
+
+	if (!catalog_sql_bind(&query, params, count))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	/* now execute the query, which returns zero or one row */
+	if (!catalog_sql_execute_once(&query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return true;
+}
+
+
+/*
+ * summary_vacuum_fetch fetches the done time of a vacuum_summary row.
+ */
+bool
+summary_vacuum_fetch(SQLiteQuery *query)
+{
+	CopyVacuumTableSummary *vacuumSummary =
+		(CopyVacuumTableSummary *) query->context;
+
+	vacuumSummary->doneTime = sqlite3_column_int64(query->ppStmt, 0);
+
+	return true;
+}
+
+
+/*
  * summary_add_vacuum INSERTs a SourceTable vacuum summary entry to our
  * internal catalogs database.
  */
@@ -940,8 +1131,9 @@ summary_add_vacuum(DatabaseCatalog *catalog, CopyTableDataSpec *tableSpecs)
 		return false;
 	}
 
+	/* replaces the row of a VACUUM that a killed run never finished */
 	char *sql =
-		"insert into vacuum_summary(pid, tableoid, start_time_epoch)"
+		"insert or replace into vacuum_summary(pid, tableoid, start_time_epoch)"
 		"values($1, $2, $3)";
 
 	if (!semaphore_lock(&(catalog->sema)))

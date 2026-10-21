@@ -320,10 +320,14 @@ The following options are available to ``pgcopydb copy`` sub-commands:
   ``--resume``: the COPY command in Postgres is transactional and was rolled
   back.
 
+  A table split for :ref:`same_table_concurrency` is kept as is when all its parts were copied.
+  When only some of its parts were copied, the table is truncated and all its parts are copied again, because a part can commit its COPY before pgcopydb records it as done.
+
   Same reasonning applies to the CREATE INDEX commands and ALTER TABLE
   commands that pgcopydb issues, those commands are skipped on a
   ``--resume`` run only if known to have run through to completion on the
   previous one.
+  The same holds for the VACUUM ANALYZE of each table.
 
   Finally, using ``--resume`` requires the use of ``--not-consistent``.
 
