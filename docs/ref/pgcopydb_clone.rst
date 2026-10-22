@@ -698,6 +698,7 @@ The following options are available to ``pgcopydb clone``:
   previous one.
   The same holds for the VACUUM ANALYZE of each table.
   A resume skips the large-object step only when the previous run finished it, and the configuration rows of an extension only when the previous run finished copying them.
+  A large object that a resume copies again is cut to its length on the source.
 
   Finally, ``--resume`` requires either ``--not-consistent`` or a snapshot that is still live, given with ``--snapshot`` or found in the work directory.
 

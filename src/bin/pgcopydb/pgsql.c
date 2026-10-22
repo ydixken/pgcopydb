@@ -3670,6 +3670,9 @@ pg_copy_large_object(PGSQL *src,
 	int bytesRead = 0;
 	int bytesWritten = 0;
 
+	/* *bytesTransmitted only adds to the count the caller passes in */
+	pg_int64 objectBytes = 0;
+
 	do {
 		char *buffer = (char *) calloc(LOBBUFSIZE, sizeof(char));
 
@@ -3734,7 +3737,31 @@ pg_copy_large_object(PGSQL *src,
 		}
 
 		*bytesTransmitted += bytesRead;
+		objectBytes += bytesRead;
 	} while (bytesRead > 0);
+
+	/*
+	 * 5. An object that was already on the target, copied by a previous run
+	 *    for instance, can be longer than the source object: cut its tail.
+	 */
+	if (existsContext.boolVal &&
+		lo_truncate64(dst->connection, dstfd, objectBytes) < 0)
+	{
+		char context[BUFSIZE] = { 0 };
+
+		sformat(context, sizeof(context),
+				"Failed to truncate large object %u", blobOid);
+
+		(void) pgcopy_log_error(dst, NULL, context);
+
+		lo_close(src->connection, srcfd);
+		lo_close(dst->connection, dstfd);
+
+		pgsql_finish(src);
+		pgsql_finish(dst);
+
+		return false;
+	}
 
 	lo_close(src->connection, srcfd);
 	lo_close(dst->connection, dstfd);

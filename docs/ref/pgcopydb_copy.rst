@@ -330,6 +330,7 @@ The following options are available to ``pgcopydb copy`` sub-commands:
   previous one.
   The same holds for the VACUUM ANALYZE of each table.
   A resume skips the large-object step only when the previous run finished it, and the configuration rows of an extension only when the previous run finished copying them.
+  A large object that a resume copies again is cut to its length on the source.
 
   Finally, using ``--resume`` requires the use of ``--not-consistent``.
 
