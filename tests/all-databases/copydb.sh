@@ -35,12 +35,25 @@ pg_restore -h source -U postgres -d f1db --no-owner --no-privileges \
 psql -h source -U postgres -f /usr/src/chinook/Chinook_PostgreSql.sql
 
 #
+# Large objects in two databases, the maintenance database included, and the
+# cfgdump extension, whose configuration table and sequence hold user data
+#
+psql -v ON_ERROR_STOP=1 -h source -U postgres -d postgres \
+     -c "select lo_from_bytea(9001, convert_to('in postgres', 'UTF8'))"
+psql -v ON_ERROR_STOP=1 -h source -U postgres -d pagila <<'EOF'
+select lo_from_bytea(9002, convert_to('in pagila', 'UTF8'));
+select lo_from_bytea(9003, decode(repeat('ab', 300000), 'hex'));
+create extension cfgdump;
+insert into cfgdump_settings values (101, 'user 101'), (102, 'user 102');
+select setval('cfgdump_seq', 42);
+EOF
+
+#
 # Clone all databases from source to target using --all-databases
 #
 pgcopydb clone --all-databases \
          --notice \
          --skip-collations \
-         --skip-large-objects \
          --source "${PGCOPYDB_SOURCE_PGURI}" \
          --target "${PGCOPYDB_TARGET_PGURI}"
 
@@ -55,6 +68,36 @@ pgcopydb compare data \
          --source "${PGCOPYDB_SOURCE_PGURI}" \
          --target "${PGCOPYDB_TARGET_PGURI}" \
          --dir "/tmp/pgcopydb"
+
+# same <database> <what> <query> <prefix>: the source prints prefix first and
+# the target prints what the source prints
+status=0
+same() {
+    local src tgt
+    src=$(psql -AtqX -v ON_ERROR_STOP=1 -h source -U postgres -d "$1" -c "$3")
+    tgt=$(psql -AtqX -v ON_ERROR_STOP=1 -h target -U postgres -d "$1" -c "$3")
+    case "${src}" in
+        "$4"*) ;;
+        *) echo "FAIL: $1 $2 on the source: expected=$4... actual=${src}" >&2; status=1; return ;;
+    esac
+    if [ "${tgt}" != "${src}" ]; then
+        echo "FAIL: $1 $2 on the target: expected=${src} actual=${tgt}" >&2
+        status=1
+        return
+    fi
+    echo "PASS: $1 $2: ${tgt}"
+}
+
+lo="select count(*) || ' objects, md5 ' || md5(coalesce(string_agg(
+      oid || ':' || md5(lo_get(oid)), ',' order by oid), '')) from pg_largeobject_metadata"
+
+same postgres "large objects" "${lo}" "1 objects"
+same pagila "large objects" "${lo}" "2 objects"
+same pagila "cfgdump_settings rows" \
+     "select string_agg(id || ' ' || val, ', ' order by id) from cfgdump_settings" \
+     "1 shipped 1, 2 shipped 2, 3 shipped 3, 101 user 101, 102 user 102"
+same pagila "cfgdump_seq" "select last_value || ' ' || is_called from cfgdump_seq" "42 true"
+test "${status}" = 0
 
 #
 # Debug: dump timing tables from per-database catalogs
