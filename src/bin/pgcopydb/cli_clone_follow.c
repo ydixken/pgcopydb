@@ -236,6 +236,7 @@ cli_clone_all_databases_consolidated_summary(CopyDataSpec *copySpecs)
 
 		if (!catalog_init(&dbCat))
 		{
+			(void) semaphore_finish(&(dbCat.sema));
 			continue;
 		}
 
@@ -247,6 +248,7 @@ cli_clone_all_databases_consolidated_summary(CopyDataSpec *copySpecs)
 		}
 
 		(void) catalog_close(&dbCat);
+		(void) semaphore_finish(&(dbCat.sema));
 	}
 
 	(void) catalog_iter_s_database_finish(&iter1);

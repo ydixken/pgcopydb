@@ -4,7 +4,7 @@ FROM multi
 COPY --from=pgcopydb /usr/local/bin/pgcopydb /usr/local/bin
 
 WORKDIR /usr/src/pgcopydb
-COPY copydb.sh lo-resume.sh ./
+COPY copydb.sh lo-resume.sh sysv-signals.sh roles.sh ./
 
 USER docker
 CMD ["/usr/src/pgcopydb/copydb.sh"]

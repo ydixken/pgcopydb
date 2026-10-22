@@ -126,6 +126,7 @@ jobs:
           - split-table-resume
           - all-databases-resume
           - large-objects-resume
+          - json-logs
           - cdc-low-level
           - cdc-test-decoding
           - cdc-endpos-mid-txn
