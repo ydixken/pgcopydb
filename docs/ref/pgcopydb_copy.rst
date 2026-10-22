@@ -329,6 +329,7 @@ The following options are available to ``pgcopydb copy`` sub-commands:
   ``--resume`` run only if known to have run through to completion on the
   previous one.
   The same holds for the VACUUM ANALYZE of each table.
+  A resume skips the large-object step only when the previous run finished it, and the configuration rows of an extension only when the previous run finished copying them.
 
   Finally, using ``--resume`` requires the use of ``--not-consistent``.
 

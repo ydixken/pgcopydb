@@ -31,6 +31,7 @@ static bool copydb_prepare_split_table(DatabaseCatalog *sourceDB, PGSQL *dst,
 									   SourceTable *table, bool tableCopyIsDone,
 									   bool *allPartsDone);
 static bool copydb_update_copy_stats_hook(void *ctx, CopyStats *stats);
+static bool copydb_resume_extensions_and_blobs(CopyDataSpec *specs);
 
 /*
  * copydb_table_data fetches the list of tables from the source database and
@@ -53,7 +54,12 @@ copydb_copy_all_table_data(CopyDataSpec *specs)
 	{
 		log_info("Skipping tables, indexes, and sequences, "
 				 "already done on a previous run");
-		return true;
+
+		/*
+		 * A resume skips a step only when its own done time is recorded: the
+		 * extension data and large-object steps may still be unfinished.
+		 */
+		return copydb_resume_extensions_and_blobs(specs);
 	}
 
 	if (!summary_start_timing(sourceDB, TIMING_SECTION_TOTAL_DATA))
@@ -100,6 +106,49 @@ copydb_copy_all_table_data(CopyDataSpec *specs)
 	}
 
 	return true;
+}
+
+
+/*
+ * copydb_resume_extensions_and_blobs runs the extension data step, which skips
+ * each extension a previous run finished, and the large-object step unless a
+ * previous run recorded its done time.
+ */
+static bool
+copydb_resume_extensions_and_blobs(CopyDataSpec *specs)
+{
+	bool skipBlobs = specs->runState.blobsCopyIsDone;
+
+	if (skipBlobs)
+	{
+		log_info("Skipping large objects, already done on a previous run");
+	}
+
+	/* close SQLite databases before fork() */
+	bool started =
+		catalog_close_from_specs(specs) &&
+		copydb_start_extension_data_process(specs, false) &&
+		(skipBlobs || copydb_start_blob_process(specs));
+
+	/* wait for a step that started even when the other one did not */
+	bool copied = copydb_wait_for_subprocesses(specs->failFast);
+
+	if (asked_to_quit || asked_to_stop || asked_to_stop_fast)
+	{
+		int signal = get_current_signal(SIGTERM);
+
+		log_warn("Received signal %s, terminating", signal_to_string(signal));
+		return false;
+	}
+
+	if (!started || !copied)
+	{
+		log_error("Failed to copy extension configuration data or large "
+				  "objects, see above for details");
+		return false;
+	}
+
+	return catalog_open_from_specs(specs);
 }
 
 
