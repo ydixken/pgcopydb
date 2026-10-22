@@ -281,7 +281,7 @@ semaphore_unlink(Semaphore *semaphore)
 		return false;
 	}
 
-	/* mark the queue as unlinekd to the System V resources clean-up array */
+	/* free the semaphore's slot in the System V resources clean-up array */
 	if (!copydb_unlink_sysv_semaphore(&system_res_array, semaphore))
 	{
 		/* errors have already been logged */

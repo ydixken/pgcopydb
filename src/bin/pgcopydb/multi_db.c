@@ -437,22 +437,21 @@ clone_all_databases(CopyDataSpec *parentSpecs)
 			}
 		}
 
-		if (!multidb_wait_child(prePid, "pre-data supervisor"))
+		bool preDataOk = multidb_wait_child(prePid, "pre-data supervisor");
+
+		/*
+		 * The supervisor removes the pre-data queue once its workers are done,
+		 * but not when it is killed or fails to fork one, so remove it here
+		 * too: queue_unlink counts a queue that is gone already as removed.
+		 */
+		(void) queue_unlink(&parentSpecs->preDataQueue);
+		parentSpecs->preDataQueue.qId = -1;
+
+		if (!preDataOk)
 		{
 			ok = false;
 			goto signal_done;
 		}
-
-		/*
-		 * The pre-data supervisor already called queue_unlink on
-		 * preDataQueue before it exited.  Mark it as unlinked in the
-		 * parent's system_res_array so that the atexit/signal cleanup
-		 * handler does not attempt a second IPC_RMID and log a
-		 * spurious "Invalid argument" error.
-		 */
-		(void) copydb_unlink_sysv_queue(&system_res_array,
-										&parentSpecs->preDataQueue);
-		parentSpecs->preDataQueue.qId = -1;
 	}
 
 	/* ====== PHASE II: GLOBAL COPY ====== */
@@ -1153,6 +1152,11 @@ multidb_pre_data_one_db(CopyDataSpec *parentSpecs, const char *datname)
 
 cleanup_specs:
 	(void) catalog_close_from_specs(&dbSpecs);
+
+	/* a worker handles many databases: remove this one's catalog semaphores */
+	(void) semaphore_finish(&(dbSpecs.catalogs.source.sema));
+	(void) semaphore_finish(&(dbSpecs.catalogs.filter.sema));
+	(void) semaphore_finish(&(dbSpecs.catalogs.target.sema));
 
 cleanup_cs:
 	free(cs.source_pguri);

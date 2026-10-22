@@ -1777,6 +1777,8 @@ compare_alldb_schema_summary(CopyDataSpec *parentSpecs,
 			(void) catalog_close(&srcCat);
 		}
 
+		(void) semaphore_finish(&(srcCat.sema));
+
 		/* target catalog: <topdir>/db/<datname>/schema/target/source.db */
 		DatabaseCatalog tgtCat = { .type = DATABASE_CATALOG_TYPE_SOURCE };
 
@@ -1789,6 +1791,8 @@ compare_alldb_schema_summary(CopyDataSpec *parentSpecs,
 			(void) catalog_count_objects(&tgtCat, &counts[i].tgt);
 			(void) catalog_close(&tgtCat);
 		}
+
+		(void) semaphore_finish(&(tgtCat.sema));
 	}
 
 	/* Build separator string for database name column */
@@ -2375,6 +2379,8 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 			(void) catalog_iter_s_table(&dbCat, NULL, &compare_alldb_chksum_hook);
 			(void) catalog_close(&dbCat);
 		}
+
+		(void) semaphore_finish(&(dbCat.sema));
 	}
 
 	fformat(stdout, "\n");

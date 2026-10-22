@@ -61,13 +61,24 @@ queue_unlink(Queue *queue)
 
 	if (msgctl(queue->qId, IPC_RMID, NULL) != 0)
 	{
-		log_error("Failed to delete %s message queue %d: %m",
+		/*
+		 * The queue is gone when another process removed it, as the pre-data
+		 * supervisor does with its parent's queue: count that as removed.
+		 */
+		if (errno != EINVAL && errno != EIDRM)
+		{
+			log_error("Failed to delete %s message queue %d: %m",
+					  queue->name,
+					  queue->qId);
+			return false;
+		}
+
+		log_debug("Message %s queue %d was removed already: %m",
 				  queue->name,
 				  queue->qId);
-		return false;
 	}
 
-	/* mark the queue as unlinked to the System V resources clean-up array */
+	/* free the queue's slot in the System V resources clean-up array */
 	if (!copydb_unlink_sysv_queue(&system_res_array, queue))
 	{
 		/* errors have already been logged */

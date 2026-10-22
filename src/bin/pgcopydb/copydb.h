@@ -38,11 +38,9 @@ extern KeyVal connStringDefaults;
  * pgcopydb creates System V OS level objects such as message queues and
  * semaphores, and those have to be cleaned-up "manually".
  *
- * A child inherits its parent's slots, and a slot is never reused.  With
- * --all-databases a pre-data worker adds 5 per database it handles and the
- * summary 1 per database, so this still caps the databases per worker and in
- * the summary.  A Phase III child adds 5 and its large-object supervisor 1,
- * 17 in all on a resume.
+ * A child inherits its parent's slots, and removing a resource frees its slot,
+ * so this caps what one process holds at once, not how many databases it
+ * handles.  A resume of 28 databases with --table-jobs 4 used 9 at most.
  */
 #define SYSV_RES_MAX_COUNT 32
 
@@ -56,7 +54,6 @@ typedef enum
 typedef struct SysVRes
 {
 	SysVKind kind;
-	bool unlinked;
 
 	union res
 	{

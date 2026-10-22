@@ -835,7 +835,25 @@ copydb_register_sysv_semaphore(SysVResArray *array, Semaphore *semaphore)
 
 
 /*
- * copydb_unregister_sysv_queue marks the given queue as unlinked already.
+ * copydb_release_sysv_slot frees entry i, whose resource is gone, so that a
+ * process that creates and removes resources per database does not run out
+ * of slots.
+ */
+static void
+copydb_release_sysv_slot(SysVResArray *array, int i)
+{
+	for (int j = i; j < array->count - 1; j++)
+	{
+		array->array[j] = array->array[j + 1];
+	}
+
+	--(array->count);
+}
+
+
+/*
+ * copydb_unlink_sysv_semaphore frees the slot of the given semaphore, which
+ * has been removed.
  */
 bool
 copydb_unlink_sysv_semaphore(SysVResArray *array, Semaphore *semaphore)
@@ -847,7 +865,7 @@ copydb_unlink_sysv_semaphore(SysVResArray *array, Semaphore *semaphore)
 		if (res->kind == SYSV_SEMAPHORE &&
 			res->res.semaphore.semId == semaphore->semId)
 		{
-			res->unlinked = true;
+			copydb_release_sysv_slot(array, i);
 			return true;
 		}
 	}
@@ -889,7 +907,7 @@ copydb_register_sysv_queue(SysVResArray *array, Queue *queue)
 
 
 /*
- * copydb_unregister_sysv_queue marks the given queue as unlinked already.
+ * copydb_unlink_sysv_queue frees the slot of the given queue, which is gone.
  */
 bool
 copydb_unlink_sysv_queue(SysVResArray *array, Queue *queue)
@@ -900,7 +918,7 @@ copydb_unlink_sysv_queue(SysVResArray *array, Queue *queue)
 
 		if (res->kind == SYSV_QUEUE && res->res.queue.qId == queue->qId)
 		{
-			res->unlinked = true;
+			copydb_release_sysv_slot(array, i);
 			return true;
 		}
 	}
@@ -926,17 +944,12 @@ copydb_cleanup_sysv_resources(SysVResArray *array)
 	 *
 	 * This is particulary important for the logging semaphore, which is the
 	 * first resource that's registered in that array, and that we need until
-	 * the very end.
+	 * the very end. Unlinking entry i releases it and shifts only entries
+	 * above i, which this loop has visited already.
 	 */
 	for (int i = array->count - 1; 0 <= i; i--)
 	{
 		SysVRes *res = &(array->array[i]);
-
-		/* skip already unlinked System V resources */
-		if (res->unlinked)
-		{
-			continue;
-		}
 
 		switch (res->kind)
 		{
