@@ -292,6 +292,12 @@ Specifically:
     the COPYing, then this process will take care of the indexes and the
     *vacuum analyze* operation.
 
+  - Resume
+
+    A ``--resume`` run keeps a split table only when all its parts were copied before, with or without ``--all-databases``.
+    Otherwise it truncates the table and copies all its parts again, because a part can commit its COPY before pgcopydb records it as done, and because only a full copy reads the whole table at one snapshot.
+    So a run stopped during the COPY of one part copies the whole table again when resumed, as it would a table that is not split.
+
 Same-table COPY concurrency performance limitations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -423,7 +429,7 @@ handling different databases stays distinguishable::
 The process tree for this phase looks like the following::
 
    + pgcopydb global copy supervisor
-       - pgcopydb global copy queue filler  (enqueues all tables, sorted by size)
+       - pgcopydb global copy queue filler  (truncates split tables, enqueues all by size)
        - pgcopydb global copy worker        (--table-jobs workers, any database)
        - pgcopydb global copy worker
        - pgcopydb global copy worker

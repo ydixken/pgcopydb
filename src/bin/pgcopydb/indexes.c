@@ -104,6 +104,7 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	 * by crashed workers or by a prior container whose PID namespace was reset
 	 * would cause resume logic to misidentify live PIDs (issue #692) and could
 	 * block retried index creation (issue #881).
+	 * Only index workers elect a table's constraint builder: elect it again.
 	 */
 	if (!catalog_delete_all_process_entries(sourceDB))
 	{
@@ -112,6 +113,12 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	}
 
 	if (!summary_delete_incomplete_index_build(sourceDB))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!summary_delete_table_indexes_done(sourceDB))
 	{
 		/* errors have already been logged */
 		return false;
@@ -596,14 +603,10 @@ copydb_table_indexes_are_done(CopyDataSpec *specs,
 	{
 		*indexesAreDone = true;
 
-		/* insert or ignore our pid as the partsDonePid */
-		if (!summary_add_table_indexes_done(sourceDB, &tableSpecs))
-		{
-			/* errors have already been logged */
-			return false;
-		}
+		/* a pid compare would elect a worker again for its next done index */
+		bool elected = false;
 
-		if (!summary_lookup_table_indexes_done(sourceDB, &tableSpecs))
+		if (!summary_add_table_indexes_done(sourceDB, &tableSpecs, &elected))
 		{
 			/* errors have already been logged */
 			return false;
@@ -613,7 +616,7 @@ copydb_table_indexes_are_done(CopyDataSpec *specs,
 		 * Set constraintsAreBeingBuilt to false to allow the current worker to
 		 * process constraints.
 		 */
-		*constraintsAreBeingBuilt = (tableSpecs.indexesDonePid != getpid());
+		*constraintsAreBeingBuilt = !elected;
 	}
 
 	return true;

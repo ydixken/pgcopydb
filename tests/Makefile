@@ -19,7 +19,8 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-receive-group-commit cdc-endpos-before-txn \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering follow-resume-snapshot \
-	 orphaned-target-backend split-table-resume;
+	 orphaned-target-backend split-table-resume \
+	 all-databases-resume;
 
 pagila: build
 	$(MAKE) -C $@
@@ -154,6 +155,9 @@ orphaned-target-backend: build
 split-table-resume: build
 	$(MAKE) -C $@
 
+all-databases-resume: build
+	$(MAKE) -C $@
+
 timescaledb: build
 	$(MAKE) -C $@
 
@@ -198,4 +202,5 @@ clean-images:
 .PHONY: cdc-receive-reconnect-dying-source cdc-receive-status-interval cdc-apply-wakeup
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
+.PHONY: all-databases-resume
 .PHONY: timescaledb citus

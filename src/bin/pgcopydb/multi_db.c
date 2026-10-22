@@ -1435,8 +1435,9 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 	}
 
 	/*
-	 * Pre-seed the COPY_DATA timing row for each database so that workers'
-	 * summary_increment_timing calls have a valid start_time_epoch.
+	 * Before forking, clear each per-database catalog of the previous run's
+	 * state as the single-database supervisors do, and pre-seed COPY_DATA
+	 * timing so workers' summary_increment_timing has a start_time_epoch.
 	 */
 	for (int i = 0; i < parentSpecs->multiDbCount; i++)
 	{
@@ -1451,15 +1452,31 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 		sformat(dbCat.dbfile, sizeof(dbCat.dbfile),
 				"%s/schema/source.db", info->topdir);
 
-		if (catalog_init(&dbCat))
+		if (!catalog_open(&dbCat))
 		{
-			(void) summary_start_timing(&dbCat, TIMING_SECTION_COPY_DATA);
-			(void) catalog_close(&dbCat);
+			log_error("Failed to open catalog for database \"%s\"",
+					  info->datname);
+			return false;
 		}
-		else
+
+		if (!summary_delete_incomplete_table_copy(&dbCat) ||
+			!summary_reset_split_tables(&dbCat) ||
+			!summary_delete_incomplete_index_build(&dbCat) ||
+			!summary_delete_table_indexes_done(&dbCat))
 		{
-			log_warn("Failed to open catalog for \"%s\": "
-					 "COPY_DATA start timing not recorded", info->datname);
+			log_error("Failed to clear the previous run's state "
+					  "for database \"%s\"",
+					  info->datname);
+			(void) catalog_close(&dbCat);
+			return false;
+		}
+
+		(void) summary_start_timing(&dbCat, TIMING_SECTION_COPY_DATA);
+
+		if (!catalog_close(&dbCat))
+		{
+			/* errors have already been logged */
+			return false;
 		}
 	}
 
@@ -1583,6 +1600,18 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 						(void) set_ps_title("pgcopydb: global copy queue tables");
 						bool ok =
 							copydb_copy_worker_queue_tables_multidb(parentSpecs);
+
+						/*
+						 * Only this filler sends the COPY workers their STOP
+						 * messages, so a failure here has to end them all.
+						 */
+						if (!ok)
+						{
+							log_fatal("Failed to add tables to the global COPY "
+									  "queue, terminating");
+							(void) copydb_fatal_exit();
+						}
+
 						exit(ok ? EXIT_CODE_QUIT : EXIT_CODE_INTERNAL_ERROR);
 					}
 
