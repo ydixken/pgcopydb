@@ -315,9 +315,10 @@ case "${scenario}" in
             analyze"
         ;;
     # killed while the ALTER TABLE adding cx_excl waits, which is built in the
-    # constraint step after both indexes of cx are done
+    # constraint step after both indexes of cx are done; one index worker
+    # then sees both done indexes of cx in the resume, and is elected once
     constraint)
-        table=cx db=d2
+        table=cx db=d2 index_jobs=1
         sql source d2 "create table cx(id integer not null, val integer not null);
             insert into cx select g, g % 100 from generate_series(1, 1000) g;
             alter table cx add constraint cx_excl exclude using btree (gate_key(id) with =);
@@ -327,7 +328,7 @@ case "${scenario}" in
 esac
 
 # 1MB splits a 200000-row table in 4 parts; 4 jobs take all 4 at once
-args=(--dir "${workdir}" --table-jobs 4 --index-jobs 2
+args=(--dir "${workdir}" --table-jobs 4 --index-jobs "${index_jobs:-2}"
     --split-tables-larger-than 1MB --split-max-parts 4 --use-copy-binary --notice)
 if test "${mode}" = single; then
     args+=(--source "${PGCOPYDB_SOURCE_PGURI%/*}/${db}" --target "${PGCOPYDB_TARGET_PGURI%/*}/${db}")
@@ -481,10 +482,11 @@ case "${scenario}" in
         resume_logs 'd1: CREATE INDEX IF NOT EXISTS small_gate ' 1 'the resume builds small_gate'
         ;;
     constraint)
-        # each constraint and the VACUUM once, by the per-table path
+        # each constraint and the VACUUM once, by the per-table path; a VACUUM
+        # queued twice logs a second run or "Skipping VACUUM ANALYZE public.cx,"
         resume_logs 'ALTER TABLE public\.cx ADD CONSTRAINT cx_excl ' 1 'the resume adds cx_excl'
         resume_logs 'ALTER TABLE public\.cx ADD CONSTRAINT cx_pkey ' 1 'the resume adds cx_pkey'
-        resume_logs 'VACUUM ANALYZE public\.cx;' 1 'the resume vacuums cx'
+        resume_logs 'VACUUM ANALYZE public\.cx[;,]' 1 'the resume vacuums cx'
         ;;
 esac
 echo "PASS [${name}]: the resume leaves ${db}.${table} equal to the source"

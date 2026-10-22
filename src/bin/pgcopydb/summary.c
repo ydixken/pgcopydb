@@ -452,6 +452,58 @@ summary_delete_incomplete_index_build(DatabaseCatalog *catalog)
 
 
 /*
+ * summary_delete_table_indexes_done forgets the previous run's constraint
+ * builder of each table, and the constraints it left unfinished, so that a
+ * resumed run elects one again; done constraints are skipped by done time.
+ */
+bool
+summary_delete_table_indexes_done(DatabaseCatalog *catalog)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: summary_delete_table_indexes_done: db is NULL");
+		return false;
+	}
+
+	char *sqls[] = {
+		"delete from s_table_indexes_done",
+
+		/* summary_lookup_constraint fails on a second row of one conoid */
+		"delete from summary "
+		" where conoid is not null "
+		"   and done_time_epoch is null"
+	};
+
+	int count = sizeof(sqls) / sizeof(sqls[0]);
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	for (int i = 0; i < count; i++)
+	{
+		SQLiteQuery query = { 0 };
+
+		if (!catalog_sql_prepare(db, sqls[i], &query) ||
+			!catalog_sql_execute_once(&query))
+		{
+			/* errors have already been logged */
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
+	}
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return true;
+}
+
+
+/*
  * summary_reset_split_tables forgets the parts of a split table that has only
  * some parts done, so that all of them are copied again after its TRUNCATE,
  * and clears s_table_parts_done, whose pids belong to a previous run.
@@ -2238,13 +2290,14 @@ summary_table_fetch_count_indexes_left(SQLiteQuery *query)
 
 
 /*
- * summary_add_table_indexes_done registers the first pid that sees all tables
- * indexes are done, using SQLite insert-or-ignore returning facility to ensure
- * concurrency control.
+ * summary_add_table_indexes_done registers the first pid that sees all table
+ * indexes done; only the call whose insert-or-ignore adds the row is elected,
+ * so a worker that sees it again for another index of the table is not.
  */
 bool
 summary_add_table_indexes_done(DatabaseCatalog *catalog,
-							   CopyTableDataSpec *tableSpecs)
+							   CopyTableDataSpec *tableSpecs,
+							   bool *elected)
 {
 	sqlite3 *db = catalog->db;
 
@@ -2290,13 +2343,15 @@ summary_add_table_indexes_done(DatabaseCatalog *catalog,
 		return false;
 	}
 
-	/* now execute the query, which return exactly one row */
+	/* now execute the query, which does not return any row */
 	if (!catalog_sql_execute_once(&query))
 	{
 		/* errors have already been logged */
 		(void) semaphore_unlock(&(catalog->sema));
 		return false;
 	}
+
+	*elected = sqlite3_changes(db) == 1;
 
 	(void) semaphore_unlock(&(catalog->sema));
 

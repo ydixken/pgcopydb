@@ -1461,7 +1461,8 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 
 		if (!summary_delete_incomplete_table_copy(&dbCat) ||
 			!summary_reset_split_tables(&dbCat) ||
-			!summary_delete_incomplete_index_build(&dbCat))
+			!summary_delete_incomplete_index_build(&dbCat) ||
+			!summary_delete_table_indexes_done(&dbCat))
 		{
 			log_error("Failed to clear the previous run's state "
 					  "for database \"%s\"",

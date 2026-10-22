@@ -680,6 +680,8 @@ bool summary_reset_split_tables(DatabaseCatalog *catalog);
 
 bool summary_delete_incomplete_index_build(DatabaseCatalog *catalog);
 
+bool summary_delete_table_indexes_done(DatabaseCatalog *catalog);
+
 bool summary_table_count_parts_done(DatabaseCatalog *catalog,
 									CopyTableDataSpec *tableSpecs);
 
@@ -747,7 +749,8 @@ bool summary_table_count_indexes_left(DatabaseCatalog *catalog,
 bool summary_table_fetch_count_indexes_left(SQLiteQuery *query);
 
 bool summary_add_table_indexes_done(DatabaseCatalog *catalog,
-									CopyTableDataSpec *tableSpecs);
+									CopyTableDataSpec *tableSpecs,
+									bool *elected);
 
 bool summary_lookup_table_indexes_done(DatabaseCatalog *catalog,
 									   CopyTableDataSpec *tableSpecs);
