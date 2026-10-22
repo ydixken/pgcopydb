@@ -49,25 +49,64 @@ select setval('cfgdump_seq', 42);
 EOF
 
 #
-# Clone all databases from source to target using --all-databases
+# 24 small databases, 28 in all, so that each of the 4 pre-data workers
+# handles about 7: the SysV slots a worker holds must not grow with that count
+#
+for i in $(seq 1 24)
+do
+    createdb -h source -U postgres "small${i}"
+    psql -h source -U postgres -d "small${i}" -c 'create table t(id integer primary key)'
+done
+
+# every queue and semaphore set of a clone is gone once it exits; /proc/sysvipc
+# lists a header line, then one line per object
+sysv_none_left() {
+    cat /proc/sysvipc/msg /proc/sysvipc/sem
+    test "$(cat /proc/sysvipc/msg /proc/sysvipc/sem | wc -l)" -eq 2
+}
+
+#
+# Clone all databases from source to target using --all-databases, then
+# retry with --resume --not-consistent at the same count
 #
 pgcopydb clone --all-databases \
          --notice \
          --skip-collations \
          --source "${PGCOPYDB_SOURCE_PGURI}" \
-         --target "${PGCOPYDB_TARGET_PGURI}"
+         --target "${PGCOPYDB_TARGET_PGURI}" > /tmp/clone.out
+cat /tmp/clone.out
+sysv_none_left
+
+pgcopydb clone --all-databases \
+         --resume --not-consistent \
+         --notice \
+         --skip-collations \
+         --source "${PGCOPYDB_SOURCE_PGURI}" \
+         --target "${PGCOPYDB_TARGET_PGURI}" > /tmp/resume.out
+cat /tmp/resume.out
+sysv_none_left
 
 pgcopydb compare schema \
          --all-databases \
          --source "${PGCOPYDB_SOURCE_PGURI}" \
          --target "${PGCOPYDB_TARGET_PGURI}" \
-         --dir "/tmp/pgcopydb"
+         --dir "/tmp/pgcopydb" > /tmp/compare-schema.out
+cat /tmp/compare-schema.out
 
 pgcopydb compare data \
          --all-databases \
          --source "${PGCOPYDB_SOURCE_PGURI}" \
          --target "${PGCOPYDB_TARGET_PGURI}" \
-         --dir "/tmp/pgcopydb"
+         --dir "/tmp/pgcopydb" > /tmp/compare-data.out
+cat /tmp/compare-data.out
+
+# both clone summaries and both reports count every small database, not only
+# those whose catalog the reporting process could still open
+summary='^ *small[0-9]+ [|] +[0-9]+ [|] public [|] +t [|]'
+test "$(grep -cE "${summary}" /tmp/clone.out)" -eq 24
+test "$(grep -cE "${summary}" /tmp/resume.out)" -eq 24
+test "$(grep -cE '^small[0-9]+ +[|]   1 [|]     1 [|]   1 [|]     1 [|]' /tmp/compare-schema.out)" -eq 24
+test "$(grep -cE '^ *small[0-9]+[.]public[.]t [|]   [|] ' /tmp/compare-data.out)" -eq 24
 
 # same <database> <what> <query> <prefix>: the source prints prefix first and
 # the target prints what the source prints
