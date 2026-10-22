@@ -1,0 +1,5 @@
+# a pgcopydb test extension: pg_dump treats its configuration table and
+# sequence as user data, so a clone has to copy their rows itself
+default_version = '1.0'
+relocatable = false
+schema = public

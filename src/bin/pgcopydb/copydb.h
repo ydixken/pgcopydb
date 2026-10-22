@@ -38,12 +38,13 @@ extern KeyVal connStringDefaults;
  * pgcopydb creates System V OS level objects such as message queues and
  * semaphores, and those have to be cleaned-up "manually".
  *
- * With --all-databases, all per-database catalog semaphores are packed into
- * a single SysV semaphore set (one system_res_array slot regardless of the
- * number of databases).  The fixed overhead is ~10 slots, so 16 is sufficient
- * even for very large multi-database runs.
+ * A child inherits its parent's slots, and a slot is never reused.  With
+ * --all-databases a pre-data worker adds 5 per database it handles and the
+ * summary 1 per database, so this still caps the databases per worker and in
+ * the summary.  A Phase III child adds 5 and its large-object supervisor 1,
+ * 17 in all on a resume.
  */
-#define SYSV_RES_MAX_COUNT 16
+#define SYSV_RES_MAX_COUNT 32
 
 typedef enum
 {
@@ -427,6 +428,7 @@ bool copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 											char *cdcPathDir);
 
 /* extensions.c */
+bool copydb_extension_options_are_consistent(CopyDataSpec *specs);
 bool copydb_start_extension_data_process(CopyDataSpec *specs,
 										 bool createExtensions);
 bool copydb_copy_extensions(CopyDataSpec *copySpecs, bool createExtensions);

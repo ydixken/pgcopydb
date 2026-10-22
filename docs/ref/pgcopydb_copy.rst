@@ -146,9 +146,10 @@ pgcopydb copy blobs - Copy the blob data from the source database to the target
 
 The command ``pgcopydb copy blobs`` fetches list of large objects (aka
 blobs) from the source database and copies their data parts to the target
-database. By default the command assumes that the large objects metadata
-have already been taken care of, because of the behaviour of
-``pg_dump --section=pre-data``.
+database. It creates a large object that does not exist on the target yet,
+with the same OID. The command does not copy the owner, privileges or
+comment of a large object: with pg_dump 16 and older,
+``pg_dump --section=pre-data`` carries them.
 
 .. include:: ../include/copy-blobs.rst
 
@@ -328,6 +329,8 @@ The following options are available to ``pgcopydb copy`` sub-commands:
   ``--resume`` run only if known to have run through to completion on the
   previous one.
   The same holds for the VACUUM ANALYZE of each table.
+  A resume skips the large-object step only when the previous run finished it, and the configuration rows of an extension only when the previous run finished copying them.
+  A large object that a resume copies again is cut to its length on the source.
 
   Finally, using ``--resume`` requires the use of ``--not-consistent``.
 

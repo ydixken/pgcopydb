@@ -1,0 +1,5 @@
+ARG PGVERSION=16
+FROM postgres:${PGVERSION}
+
+ARG PGVERSION
+COPY cfgdump.control cfgdump--1.0.sql /usr/share/postgresql/${PGVERSION}/extension/

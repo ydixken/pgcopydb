@@ -379,7 +379,7 @@ A long-lived *snapshot holder* subprocess is forked first. It connects to
 each source database, exports one ``REPEATABLE READ`` snapshot per
 database, writes the snapshot IDs into the instance catalog, and then
 blocks on a pipe until Phase III completes. This keeps all per-database
-snapshot transactions open so that Phase I and II workers can call
+snapshot transactions open so that Phase I, II and III workers can call
 ``SET TRANSACTION SNAPSHOT`` to import them for consistent reads.
 
 Once all snapshots are ready, a *pre-data supervisor* is forked. It starts
@@ -449,11 +449,14 @@ Phase III — post-data (sequential, one database at a time)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 After the global COPY phase completes, the remaining post-data work runs
-sequentially: for each database, a subprocess is forked that calls
+sequentially: for each database, a subprocess is forked that copies the
+large objects (with ``--large-objects-jobs`` workers) and the user rows of
+extension configuration tables, then calls
 ``pg_restore --post-data`` (triggers, rules, comments, and any objects not
 already created by the index workers) and resets sequences to match the
 source values captured during Phase I. The databases are processed one at a
 time in the order they were discovered.
+A resumed run copies the large objects of every database again.
 
 Once all post-data work is done, the parent closes the done-pipe to the
 snapshot holder, which then commits all its held transactions and exits.

@@ -2015,8 +2015,9 @@ summary_extension_fetch(SQLiteQuery *query)
 
 
 /*
- * summary_add_extension INSERTs an extension summary entry to our internal
- * catalogs database, recording that this extension's copy has started.
+ * summary_add_extension records that this extension's copy has started, in
+ * place of the row of a run killed before the done time, whose pid
+ * summary_finish_extension would not match.
  */
 bool
 summary_add_extension(DatabaseCatalog *catalog,
@@ -2045,7 +2046,7 @@ summary_add_extension(DatabaseCatalog *catalog,
 	INSTR_TIME_SET_CURRENT(extSummary->startTimeInstr);
 
 	char *sql =
-		"insert or ignore into summary(pid, extoid, start_time_epoch) "
+		"insert or replace into summary(pid, extoid, start_time_epoch) "
 		"values($1, $2, $3)";
 
 	if (!semaphore_lock(&(catalog->sema)))
@@ -2168,6 +2169,17 @@ summary_finish_extension(DatabaseCatalog *catalog,
 	if (!catalog_sql_execute_once(&query))
 	{
 		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	/* without a done time, every resume copies the rows again */
+	if (sqlite3_changes(db) != 1)
+	{
+		log_error("Failed to record that extension %u is done: "
+				  "no summary row for pid %d",
+				  extSummary->extoid,
+				  extSummary->pid);
 		(void) semaphore_unlock(&(catalog->sema));
 		return false;
 	}
