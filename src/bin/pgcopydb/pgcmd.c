@@ -14,6 +14,7 @@
 
 #include "postgres_fe.h"
 #include "pqexpbuffer.h"
+#include "dumputils.h"
 
 #include "catalog.h"
 #include "cli_root.h"
@@ -662,6 +663,32 @@ pg_dumpall_roles(PostgresPaths *pgPaths,
 
 
 /*
+ * unquote_role_name copies into roleName the name as pg_roles stores it, outer
+ * quotes stripped and doubled ones collapsed. It returns false unless the text
+ * is exactly one identifier; the caller then sends it with no existence check.
+ */
+static bool
+unquote_role_name(const char *identifier, char *roleName, size_t size)
+{
+	/* SplitGUCList writes into its input; a role name is a list of one */
+	char *copy = pg_strdup(identifier);
+	char **names = NULL;
+	bool parsed = SplitGUCList(copy, ',', &names) &&
+				  names[0] != NULL && names[1] == NULL;
+
+	if (parsed)
+	{
+		strlcpy(roleName, names[0], size);
+	}
+
+	pg_free(names);
+	pg_free(copy);
+
+	return parsed;
+}
+
+
+/*
  * pg_restore_roles calls psql on the roles SQL file obtained with pg_dumpall
  * or the function pg_dumpall_roles.
  */
@@ -799,30 +826,31 @@ pg_restore_roles(PostgresPaths *pgPaths,
 			/* chomp the last ';' character from the role name */
 			currentLine[lineLen - 1] = '\0';
 
+			/* CREATE ROLE takes the name quoted, as pg_dumpall wrote it */
 			char *roleNamePtr = currentLine + createRoleLen;
 			char roleName[NAMEDATALEN] = { 0 };
-
-			strlcpy(roleName, roleNamePtr, sizeof(roleName));
-
 			bool exists = false;
 
-			if (!pgsql_role_exists(&pgsql, roleName, &exists))
+			if (unquote_role_name(roleNamePtr, roleName, sizeof(roleName)))
 			{
-				/* errors have already been logged */
-				return false;
+				if (!pgsql_role_exists(&pgsql, roleName, &exists))
+				{
+					/* errors have already been logged */
+					return false;
+				}
 			}
 
 			if (exists)
 			{
 				skipNextLine = true;
 				log_info("Skipping CREATE ROLE %s, which already exists",
-						 roleName);
+						 roleNamePtr);
 				continue;
 			}
 
 			char createRole[BUFSIZE] = { 0 };
 
-			sformat(createRole, sizeof(createRole), "CREATE ROLE %s", roleName);
+			sformat(createRole, sizeof(createRole), "CREATE ROLE %s", roleNamePtr);
 
 			log_info("%s", createRole);
 
