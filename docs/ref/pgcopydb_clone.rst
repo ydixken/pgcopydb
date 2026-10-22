@@ -293,8 +293,15 @@ The operation is structured in three sequential phases:
      entire workload globally.
 
   3. **Phase III — post-data**: Databases are finalized one at a time:
+     large objects (with ``--large-objects-jobs`` workers) and the user rows
+     of extension configuration tables are copied, then
      ``pg_restore --post-data`` applies remaining objects (triggers, rules,
      comments, etc.) and sequences are reset to match the source.
+
+The ``postgres`` database is cloned like any other, so the user rows of its
+extension configuration tables are copied too, as a single-database clone of
+``postgres`` does: with pg_cron, that is the jobs in ``cron.job`` and their
+run history in ``cron.job_run_details``.
 
 A **consolidated summary** is printed at the end aggregating timings
 across all databases.

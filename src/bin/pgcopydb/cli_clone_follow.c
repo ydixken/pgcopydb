@@ -501,6 +501,12 @@ cli_clone(int argc, char **argv)
 	 */
 	if (copySpecs.allDatabases)
 	{
+		/* Phase III would only check it after the COPY of every database */
+		if (!copydb_extension_options_are_consistent(&copySpecs))
+		{
+			exit(EXIT_CODE_BAD_ARGS);
+		}
+
 		/*
 		 * Start the total wall-clock timer before Phase I begins.  We open
 		 * the instance catalog briefly to persist the start timestamp, then

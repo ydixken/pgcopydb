@@ -26,6 +26,25 @@ static void citusDistributeCallback(void *ctx, PGresult *result);
 
 
 /*
+ * copydb_extension_options_are_consistent returns false when --skip-extensions
+ * and [include-only-extension] are both used.
+ */
+bool
+copydb_extension_options_are_consistent(CopyDataSpec *specs)
+{
+	if (specs->skipExtensions &&
+		specs->filters.includeOnlyExtensionList.count > 0)
+	{
+		log_error("--skip-extensions and [include-only-extension] are "
+				  "contradictory; use one or the other");
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
  * copydb_start_extension_process an auxilliary process that copies the
  * extension configuration table data from the source database into the target
  * database.
@@ -41,14 +60,7 @@ copydb_start_extension_data_process(CopyDataSpec *specs, bool createExtensions)
 					 "[exclude-extension] filter entries are redundant");
 		}
 
-		if (specs->filters.includeOnlyExtensionList.count > 0)
-		{
-			log_error("--skip-extensions and [include-only-extension] are "
-					  "contradictory; use one or the other");
-			return false;
-		}
-
-		return true;
+		return copydb_extension_options_are_consistent(specs);
 	}
 
 	/*

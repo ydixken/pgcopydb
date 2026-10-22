@@ -9,6 +9,7 @@
  *   Phase II (global COPY) — tableJobs shared COPY workers dequeue from a
  *                           single size-ordered queue spanning all databases
  *   Phase III (post-data) — sequential, one subprocess per database:
+ *                           large objects, extension configuration data,
  *                           pg_restore --post-data, set sequences
  */
 
@@ -98,7 +99,7 @@ static bool multidb_index_context_close_entry(MultiDbEntry *entry);
  *
  * After the holder signals "ready" (via readypipe), the parent re-reads the
  * instance catalog to build multiDbInfos[] with snapshot IDs, then forks
- * the Phase I supervisor.  Phase I and II workers import those snapshots
+ * the Phase I supervisor.  Phase I, II and III workers import those snapshots
  * using SET TRANSACTION SNAPSHOT — the holder's transactions are still live.
  *
  * After Phase III the parent closes the write end of donepipe; the holder
@@ -488,7 +489,8 @@ clone_all_databases(CopyDataSpec *parentSpecs)
 	(void) catalog_close_from_specs(parentSpecs);
 
 	/* ====== PHASE III: POST-DATA (sequential per-database) ====== */
-	log_info("Phase III: post-data restore and sequences for %d databases",
+	log_info("Phase III: large objects, extension data, post-data restore "
+			 "and sequences for %d databases",
 			 dbCount);
 
 	for (int i = 0; i < dbCount; i++)
@@ -774,8 +776,8 @@ signal_ready:
 
 	/*
 	 * Wait for the parent to close the write end of donepipe (after Phase III).
-	 * While we block here, Phase I and II workers use SET TRANSACTION SNAPSHOT
-	 * to import our held snapshots for consistent reads.
+	 * While we block here, Phase I, II and III workers use SET TRANSACTION
+	 * SNAPSHOT to import our held snapshots for consistent reads.
 	 */
 	{
 		char buf = 0;
@@ -1170,7 +1172,8 @@ cleanup_cs:
 
 /*
  * multidb_clone_one_database_post_data forks a subprocess that performs the
- * post-data phase for one database: pg_restore post-data and set sequences.
+ * post-data phase for one database: large objects and extension configuration
+ * data, pg_restore post-data, and set sequences.
  *
  * This runs after the global COPY phase has completed for all databases.
  * The function is self-contained: it derives all specs from MultiDbInfo.
@@ -1289,9 +1292,8 @@ multidb_clone_one_database_post_data(CopyDataSpec *parentSpecs,
 			 * The catalog was created in Phase I with a specific snapshot ID.
 			 * The consistency check in catalog_init_from_specs compares
 			 * dbSpecs.sourceSnapshot.snapshot against the stored value, so we
-			 * must populate it here.  The post-data phase does not open a new
-			 * snapshot transaction — it just needs the ID to match so the
-			 * catalog opens successfully.
+			 * must populate it here.  The large-object and extension data
+			 * processes import that snapshot unless --not-consistent.
 			 */
 			strlcpy(dbSpecs.sourceSnapshot.snapshot,
 					info->snapshot,
@@ -1307,6 +1309,27 @@ multidb_clone_one_database_post_data(CopyDataSpec *parentSpecs,
 				log_error("Failed to open catalog for database \"%s\"",
 						  datname);
 				exit(EXIT_CODE_INTERNAL_ERROR);
+			}
+
+			/*
+			 * Large objects and extension configuration rows are table data,
+			 * which copydb_process_table_data copies without --all-databases,
+			 * before post-data.  Both steps fork, so the catalogs are closed.
+			 */
+			bool started =
+				catalog_close_from_specs(&dbSpecs) &&
+				copydb_start_extension_data_process(&dbSpecs, false) &&
+				copydb_start_blob_process(&dbSpecs);
+
+			/* wait for a step that started even when the other one did not */
+			bool copied = copydb_wait_for_subprocesses(dbSpecs.failFast);
+
+			if (!started || !copied || !catalog_open_from_specs(&dbSpecs))
+			{
+				log_error("Failed to copy large objects or extension "
+						  "configuration data for database \"%s\"",
+						  datname);
+				exit(EXIT_CODE_TARGET);
 			}
 
 			/*
