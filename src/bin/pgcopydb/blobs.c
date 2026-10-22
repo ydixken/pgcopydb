@@ -276,6 +276,8 @@ copydb_start_blob_workers(CopyDataSpec *specs)
 
 	log_info("STEP 5: starting %d Large Objects workers", specs->lObjectJobs);
 
+	pid_t supervisor = getpid();
+
 	for (int i = 0; i < specs->lObjectJobs; i++)
 	{
 		/*
@@ -302,7 +304,14 @@ copydb_start_blob_workers(CopyDataSpec *specs)
 
 				if (!copydb_blob_worker(specs))
 				{
-					/* errors have already been logged */
+					/*
+					 * The supervisor may wait forever for room in a full queue
+					 * that no worker reads anymore: stop it, so that it fails.
+					 */
+					if (getppid() == supervisor)
+					{
+						(void) kill(supervisor, SIGTERM);
+					}
 					exit(EXIT_CODE_INTERNAL_ERROR);
 				}
 
