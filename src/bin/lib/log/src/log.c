@@ -20,6 +20,7 @@
  * IN THE SOFTWARE.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -202,13 +203,39 @@ void log_log(int level, const char *file, int line, const char *fmt, ...)
 	  json_object_set_number(jsobj, "file_line_num", line);
 
 	  char log[LOG_BUFSIZE] = { 0 };
+	  char *message = log;
 	  va_list args;
+	  va_list argsCopy;
 
 	  va_start(args, fmt);
-	  pg_vsprintf(log, fmt, args);
+	  va_copy(argsCopy, args);
+
+	  /* %m must print the same errno in both calls */
+	  int savedErrno = errno;
+	  int len = pg_vsnprintf(log, sizeof(log), fmt, args);
+
+	  /* a longer message is formatted again on the heap, cut if that fails */
+	  if (len >= (int) sizeof(log))
+	  {
+		  char *heapMessage = malloc((size_t) len + 1);
+
+		  if (heapMessage != NULL)
+		  {
+			  errno = savedErrno;
+			  (void) pg_vsnprintf(heapMessage, (size_t) len + 1, fmt, argsCopy);
+			  message = heapMessage;
+		  }
+	  }
+
+	  va_end(argsCopy);
 	  va_end(args);
 
-	  json_object_set_string(jsobj, "message", log);
+	  json_object_set_string(jsobj, "message", message);
+
+	  if (message != log)
+	  {
+		  free(message);
+	  }
 
 	  json_string = json_serialize_to_string(js);
 	  json_value_free(js);
