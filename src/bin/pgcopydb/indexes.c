@@ -82,6 +82,10 @@ copydb_start_index_supervisor(CopyDataSpec *specs, pid_t *pidOut)
 /*
  * copydb_index_supervisor starts the create index workers and does the
  * waitpid() dance for them.
+ *
+ * A failure before the wait for the workers ends the run: nothing would send
+ * the VACUUM workers their STOP, so they would wait forever, and before the
+ * index workers run, so would the producers once the index queue is full.
  */
 bool
 copydb_index_supervisor(CopyDataSpec *specs)
@@ -95,6 +99,7 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_open(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -109,18 +114,21 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_delete_all_process_entries(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!summary_delete_incomplete_index_build(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!summary_delete_table_indexes_done(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -130,12 +138,14 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!summary_start_timing(sourceDB, TIMING_SECTION_CREATE_INDEX))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!summary_start_timing(sourceDB, TIMING_SECTION_ALTER_TABLE))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -149,12 +159,14 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_close(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!copydb_start_index_workers(specs))
 	{
 		log_error("Failed to start index workers, see above for details");
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -162,6 +174,7 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_open(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 

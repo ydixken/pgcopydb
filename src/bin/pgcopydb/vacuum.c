@@ -73,6 +73,10 @@ vacuum_start_supervisor(CopyDataSpec *specs, pid_t *pidOut)
 /*
  * vacuum_supervisor starts the vacuum workers and does the waitpid() dance for
  * them.
+ *
+ * A failure before the wait for the workers ends the run: once they run we
+ * would leave them unwaited, and before that nothing reads the VACUUM queue,
+ * so the processes that queue tables would wait forever once it is full.
  */
 bool
 vacuum_supervisor(CopyDataSpec *specs)
@@ -86,6 +90,7 @@ vacuum_supervisor(CopyDataSpec *specs)
 	if (!catalog_open(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -95,6 +100,7 @@ vacuum_supervisor(CopyDataSpec *specs)
 	if (!summary_start_timing(sourceDB, TIMING_SECTION_VACUUM))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -107,12 +113,14 @@ vacuum_supervisor(CopyDataSpec *specs)
 	if (!catalog_close(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!vacuum_start_workers(specs))
 	{
 		log_error("Failed to start vacuum workers, see above for details");
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -120,6 +128,7 @@ vacuum_supervisor(CopyDataSpec *specs)
 	if (!catalog_open(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
