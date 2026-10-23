@@ -5631,6 +5631,63 @@ pgsql_table_exists(PGSQL *pgsql,
 
 
 /*
+ * pgsql_get_constraint_def sets *condef to pg_get_constraintdef() of the named
+ * constraint of the table, or to NULL when the table has none of that name.
+ * Names are quoted, as our catalogs keep them; the table OID keeps it indexed.
+ */
+bool
+pgsql_get_constraint_def(PGSQL *pgsql,
+						 const char *tableQname,
+						 const char *conname,
+						 char **condef)
+{
+	SingleValueResultContext context = { { 0 }, PGSQL_RESULT_STRING, false };
+
+	char *sql =
+		"select pg_get_constraintdef(c.oid) "
+		"  from pg_constraint c "
+		" where c.conrelid = to_regclass($1) "
+		"   and format('%I', c.conname) = $2";
+
+	int paramCount = 2;
+	const Oid paramTypes[2] = { TEXTOID, TEXTOID };
+	const char *paramValues[2] = { tableQname, conname };
+
+	*condef = NULL;
+
+	if (!pgsql_execute_with_params(pgsql, sql,
+								   paramCount, paramTypes, paramValues,
+								   &context, &parseSingleValueResult))
+	{
+		log_error("Failed to look up constraint %s of %s", conname, tableQname);
+		return false;
+	}
+
+	if (context.ntuples == 0)
+	{
+		return true;
+	}
+
+	/* parsedOk is only set when exactly one row is returned */
+	if (!context.parsedOk || context.isNull)
+	{
+		log_error("Failed to look up constraint %s of %s", conname, tableQname);
+		return false;
+	}
+
+	if (context.strVal == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	*condef = context.strVal;
+
+	return true;
+}
+
+
+/*
  * pgsql_role_exists checks that a role with the given roleName exists on the
  * Postgres server.
  */

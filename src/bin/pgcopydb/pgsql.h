@@ -578,6 +578,11 @@ bool pgsql_table_exists(PGSQL *pgsql,
 						const char *relname,
 						bool *exists);
 
+bool pgsql_get_constraint_def(PGSQL *pgsql,
+							  const char *tableQname,
+							  const char *conname,
+							  char **condef);
+
 bool pgsql_current_wal_flush_lsn(PGSQL *pgsql, uint64_t *lsn);
 
 char * pgsql_escape_identifier(PGSQL *pgsql, char *src);

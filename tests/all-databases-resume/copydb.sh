@@ -10,7 +10,7 @@ set -euo pipefail
 
 scenario=${1:-all}
 mode=${2:-}
-scenarios='elect mixed unrecorded unrecorded-nokey live live-key copy-pid-live index-pid-live trunc-fail constraint'
+scenarios='elect mixed unrecorded unrecorded-nokey live live-key copy-pid-live index-pid-live trunc-fail constraint constraint-orphan'
 name=${scenario}
 
 fail() { echo "FAIL [${name}]: $*" >&2; exit 1; }
@@ -38,12 +38,13 @@ case "${scenario}" in
         echo "elapsed: ${SECONDS} s"
         exit "${status}"
         ;;
-    constraint)
-        # a resume loses the constraint election without --all-databases too
+    constraint|constraint-orphan)
+        # a resume loses the constraint election, or meets a constraint the
+        # killed run committed, without --all-databases too
         if test -z "${mode}"; then
             status=0
             for mode in all-databases single; do
-                bash "$0" constraint "${mode}" || status=1
+                bash "$0" "${scenario}" "${mode}" || status=1
             done
             exit "${status}"
         fi
@@ -54,7 +55,7 @@ case "${scenario}" in
 esac
 mode=${mode:-all-databases}
 case "${scenario}:${mode}" in
-    *:all-databases|constraint:single) ;;
+    *:all-databases|constraint:single|constraint-orphan:single) ;;
     *) echo "Unknown mode of ${scenario}: ${mode}" >&2; exit 1 ;;
 esac
 
@@ -240,6 +241,16 @@ kill_clone() {
     poll 'the killed run to leave the target' run_gone
 }
 
+# a caller that ends no session: the backend of a statement that waits on the
+# gate outlives the run, and its statement commits once the gate opens
+orphan_clone() {
+    kill -KILL -- "-${clone_pid}"
+    wait "${clone_pid}" || true
+    clone_pid=
+    release_gate
+    poll 'the backends of the killed run to end' run_gone
+}
+
 # resume <log> <seconds>: the caller's retry, bounded; -k ends a run that
 # outlives the SIGTERM
 resume() {
@@ -317,7 +328,7 @@ case "${scenario}" in
     # killed while the ALTER TABLE adding cx_excl waits, which is built in the
     # constraint step after both indexes of cx are done; one index worker
     # then sees both done indexes of cx in the resume, and is elected once
-    constraint)
+    constraint|constraint-orphan)
         table=cx db=d2 index_jobs=1
         sql source d2 "create table cx(id integer not null, val integer not null);
             insert into cx select g, g % 100 from generate_series(1, 1000) g;
@@ -363,11 +374,15 @@ case "${scenario}" in
     index-pid-live)
         poll 'the CREATE INDEX of small_gate to wait on the gate' waits d1 pg_stat_progress_create_index small
         ;;
-    constraint)
+    constraint|constraint-orphan)
         poll 'the ALTER TABLE adding cx_excl to wait on the gate' alter_waits cx_excl
         ;;
 esac
-kill_clone
+if test "${scenario}" = constraint-orphan; then
+    orphan_clone
+else
+    kill_clone
+fi
 
 case "${scenario}" in
     elect|mixed)
@@ -388,11 +403,16 @@ case "${scenario}" in
             equal "$(sqlite d1 "select coalesce(part_key, '') from s_table where relname = 'heap'")" '' 'heap is split by ctid'
         fi
         ;;
-    constraint)
+    constraint|constraint-orphan)
         equal "$(sqlite d2 "select count(*) from s_table_indexes_done d join s_table t on t.oid = d.tableoid
             where t.relname = 'cx'")" 1 'the killed run left the constraint election of cx'
         equal "$(sqlite d2 "select group_concat(c.conname || ' done=' || (s.done_time_epoch is not null), ', ')
             from summary s join s_constraint c on c.oid = s.conoid")" 'cx_excl done=0' 'constraints the killed run started'
+        if test "${scenario}" = constraint-orphan; then
+            equal "$(sql target d2 "select count(*) from pg_constraint where conrelid = 'public.cx'::regclass
+                and conname = 'cx_excl'")" 1 'cx_excl committed on the target after the kill'
+            echo "the backend left by the killed run committed cx_excl, whose done time is missing"
+        fi
         ;;
 esac
 case "${scenario}" in
@@ -417,7 +437,7 @@ case "${scenario}" in
         ;;
 esac
 
-release_gate
+test "${scenario}" = constraint-orphan || release_gate
 
 # a failed TRUNCATE has to end the resume, and the next one has to converge
 if test "${scenario}" = trunc-fail; then
@@ -487,6 +507,16 @@ case "${scenario}" in
         resume_logs 'ALTER TABLE public\.cx ADD CONSTRAINT cx_excl ' 1 'the resume adds cx_excl'
         resume_logs 'ALTER TABLE public\.cx ADD CONSTRAINT cx_pkey ' 1 'the resume adds cx_pkey'
         resume_logs 'VACUUM ANALYZE public\.cx[;,]' 1 'the resume vacuums cx'
+        ;;
+    constraint-orphan)
+        resume_logs 'ALTER TABLE public\.cx ADD CONSTRAINT cx_excl ' 0 'the resume adds cx_excl'
+        resume_logs 'Skipping constraint cx_excl on public\.cx: found on the target database' 1 \
+            'the resume finds cx_excl on the target'
+        resume_logs 'ALTER TABLE public\.cx ADD CONSTRAINT cx_pkey ' 1 'the resume adds cx_pkey'
+        resume_logs 'VACUUM ANALYZE public\.cx[;,]' 1 'the resume vacuums cx'
+        equal "$(sqlite d2 "select group_concat(d, ', ') from (select c.conname || ' done=' || (s.done_time_epoch is not null) as d
+            from summary s join s_constraint c on c.oid = s.conoid order by 1)")" 'cx_excl done=1, cx_pkey done=1' \
+            'constraints done after the resume'
         ;;
 esac
 echo "PASS [${name}]: the resume leaves ${db}.${table} equal to the source"

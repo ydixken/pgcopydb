@@ -1192,14 +1192,6 @@ copydb_create_constraints(CopyDataSpec *specs, PGSQL *dst, SourceTable *table)
 {
 	int errors = 0;
 
-	/*
-	 * Postgres doesn't implement ALTER TABLE ... ADD CONSTRAINT ... IF NOT
-	 * EXISTS, which we would be using here in some cases otherwise.
-	 *
-	 * When --resume is used, for instance, the previous run could have been
-	 * interrupted after a constraint creation on the target database, but
-	 * before the creation of its constraintDoneFile.
-	 */
 	DatabaseCatalog *targetDB = &(specs->catalogs.target);
 
 	/* have a copy of the source table to edit indexCount etc */
@@ -1244,8 +1236,8 @@ copydb_create_constraints(CopyDataSpec *specs, PGSQL *dst, SourceTable *table)
 	/*
 	 * Now iterate over the source database catalog list of indexes attached to
 	 * the current table, and install indexes/constraints on that same table on
-	 * the target database, skipping constraints that already exists on the
-	 * target catalog.
+	 * the target database, skipping constraints that the target database
+	 * already has.
 	 */
 	DatabaseCatalog *sourceDB = &(specs->catalogs.source);
 
@@ -1278,7 +1270,6 @@ copydb_create_constraints_hook(void *ctx, SourceIndex *index)
 	CopyDataSpec *specs = context->specs;
 
 	DatabaseCatalog *sourceDB = &(specs->catalogs.source);
-	DatabaseCatalog *targetDB = &(specs->catalogs.target);
 
 	/* some indexes are not attached to a constraint at all */
 	if (index->constraintOid == 0 ||
@@ -1317,28 +1308,54 @@ copydb_create_constraints_hook(void *ctx, SourceIndex *index)
 		return false;
 	}
 
-	/* skip constraints that already exist on the target database */
-	SourceIndex *targetIndex = (SourceIndex *) calloc(1, sizeof(SourceIndex));
+	/*
+	 * No ADD CONSTRAINT ... IF NOT EXISTS: a run killed before the done time
+	 * leaves the constraint once its ALTER TABLE commits, even after the kill.
+	 */
+	char *targetDef = NULL;
 
-	if (targetIndex == NULL)
-	{
-		log_error(ALLOCATION_FAILED_ERROR);
-		return false;
-	}
-
-	if (!catalog_lookup_s_index_by_name(targetDB,
-										index->indexNamespace,
-										index->indexRelname,
-										targetIndex))
+	if (!pgsql_get_constraint_def(context->dst,
+								  index->tableQname,
+								  index->constraintName,
+								  &targetDef))
 	{
 		/* errors have already been logged */
 		return false;
 	}
 
-	bool foundConstraintOnTarget =
-		streq(index->constraintName, targetIndex->constraintName);
+	if (targetDef != NULL && !streq(targetDef, index->constraintDef))
+	{
+		log_error("pg_get_constraintdef() differs for constraint %s "
+				  "on table %s: target \"%s\", source \"%s\"; "
+				  "search_path and server version change this text",
+				  index->constraintName,
+				  index->tableQname,
+				  targetDef,
+				  index->constraintDef);
+		free(targetDef);
+		return false;
+	}
 
-	if (!foundConstraintOnTarget)
+	if (targetDef != NULL)
+	{
+		if (specs->datname[0] != '\0')
+		{
+			log_notice("%s: Skipping constraint %s on %s: "
+					   "found on the target database",
+					   specs->datname,
+					   index->constraintName,
+					   index->tableQname);
+		}
+		else
+		{
+			log_notice("Skipping constraint %s on %s: "
+					   "found on the target database",
+					   index->constraintName,
+					   index->tableQname);
+		}
+		free(targetDef);
+	}
+	else
 	{
 		if (specs->datname[0] != '\0')
 		{

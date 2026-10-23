@@ -697,6 +697,10 @@ The following options are available to ``pgcopydb clone``:
   ``--resume`` run only if known to have run through to completion on the
   previous one.
   The same holds for the VACUUM ANALYZE of each table.
+  An ALTER TABLE that adds a constraint is also skipped when the target table already has a constraint of that name whose ``pg_get_constraintdef()`` text equals the source's.
+  A run that stops before recording that ALTER TABLE as done leaves such a constraint once the ALTER TABLE commits, which can happen after the run has died.
+  When the two texts differ, the run stops with an error that shows both.
+  ``search_path`` and the server version change that text, so one constraint can print differently on the source and the target.
   A resume skips the large-object step only when the previous run finished it, and the configuration rows of an extension only when the previous run finished copying them.
   A large object that a resume copies again is cut to its length on the source.
 
