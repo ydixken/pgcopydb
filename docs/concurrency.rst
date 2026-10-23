@@ -19,6 +19,8 @@ The process tree then looks like the following::
 
   $ pgcopydb clone --follow --table-jobs 4 --index-jobs 4 --large-objects-jobs 4
    + pgcopydb clone worker
+      + pgcopydb copy extensions
+
       + pgcopydb copy supervisor [ --table-jobs 4 ]
         - pgcopydb copy queue worker
         - pgcopydb copy worker
@@ -50,25 +52,26 @@ The process tree then looks like the following::
      - pgcopydb stream receive
      - pgcopydb stream apply
 
-Observe that when using ``pgcopydb clone --follow --table-jobs 4 --index-jobs
-4 --large-objects-jobs 4``, pgcopydb creates 26 sub-processes.
+Observe that when using ``pgcopydb clone --follow --table-jobs 4 --index-jobs 4 --large-objects-jobs 4``, pgcopydb creates 27 sub-processes.
 
-The 26 total is counted from:
+The 27 total is counted from:
 
- - 1 clone worker + 1 copy supervisor + 1 copy queue worker + 4 copy
-   workers + 1 blob metadata worker + 4 blob data workers + 1 index
-   supervisor + 4 index workers + 1 vacuum supervisor + 4 vacuum workers + 1
-   sequence reset worker
+ - 1 clone worker + 1 copy extensions + 1 copy supervisor + 1 copy queue worker + 4 copy workers + 1 blob metadata worker + 4 blob data workers + 1 index supervisor + 4 index workers + 1 vacuum supervisor + 4 vacuum workers + 1 sequence reset worker
 
-   that's 1 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 1 + 4 + 1 = 23
+   that's 1 + 1 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 1 + 4 + 1 = 24
 
  - 1 follow worker + 1 stream receive + 1 stream apply
 
    that's 1 + 1 + 1 = 3
 
- - At the end, it is 23 + 3 = 26 total
+ - At the end, it is 24 + 3 = 27 total
+
+With ``--defer-indexes``, the index and vacuum supervisors start only after the copy supervisor and its workers have exited, so no index or vacuum process runs beside a copy worker.
+The same command then creates one more sub-process, ``pgcopydb: deferred queue indexes``, described below.
 
 Here is a description of the process tree:
+
+ * To copy the contents of extension configuration tables and sequences from the source database to the target database, pgcopydb creates a single dedicated sub-process.
 
  * When starting with the TABLE DATA copying step, then pgcopydb creates as
    many sub-processes as specified by the ``--table-jobs`` command line
@@ -97,9 +100,14 @@ Here is a description of the process tree:
    Postgres instance. Usually, a given CREATE INDEX command uses 100% of a
    single core.
 
+   With ``--defer-indexes`` these sub-processes start only after every table has been copied.
+
  * To drive the VACUUM ANALYZE workload on the target database, pgcopydb
    creates as many sub-processes as specified by the ``--table-jobs``
    command line option.
+   With ``--defer-indexes`` these sub-processes also start only after every table has been copied.
+
+ * With ``--defer-indexes``, a single ``pgcopydb: deferred queue indexes`` sub-process queues the indexes of every table, largest table first, and the VACUUM ANALYZE of each table that has no index, then exits.
 
  * To reset sequences in parallel to COPYing the table data, pgcopydb
    creates a single dedicated sub-process.
@@ -444,6 +452,9 @@ The process tree for this phase looks like the following::
        - pgcopydb vacuum analyze worker
        - pgcopydb vacuum analyze worker
        - pgcopydb vacuum analyze worker
+
+With ``--defer-indexes``, neither the global index supervisor nor the global vacuum supervisor starts beside the global copy supervisor.
+Once the last COPY is done, a ``pgcopydb: deferred index step`` sub-process starts both supervisors and the ``pgcopydb: deferred queue indexes`` sub-process, which queues their work.
 
 Phase III — post-data (sequential, one database at a time)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

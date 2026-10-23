@@ -409,6 +409,12 @@ copydb_fetch_previous_run_state(CopyDataSpec *specs)
 		log_notice("Indexes have been copied to the target instance");
 	}
 
+	if (topLevelTimingArray[TIMING_SECTION_VACUUM].doneTime > 0)
+	{
+		specs->runState.vacuumIsDone = true;
+		log_notice("Tables have been vacuumed on the target instance");
+	}
+
 	if (topLevelTimingArray[TIMING_SECTION_SET_SEQUENCES].doneTime > 0)
 	{
 		specs->runState.sequenceCopyIsDone = true;

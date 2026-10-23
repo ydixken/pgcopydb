@@ -202,6 +202,7 @@ typedef struct PreviousRunState
 
 	bool tableCopyIsDone;
 	bool indexCopyIsDone;
+	bool vacuumIsDone;
 	bool sequenceCopyIsDone;
 	bool blobsCopyIsDone;
 
@@ -274,6 +275,28 @@ typedef struct MultiDbTableEntry
 } MultiDbTableEntry;
 
 
+/*
+ * The work of the --defer-indexes phase, collected from the catalogs before
+ * any of it is queued.
+ */
+typedef struct DeferredIndexItem
+{
+	char datname[PG_NAMEDATALEN];   /* empty without --all-databases */
+	int64_t bytes;                  /* table size, the sort key */
+	uint32_t tableOid;
+	uint32_t indexOid;              /* 0: queue the table's VACUUM */
+	uint64_t seq;                   /* catalog order, the last sort key */
+} DeferredIndexItem;
+
+typedef struct DeferredIndexWork
+{
+	bool vacuumOnly;                /* indexes done: one VACUUM item per table */
+	uint64_t count;
+	uint64_t capacity;
+	DeferredIndexItem *items;       /* malloc'ed */
+} DeferredIndexWork;
+
+
 /* all that's needed to start a TABLE DATA copy for a whole database */
 typedef struct CopyDataSpec
 {
@@ -306,6 +329,7 @@ typedef struct CopyDataSpec
 	bool resume;
 	bool consistent;
 	bool failFast;
+	bool deferIndexes;
 
 	bool fetchCatalogs;         /* cache invalidation of local catalogs db */
 	bool fetchFilteredOids;     /* allow bypassing dump/restore filter prep */
@@ -475,6 +499,17 @@ bool copydb_prepare_create_index_command(CopyIndexSpec *indexSpecs,
 bool copydb_prepare_create_constraint_command(CopyIndexSpec *indexSpecs);
 
 bool copydb_create_constraints(CopyDataSpec *spec, PGSQL *dst, SourceTable *table);
+
+bool copydb_process_deferred_indexes(CopyDataSpec *specs);
+bool copydb_deferred_collect(DatabaseCatalog *catalog, const char *datname,
+							 DeferredIndexWork *work);
+void copydb_deferred_sort(DeferredIndexWork *work);
+bool copydb_deferred_start_sender(CopyDataSpec *specs, DeferredIndexWork *work,
+								  pid_t *pidOut);
+bool copydb_deferred_send(CopyDataSpec *specs, DeferredIndexWork *work);
+bool copydb_deferred_wait(CopyDataSpec *specs, pid_t senderPid,
+						  pid_t indexPid, pid_t vacuumPid);
+void copydb_deferred_free(DeferredIndexWork *work);
 
 /* dump_restore.c */
 bool copydb_dump_source_schema(CopyDataSpec *specs, const char *snapshot);

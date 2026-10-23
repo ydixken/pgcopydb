@@ -10,6 +10,7 @@
      --index-jobs          Number of concurrent CREATE INDEX jobs to run
      --restore-jobs        Number of concurrent jobs for pg_restore
      --skip-large-objects  Skip copying large objects (blobs)
+     --defer-indexes       Build indexes once all table data is copied
      --filters <filename>  Use the filters defined in <filename>
      --restart             Allow restarting when temp files exist already
      --resume              Allow resuming operations after a failure

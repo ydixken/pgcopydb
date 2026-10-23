@@ -40,17 +40,23 @@ static bool copydb_resume_extensions_and_blobs(CopyDataSpec *specs);
  *
  * Each subprocess also fetches a list of indexes for each given table, and
  * creates those indexes in parallel using up to idxJobs sub-processes for
- * that.
+ * that. With --defer-indexes the subprocesses only copy the table data, and
+ * the indexes, constraints and VACUUM follow once every table is copied.
  */
 bool
 copydb_copy_all_table_data(CopyDataSpec *specs)
 {
 	DatabaseCatalog *sourceDB = &(specs->catalogs.source);
 
+	/*
+	 * With --defer-indexes the index timing stops before the VACUUM queue
+	 * drains, so a resume may still have VACUUM left to run.
+	 */
 	if (specs->runState.tableCopyIsDone &&
 		specs->runState.indexCopyIsDone &&
 		specs->runState.sequenceCopyIsDone &&
-		specs->section != DATA_SECTION_CONSTRAINTS)
+		specs->section != DATA_SECTION_CONSTRAINTS &&
+		(!specs->deferIndexes || specs->runState.vacuumIsDone))
 	{
 		log_info("Skipping tables, indexes, and sequences, "
 				 "already done on a previous run");
@@ -87,6 +93,12 @@ copydb_copy_all_table_data(CopyDataSpec *specs)
 		const char *signalStr = signal_to_string(signal);
 
 		log_warn("Received signal %s, terminating", signalStr);
+		return false;
+	}
+
+	if (specs->deferIndexes && !copydb_process_deferred_indexes(specs))
+	{
+		log_fatal("Failed to build the deferred indexes, see above for details");
 		return false;
 	}
 
@@ -156,6 +168,9 @@ copydb_resume_extensions_and_blobs(CopyDataSpec *specs)
  * copydb_process_table_data forks() as many as specs->tableJobs processes that
  * will all concurrently process TABLE DATA and then CREATE INDEX and then also
  * VACUUM ANALYZE each table.
+ *
+ * With --defer-indexes they only process TABLE DATA, and no CREATE INDEX or
+ * VACUUM process starts here.
  */
 bool
 copydb_process_table_data(CopyDataSpec *specs)
@@ -185,8 +200,16 @@ copydb_process_table_data(CopyDataSpec *specs)
 		/*
 		 * First start the COPY data workers with their supervisor and IPC
 		 * infrastructure (queues).
+		 *
+		 * Without --defer-indexes the COPY workers also queue the index work.
+		 * With it a resume skips them once the COPY timing is done, which
+		 * happens only after every COPY worker succeeded.
 		 */
-		if (!copydb_start_copy_supervisor(specs))
+		if (specs->deferIndexes && specs->runState.tableCopyIsDone)
+		{
+			log_info("Skipping COPY, already done on a previous run");
+		}
+		else if (!copydb_start_copy_supervisor(specs))
 		{
 			/* errors have already been logged */
 			++errors;
@@ -195,7 +218,8 @@ copydb_process_table_data(CopyDataSpec *specs)
 		/*
 		 * Start as many index worker process as --index-jobs
 		 */
-		if (errors == 0 && !copydb_start_index_supervisor(specs, NULL))
+		if (errors == 0 && !specs->deferIndexes &&
+			!copydb_start_index_supervisor(specs, NULL))
 		{
 			/* errors have already been logged */
 			++errors;
@@ -206,7 +230,8 @@ copydb_process_table_data(CopyDataSpec *specs)
 		 * --table-jobs. Could be exposed separately as --vacuumJobs too, but
 		 * that's not been done at this time.
 		 */
-		if (errors == 0 && !vacuum_start_supervisor(specs, NULL))
+		if (errors == 0 && !specs->deferIndexes &&
+			!vacuum_start_supervisor(specs, NULL))
 		{
 			/* errors have already been logged */
 			++errors;
@@ -451,7 +476,7 @@ copydb_copy_supervisor(CopyDataSpec *specs)
 		{
 			(void) copydb_fatal_exit();
 		}
-		else
+		else if (!specs->deferIndexes)
 		{
 			/* send create index workers a STOP message */
 			if (!copydb_index_workers_send_stop(specs))
@@ -479,8 +504,11 @@ copydb_copy_supervisor(CopyDataSpec *specs)
 	 * Now that the COPY processes are done, signal this is the end to the
 	 * CREATE INDEX sub-processes by adding the STOP message to
 	 * their queues.
+	 *
+	 * With --defer-indexes no CREATE INDEX process runs yet, and a STOP left
+	 * in the queue would end a deferred index worker before its first index.
 	 */
-	if (!copydb_index_workers_send_stop(specs))
+	if (!specs->deferIndexes && !copydb_index_workers_send_stop(specs))
 	{
 		/*
 		 * The other subprocesses need to see a STOP message to stop their
@@ -1112,7 +1140,8 @@ copydb_copy_data_by_oid(CopyDataSpec *specs, PGSQL *src, PGSQL *dst,
 	/*
 	 * Skip only table-data copy when it it has been done already on a previous
 	 * run. We still need to process the indexes, constraints, and vacuum.
-	 * So, signal the index and vacuum workers as usual.
+	 * So, signal the index and vacuum workers as usual, unless --defer-indexes
+	 * defers them.
 	 */
 	if (isDone)
 	{
@@ -1141,9 +1170,14 @@ copydb_copy_data_by_oid(CopyDataSpec *specs, PGSQL *src, PGSQL *dst,
 		}
 	}
 
-	if (specs->section == DATA_SECTION_TABLE_DATA)
+	/*
+	 * With --defer-indexes nothing reads the index and VACUUM queues during
+	 * the COPY, so queueing there would block this worker once one is full.
+	 */
+	if (specs->section == DATA_SECTION_TABLE_DATA || specs->deferIndexes)
 	{
-		log_debug("Skip indexes, constraints, vacuum (section: table-data)");
+		log_debug("Skip indexes, constraints, vacuum (%s)",
+				  specs->deferIndexes ? "deferred" : "section: table-data");
 		return true;
 	}
 

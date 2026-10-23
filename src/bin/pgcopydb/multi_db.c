@@ -68,6 +68,9 @@ static bool multidb_pre_data_one_db(CopyDataSpec *parentSpecs,
 static bool multidb_clone_one_database_post_data(CopyDataSpec *parentSpecs,
 												 const char *datname);
 static bool multidb_global_copy(CopyDataSpec *parentSpecs);
+static bool multidb_start_deferred_indexes(CopyDataSpec *parentSpecs,
+										   pid_t *pidOut);
+static bool multidb_deferred_indexes(CopyDataSpec *parentSpecs);
 static bool multidb_wait_child(pid_t pid, const char *label);
 
 /* connection cache helpers (also called from table-data.c) */
@@ -1390,6 +1393,9 @@ multidb_clone_one_database_post_data(CopyDataSpec *parentSpecs,
  * exactly as in the singledb path.  Index/vacuum workers use a per-db
  * connection pool (catalog + target, no snapshot) to route to the right db.
  *
+ * With --defer-indexes the copy workers queue nothing, and once every COPY
+ * succeeded a deferred index step child starts both supervisors and a sender.
+ *
  * Fix A — shared catalog semaphores:
  *   One System V semaphore is created per database before forking.  All
  *   workers inherit the semaphore IDs via COW.  multidb_init_entry (copy
@@ -1524,7 +1530,7 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 	 */
 	pid_t vacPid = -1;
 
-	if (!parentSpecs->skipVacuum)
+	if (!parentSpecs->skipVacuum && !parentSpecs->deferIndexes)
 	{
 		if (!vacuum_start_supervisor(parentSpecs, &vacPid))
 		{
@@ -1538,7 +1544,8 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 	 */
 	pid_t idxPid = -1;
 
-	if (!copydb_start_index_supervisor(parentSpecs, &idxPid))
+	if (!parentSpecs->deferIndexes &&
+		!copydb_start_index_supervisor(parentSpecs, &idxPid))
 	{
 		log_error("Failed to start global index supervisor");
 		return false;
@@ -1547,7 +1554,8 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 	/*
 	 * Fork the global copy supervisor.  The supervisor creates the copyQueue,
 	 * forks copy workers and the queue filler, then waits for them.
-	 * Copy workers fill indexQueue/vacuumQueue after each table copy.
+	 * Without --defer-indexes, copy workers fill indexQueue/vacuumQueue after
+	 * each table copy.
 	 */
 	fflush(stdout);
 	fflush(stderr);
@@ -1656,7 +1664,8 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 			 * can drain the index queue and terminate.  Mirror what
 			 * copydb_copy_supervisor() does in table-data.c.
 			 */
-			if (!copydb_index_workers_send_stop(parentSpecs))
+			if (!parentSpecs->deferIndexes &&
+				!copydb_index_workers_send_stop(parentSpecs))
 			{
 				log_error("Failed to send STOP messages to index workers");
 				ok = false;
@@ -1675,7 +1684,8 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 	}
 
 	/*
-	 * Wait for all three supervisor children using targeted waitpid() calls.
+	 * Wait for the supervisor children forked above using targeted waitpid()
+	 * calls.
 	 *
 	 * We MUST NOT use copydb_wait_for_subprocesses() here because it calls
 	 * waitpid(-1, ...) which would accidentally reap the snapshot holder — a
@@ -1686,7 +1696,17 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 	 */
 	pid_t supervisor_pids[3] = { spid, idxPid, vacPid };
 	bool ok = true;
-	int remaining = (vacPid > 0) ? 3 : 2;
+
+	/* --skip-vacuum forks no vacuum supervisor, --defer-indexes neither one */
+	int remaining = 0;
+
+	for (int i = 0; i < 3; i++)
+	{
+		if (supervisor_pids[i] > 0)
+		{
+			++remaining;
+		}
+	}
 
 	while (remaining > 0)
 	{
@@ -1730,6 +1750,21 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 				supervisor_pids[i] = -1;
 				--remaining;
 			}
+		}
+	}
+
+	/*
+	 * The deferred step uses the queues and the catalog semaphore set that
+	 * are removed below, so it must be done before we get there.
+	 */
+	if (ok && parentSpecs->deferIndexes)
+	{
+		pid_t deferredPid = -1;
+
+		if (!multidb_start_deferred_indexes(parentSpecs, &deferredPid) ||
+			!multidb_wait_child(deferredPid, "deferred index step"))
+		{
+			ok = false;
 		}
 	}
 
@@ -1821,6 +1856,156 @@ multidb_global_copy(CopyDataSpec *parentSpecs)
 	}
 
 	return ok;
+}
+
+
+/*
+ * multidb_start_deferred_indexes forks the deferred index step. Its waits use
+ * waitpid(-1), which in the clone process would reap the snapshot holder.
+ */
+static bool
+multidb_start_deferred_indexes(CopyDataSpec *parentSpecs, pid_t *pidOut)
+{
+	if (asked_to_quit || asked_to_stop || asked_to_stop_fast)
+	{
+		int signal = get_current_signal(SIGTERM);
+		const char *signalStr = signal_to_string(signal);
+
+		log_warn("Received signal %s, terminating", signalStr);
+		return false;
+	}
+
+	fflush(stdout);
+	fflush(stderr);
+
+	pid_t fpid = fork();
+
+	switch (fpid)
+	{
+		case -1:
+		{
+			log_error("Failed to fork the deferred index step: %m");
+			return false;
+		}
+
+		case 0:
+		{
+			(void) set_ps_title("pgcopydb: deferred index step");
+
+			bool ok = multidb_deferred_indexes(parentSpecs);
+
+			exit(ok ? EXIT_CODE_QUIT : EXIT_CODE_INTERNAL_ERROR);
+		}
+
+		default:
+		{
+			*pidOut = fpid;
+			break;
+		}
+	}
+
+	return true;
+}
+
+
+/*
+ * multidb_deferred_indexes collects the indexes and VACUUM of every database,
+ * largest table first across databases, and runs them through the global
+ * index and VACUUM supervisors as the single-database deferred phase does.
+ */
+static bool
+multidb_deferred_indexes(CopyDataSpec *parentSpecs)
+{
+	log_notice("Started deferred index step %d [%d]", getpid(), getppid());
+
+	/* no per-database run state: a resume queues every table again */
+	DeferredIndexWork work = { .vacuumOnly = false };
+
+	for (int i = 0; i < parentSpecs->multiDbCount; i++)
+	{
+		MultiDbInfo *info = &parentSpecs->multiDbInfos[i];
+
+		/*
+		 * The shared semaphore set slot: a catalog without one creates a
+		 * semaphore of its own, whose slot only its removal frees.
+		 */
+		DatabaseCatalog dbCat = {
+			.type = DATABASE_CATALOG_TYPE_SOURCE,
+			.sema.semId = info->catalogSemId,
+			.sema.semIndex = info->catalogSemIndex,
+			.sema.reentrant = true,
+		};
+		sformat(dbCat.dbfile, sizeof(dbCat.dbfile),
+				"%s/schema/source.db", info->topdir);
+
+		if (!catalog_open(&dbCat))
+		{
+			log_error("Failed to open catalog for database \"%s\"",
+					  info->datname);
+			copydb_deferred_free(&work);
+			return false;
+		}
+
+		bool collected = copydb_deferred_collect(&dbCat, info->datname, &work);
+
+		if (!catalog_close(&dbCat) || !collected)
+		{
+			/* errors have already been logged */
+			copydb_deferred_free(&work);
+			return false;
+		}
+	}
+
+	copydb_deferred_sort(&work);
+
+	uint64_t indexCount = 0;
+
+	for (uint64_t i = 0; i < work.count; i++)
+	{
+		indexCount += work.items[i].indexOid != 0 ? 1 : 0;
+	}
+
+	/* the sender queues no VACUUM under --skip-vacuum */
+	uint64_t vacuumCount =
+		parentSpecs->skipVacuum ? 0 : work.count - indexCount;
+
+	log_info("Deferred phase: queueing %lld indexes and %lld tables to vacuum "
+			 "without an index build, in %d databases",
+			 (long long) indexCount,
+			 (long long) vacuumCount,
+			 parentSpecs->multiDbCount);
+
+	pid_t indexPid = -1;
+	pid_t vacuumPid = -1;
+	pid_t senderPid = -1;
+
+	/*
+	 * As in the single-database phase, the VACUUM supervisor starts even
+	 * under --skip-vacuum, where it forks no worker.
+	 */
+	bool started =
+		copydb_start_index_supervisor(parentSpecs, &indexPid) &&
+		vacuum_start_supervisor(parentSpecs, &vacuumPid) &&
+		copydb_deferred_start_sender(parentSpecs, &work, &senderPid);
+
+	if (!started)
+	{
+		/* a supervisor that started waits for messages nobody sends now */
+		if (indexPid > 0 || vacuumPid > 0)
+		{
+			(void) copydb_fatal_exit();
+		}
+
+		copydb_deferred_free(&work);
+		return false;
+	}
+
+	bool success =
+		copydb_deferred_wait(parentSpecs, senderPid, indexPid, vacuumPid);
+
+	copydb_deferred_free(&work);
+
+	return success;
 }
 
 
@@ -2004,6 +2189,7 @@ multidb_init_index_entry(MultiDbEntry *entry, CopyDataSpec *parentSpecs,
 	dbSpecs->skipAnalyze = parentSpecs->skipAnalyze;
 	dbSpecs->skipLargeObjects = parentSpecs->skipLargeObjects;
 	dbSpecs->failFast = parentSpecs->failFast;
+	dbSpecs->deferIndexes = parentSpecs->deferIndexes;
 	dbSpecs->resume = parentSpecs->resume;
 	dbSpecs->allDatabases = false;
 
@@ -2283,6 +2469,7 @@ multidb_init_entry(MultiDbEntry *entry, CopyDataSpec *parentSpecs,
 	dbSpecs->skipCtidSplit = parentSpecs->skipCtidSplit;
 	dbSpecs->noRolesPasswords = parentSpecs->noRolesPasswords;
 	dbSpecs->failFast = parentSpecs->failFast;
+	dbSpecs->deferIndexes = parentSpecs->deferIndexes;
 	dbSpecs->useCopyBinary = parentSpecs->useCopyBinary;
 	dbSpecs->restart = false;
 	dbSpecs->resume = parentSpecs->resume;
@@ -2665,6 +2852,7 @@ multidb_init_db_specs(CopyDataSpec *dbSpecs,
 	dbSpecs->skipCtidSplit = parent->skipCtidSplit;
 	dbSpecs->noRolesPasswords = parent->noRolesPasswords;
 	dbSpecs->failFast = parent->failFast;
+	dbSpecs->deferIndexes = parent->deferIndexes;
 	dbSpecs->useCopyBinary = parent->useCopyBinary;
 	dbSpecs->restart = parent->restart;
 	dbSpecs->resume = parent->resume;
