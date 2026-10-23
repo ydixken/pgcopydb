@@ -2066,8 +2066,8 @@ multidb_init_index_entry(MultiDbEntry *entry, CopyDataSpec *parentSpecs,
 	}
 
 	/*
-	 * Open the target catalog read-only for constraint resume checks
-	 * (catalog_s_table_count_indexes, catalog_lookup_s_index_by_name).
+	 * Open the target catalog read-only for the index count that
+	 * copydb_create_constraints logs (catalog_s_table_count_indexes).
 	 * No semaphore: SQLite WAL guarantees snapshot-consistent reads and
 	 * never produces SQLITE_BUSY for readers.  Separate from sourceDB's
 	 * semaphore slot to avoid deadlocking with catalog_iter_s_index_table

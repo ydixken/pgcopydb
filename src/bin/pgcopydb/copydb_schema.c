@@ -1661,12 +1661,9 @@ copydb_prepare_target_catalog(CopyDataSpec *specs)
 	}
 
 	/*
-	 * Now fetch the list of tables and their indexes and constraints on the
-	 * target catalogs, so that in case of a --resume we can skip the
-	 * constraints that have already been created.
-	 *
-	 * That's necessary because ALTER TABLE ADD CONSTRAINT does not have an IF
-	 * EXISTS options.
+	 * Now fetch the list of indexes and constraints on the target database,
+	 * which only log lines read: the constraint step asks the target database
+	 * itself whether a constraint exists (copydb_create_constraints_hook).
 	 */
 	SourceFilters targetDBfilter = { .type = SOURCE_FILTER_TYPE_NONE };
 
