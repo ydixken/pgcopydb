@@ -82,6 +82,10 @@ copydb_start_index_supervisor(CopyDataSpec *specs, pid_t *pidOut)
 /*
  * copydb_index_supervisor starts the create index workers and does the
  * waitpid() dance for them.
+ *
+ * A failure before the wait for the workers ends the run: nothing would send
+ * the VACUUM workers their STOP, so they would wait forever, and before the
+ * index workers run, so would the producers once the index queue is full.
  */
 bool
 copydb_index_supervisor(CopyDataSpec *specs)
@@ -95,6 +99,7 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_open(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -109,18 +114,21 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_delete_all_process_entries(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!summary_delete_incomplete_index_build(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!summary_delete_table_indexes_done(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -130,12 +138,14 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!summary_start_timing(sourceDB, TIMING_SECTION_CREATE_INDEX))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!summary_start_timing(sourceDB, TIMING_SECTION_ALTER_TABLE))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -149,12 +159,14 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_close(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
 	if (!copydb_start_index_workers(specs))
 	{
 		log_error("Failed to start index workers, see above for details");
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -162,6 +174,7 @@ copydb_index_supervisor(CopyDataSpec *specs)
 	if (!catalog_open(sourceDB))
 	{
 		/* errors have already been logged */
+		(void) copydb_fatal_exit();
 		return false;
 	}
 
@@ -867,6 +880,577 @@ copydb_copy_all_indexes_hook(void *ctx, SourceIndex *index)
 	}
 
 	return true;
+}
+
+
+/*
+ * copydb_process_deferred_indexes builds every index and constraint, and runs
+ * every VACUUM, once the whole data phase is done (--defer-indexes). A resume
+ * whose index phase is done runs only the VACUUM part.
+ */
+bool
+copydb_process_deferred_indexes(CopyDataSpec *specs)
+{
+	if (specs->tableJobs == 0)
+	{
+		return true;
+	}
+
+	if (specs->runState.indexCopyIsDone && specs->runState.vacuumIsDone)
+	{
+		log_info("Skipping indexes, already done on a previous run");
+		return true;
+	}
+
+	DeferredIndexWork work = { .vacuumOnly = specs->runState.indexCopyIsDone };
+	DatabaseCatalog *sourceDB = &(specs->catalogs.source);
+
+	if (!catalog_open(sourceDB))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	bool collected = copydb_deferred_collect(sourceDB, "", &work);
+
+	/* close the catalog before fork(), each process opens its own */
+	if (!catalog_close(sourceDB) || !collected)
+	{
+		/* errors have already been logged */
+		copydb_deferred_free(&work);
+		return false;
+	}
+
+	copydb_deferred_sort(&work);
+
+	uint64_t indexCount = 0;
+
+	for (uint64_t i = 0; i < work.count; i++)
+	{
+		indexCount += work.items[i].indexOid != 0 ? 1 : 0;
+	}
+
+	/* the sender queues no VACUUM under --skip-vacuum */
+	uint64_t vacuumCount = specs->skipVacuum ? 0 : work.count - indexCount;
+
+	log_info("Deferred phase: queueing %lld indexes and %lld tables to vacuum "
+			 "without an index build%s",
+			 (long long) indexCount,
+			 (long long) vacuumCount,
+			 work.vacuumOnly ? ", indexes are done on a previous run" : "");
+
+	if (asked_to_quit || asked_to_stop || asked_to_stop_fast)
+	{
+		int signal = get_current_signal(SIGTERM);
+
+		log_warn("Received signal %s, terminating", signal_to_string(signal));
+		copydb_deferred_free(&work);
+		return false;
+	}
+
+	pid_t indexPid = -1;
+	pid_t vacuumPid = -1;
+	pid_t senderPid = -1;
+
+	/* under --skip-vacuum the VACUUM supervisor still records its timing */
+	bool started =
+		(work.vacuumOnly || copydb_start_index_supervisor(specs, &indexPid)) &&
+		vacuum_start_supervisor(specs, &vacuumPid) &&
+		copydb_deferred_start_sender(specs, &work, &senderPid);
+
+	if (!started)
+	{
+		/* a supervisor that started waits for messages nobody sends now */
+		if (indexPid > 0 || vacuumPid > 0)
+		{
+			(void) copydb_fatal_exit();
+		}
+
+		copydb_deferred_free(&work);
+		return false;
+	}
+
+	bool success = copydb_deferred_wait(specs, senderPid, indexPid, vacuumPid);
+
+	copydb_deferred_free(&work);
+
+	return success;
+}
+
+
+typedef struct DeferredTable
+{
+	uint32_t oid;
+	int64_t bytes;
+	char nspname[PG_NAMEDATALEN];
+	char relname[PG_NAMEDATALEN];
+} DeferredTable;
+
+typedef struct DeferredTableArray
+{
+	uint64_t count;
+	uint64_t capacity;
+	DeferredTable *array;       /* malloc'ed area */
+} DeferredTableArray;
+
+typedef struct DeferredIndexContext
+{
+	DeferredIndexWork *work;
+	const char *datname;
+	DeferredTable *table;
+} DeferredIndexContext;
+
+
+static bool copydb_deferred_add_table_hook(void *ctx, SourceTable *table);
+static bool copydb_deferred_add_index_hook(void *ctx, SourceIndex *index);
+static bool copydb_deferred_add_item(DeferredIndexWork *work,
+									 const char *datname,
+									 DeferredTable *table,
+									 uint32_t indexOid);
+static int copydb_deferred_compare(const void *a, const void *b);
+
+
+/*
+ * copydb_deferred_collect appends to work each table's indexes, or its VACUUM
+ * when it has none, as a COPY worker would queue them. Nothing is queued here,
+ * so no catalog read is open while a full queue blocks a send.
+ */
+bool
+copydb_deferred_collect(DatabaseCatalog *catalog, const char *datname,
+						DeferredIndexWork *work)
+{
+	DeferredTableArray tables = { 0 };
+
+	if (!catalog_iter_s_table(catalog, &tables, copydb_deferred_add_table_hook))
+	{
+		/* errors have already been logged */
+		free(tables.array);
+		return false;
+	}
+
+	for (uint64_t i = 0; i < tables.count; i++)
+	{
+		DeferredTable *deferred = &(tables.array[i]);
+		DeferredIndexContext context = {
+			.work = work,
+			.datname = datname,
+			.table = deferred
+		};
+
+		if (work->vacuumOnly)
+		{
+			if (!copydb_deferred_add_item(work, datname, deferred, 0))
+			{
+				free(tables.array);
+				return false;
+			}
+			continue;
+		}
+
+		SourceTable table = { .oid = deferred->oid };
+
+		if (!catalog_s_table_count_indexes(catalog, &table))
+		{
+			log_error("Failed to count indexes attached to table %s.%s",
+					  deferred->nspname,
+					  deferred->relname);
+			free(tables.array);
+			return false;
+		}
+
+		bool added = false;
+
+		if (table.indexCount == 0)
+		{
+			added = copydb_deferred_add_item(work, datname, deferred, 0);
+		}
+		else
+		{
+			added = catalog_iter_s_index_table(catalog,
+											   deferred->nspname,
+											   deferred->relname,
+											   &context,
+											   copydb_deferred_add_index_hook);
+		}
+
+		if (!added)
+		{
+			/* errors have already been logged */
+			free(tables.array);
+			return false;
+		}
+	}
+
+	free(tables.array);
+
+	return true;
+}
+
+
+/*
+ * copydb_deferred_add_table_hook is an iterator callback function.
+ */
+static bool
+copydb_deferred_add_table_hook(void *ctx, SourceTable *table)
+{
+	DeferredTableArray *tables = (DeferredTableArray *) ctx;
+
+	if (tables->count == tables->capacity)
+	{
+		uint64_t capacity = tables->capacity == 0 ? 64 : 2 * tables->capacity;
+		DeferredTable *array =
+			(DeferredTable *) realloc(tables->array,
+									  capacity * sizeof(DeferredTable));
+
+		if (array == NULL)
+		{
+			log_error(ALLOCATION_FAILED_ERROR);
+			return false;
+		}
+
+		tables->array = array;
+		tables->capacity = capacity;
+	}
+
+	DeferredTable *deferred = &(tables->array[(tables->count)++]);
+
+	deferred->oid = table->oid;
+	deferred->bytes = table->bytes;
+	strlcpy(deferred->nspname, table->nspname, sizeof(deferred->nspname));
+	strlcpy(deferred->relname, table->relname, sizeof(deferred->relname));
+
+	return true;
+}
+
+
+/*
+ * copydb_deferred_add_index_hook is an iterator callback function.
+ */
+static bool
+copydb_deferred_add_index_hook(void *ctx, SourceIndex *index)
+{
+	DeferredIndexContext *context = (DeferredIndexContext *) ctx;
+
+	return copydb_deferred_add_item(context->work,
+									context->datname,
+									context->table,
+									index->indexOid);
+}
+
+
+/*
+ * copydb_deferred_add_item appends one item to work, growing its array.
+ */
+static bool
+copydb_deferred_add_item(DeferredIndexWork *work, const char *datname,
+						 DeferredTable *table, uint32_t indexOid)
+{
+	if (work->count == work->capacity)
+	{
+		uint64_t capacity = work->capacity == 0 ? 64 : 2 * work->capacity;
+		DeferredIndexItem *items =
+			(DeferredIndexItem *) realloc(work->items,
+										  capacity * sizeof(DeferredIndexItem));
+
+		if (items == NULL)
+		{
+			log_error(ALLOCATION_FAILED_ERROR);
+			return false;
+		}
+
+		work->items = items;
+		work->capacity = capacity;
+	}
+
+	DeferredIndexItem *item = &(work->items[work->count]);
+
+	item->bytes = table->bytes;
+	item->tableOid = table->oid;
+	item->indexOid = indexOid;
+	item->seq = work->count;
+	strlcpy(item->datname, datname, sizeof(item->datname));
+
+	++(work->count);
+
+	return true;
+}
+
+
+/*
+ * copydb_deferred_sort orders work largest table first, and keeps each
+ * table's items together in catalog order.
+ */
+void
+copydb_deferred_sort(DeferredIndexWork *work)
+{
+	if (work->count > 1)
+	{
+		qsort(work->items, work->count, sizeof(DeferredIndexItem), /* IGNORE-BANNED */
+			  copydb_deferred_compare);
+	}
+}
+
+
+/*
+ * copydb_deferred_compare is a qsort comparison function: bytes descending,
+ * then datname, tableOid and seq ascending.
+ */
+static int
+copydb_deferred_compare(const void *a, const void *b)
+{
+	const DeferredIndexItem *ia = (const DeferredIndexItem *) a;
+	const DeferredIndexItem *ib = (const DeferredIndexItem *) b;
+
+	if (ia->bytes != ib->bytes)
+	{
+		return ia->bytes > ib->bytes ? -1 : 1;
+	}
+
+	int cmp = strcmp(ia->datname, ib->datname);
+
+	if (cmp != 0)
+	{
+		return cmp;
+	}
+
+	if (ia->tableOid != ib->tableOid)
+	{
+		return ia->tableOid < ib->tableOid ? -1 : 1;
+	}
+
+	if (ia->seq != ib->seq)
+	{
+		return ia->seq < ib->seq ? -1 : 1;
+	}
+
+	return 0;
+}
+
+
+/*
+ * copydb_deferred_start_sender forks the process that queues the deferred
+ * work, so that the parent can watch it and the supervisors while a full
+ * queue blocks it.
+ */
+bool
+copydb_deferred_start_sender(CopyDataSpec *specs, DeferredIndexWork *work,
+							 pid_t *pidOut)
+{
+	/*
+	 * Flush stdio channels just before fork, to avoid double-output problems.
+	 */
+	fflush(stdout);
+	fflush(stderr);
+
+	int fpid = fork();
+
+	switch (fpid)
+	{
+		case -1:
+		{
+			log_error("Failed to fork the deferred queue indexes process: %m");
+			return false;
+		}
+
+		case 0:
+		{
+			/* child process runs the command */
+			(void) set_ps_title("pgcopydb: deferred queue indexes");
+
+			if (!copydb_deferred_send(specs, work))
+			{
+				log_error("Failed to queue the deferred indexes, "
+						  "see above for details");
+				exit(EXIT_CODE_INTERNAL_ERROR);
+			}
+
+			exit(EXIT_CODE_QUIT);
+		}
+
+		default:
+		{
+			/* fork succeeded, in parent */
+			*pidOut = fpid;
+			break;
+		}
+	}
+
+	/* now we're done, and we want async behavior, do not wait */
+	return true;
+}
+
+
+/*
+ * copydb_deferred_send queues the work in order, then the index STOPs: the
+ * index supervisor sends the VACUUM STOPs once its workers are done, so a
+ * VACUUM message sent after the index STOPs could land behind them.
+ */
+bool
+copydb_deferred_send(CopyDataSpec *specs, DeferredIndexWork *work)
+{
+	log_notice("Started deferred queue indexes process %d [%d]",
+			   getpid(), getppid());
+
+	for (uint64_t i = 0; i < work->count; i++)
+	{
+		DeferredIndexItem *item = &(work->items[i]);
+
+		if (item->indexOid != 0)
+		{
+			QMessage mesg = {
+				.type = QMSG_TYPE_INDEXOID,
+				.data.tp.oid = item->indexOid
+			};
+
+			strlcpy(mesg.data.tp.datname,
+					item->datname,
+					sizeof(mesg.data.tp.datname));
+
+			if (!queue_send(&(specs->indexQueue), &mesg))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+		}
+		else if (!specs->skipVacuum &&
+				 !vacuum_add_table(specs, item->tableOid, item->datname))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+	}
+
+	/* no index supervisor runs in a VACUUM-only pass */
+	if (work->vacuumOnly)
+	{
+		return vacuum_send_stop(specs);
+	}
+
+	return copydb_index_workers_send_stop(specs);
+}
+
+
+/*
+ * copydb_deferred_wait reaps the sender and both supervisors. It ends the run
+ * when a death leaves another process waiting forever: on a full queue, or
+ * for STOP messages nobody sends any more.
+ */
+bool
+copydb_deferred_wait(CopyDataSpec *specs, pid_t senderPid,
+					 pid_t indexPid, pid_t vacuumPid)
+{
+	bool senderRuns = senderPid > 0;
+	bool indexRuns = indexPid > 0;
+	bool allReturnCodeAreZero = true;
+
+	/* a supervisor reaped while an exited sender waited, handled after it */
+	pid_t heldPid = 0;
+	int heldStatus = 0;
+
+	for (;;)
+	{
+		int status = 0;
+		pid_t pid = heldPid;
+
+		if (pid > 0)
+		{
+			status = heldStatus;
+			heldPid = 0;
+		}
+		else
+		{
+			pid = waitpid(-1, &status, WNOHANG);
+		}
+
+		if (pid == -1 && errno == ECHILD)
+		{
+			break;
+		}
+
+		if (pid <= 0)
+		{
+			pg_usleep(100 * 1000); /* 100 ms */
+			continue;
+		}
+
+		/*
+		 * waitpid(-1) can return a supervisor before a sender that exited
+		 * first: reap and handle that sender first, so that a rule on a
+		 * running sender sees its real state.
+		 */
+		int senderStatus = 0;
+
+		if (pid != senderPid && senderRuns &&
+			waitpid(senderPid, &senderStatus, WNOHANG) == senderPid)
+		{
+			heldPid = pid;
+			heldStatus = status;
+			pid = senderPid;
+			status = senderStatus;
+		}
+
+		int returnCode = WEXITSTATUS(status);
+		int sig = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+		bool failed = returnCode != 0 || !signal_is_handled(sig);
+		bool fatal = failed && specs->failFast;
+
+		if (pid == senderPid)
+		{
+			senderRuns = false;
+			fatal = fatal || failed;
+		}
+		else if (pid == indexPid)
+		{
+			/* only the index supervisor sends the VACUUM STOPs */
+			indexRuns = false;
+			fatal = fatal || (failed && senderRuns) || sig != 0;
+		}
+		else if (pid == vacuumPid)
+		{
+			/*
+			 * The sender and the index workers would block on a VACUUM queue
+			 * nobody reads.
+			 */
+			fatal = fatal || (failed && (senderRuns || indexRuns));
+		}
+
+		if (!failed)
+		{
+			log_debug("Sub-process %d exited with code %d", pid, returnCode);
+		}
+		else if (sig == 0)
+		{
+			allReturnCodeAreZero = false;
+			log_error("Sub-process %d exited with code %d", pid, returnCode);
+		}
+		else
+		{
+			allReturnCodeAreZero = false;
+			log_error("Sub-process %d exited with code %d and signal %s",
+					  pid, returnCode, signal_to_string(sig));
+		}
+
+		if (fatal)
+		{
+			(void) copydb_fatal_exit();
+			return false;
+		}
+	}
+
+	return allReturnCodeAreZero;
+}
+
+
+/*
+ * copydb_deferred_free frees the work items.
+ */
+void
+copydb_deferred_free(DeferredIndexWork *work)
+{
+	free(work->items);
+	work->items = NULL;
+	work->count = 0;
+	work->capacity = 0;
 }
 
 

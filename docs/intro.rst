@@ -66,9 +66,7 @@ After using ``pg_dump`` to obtain the pre-data and the post-data parts, then
 ``pgcopydb`` restores the pre-data parts to the target Postgres instance using
 ``pg_restore``.
 
-``pgcopydb`` then uses SQL commands and the `COPY streaming protocol`__ to
-migrate the table contents, the large objects data, and to VACUUM ANALYZE
-tables as soon as the data becomes available on the target instance.
+``pgcopydb`` then uses SQL commands and the `COPY streaming protocol`__ to migrate the table contents, the large objects data, and to VACUUM ANALYZE each table after its data is copied and its indexes are built.
 
 __ https://www.postgresql.org/docs/current/sql-copy.html
 

@@ -28,6 +28,7 @@
      --skip-analyze                Skip running vacuumdb --analyze-only
      --skip-db-properties          Skip copying ALTER DATABASE SET properties
      --skip-split-by-ctid          Skip spliting tables by ctid
+     --defer-indexes               Build indexes once all table data is copied
      --requirements <filename>     List extensions requirements
      --filters <filename>          Use the filters defined in <filename>
      --fail-fast                   Abort early in case of error

@@ -227,11 +227,8 @@ use the following recipe:
    $ vacuumdb -z
    $ pgcopydb restore post-data --resume --not-consistent
 
-The main ``pgcopydb clone`` is still better at concurrency than doing
-those steps manually, as it will create the indexes for any given table as
-soon as the table-data section is finished, without having to wait until the
-last table-data has been copied over. Same applies to constraints, and then
-vacuum analyze.
+The main ``pgcopydb clone`` is still better at concurrency than doing those steps manually, as, unless ``--defer-indexes`` is used, it will create the indexes for any given table as soon as the table-data section is finished, without having to wait until the last table-data has been copied over.
+Same applies to constraints, and then vacuum analyze.
 
 Options
 -------
@@ -272,17 +269,12 @@ The following options are available to ``pgcopydb copy`` sub-commands:
 
   How many tables can be processed in parallel.
 
-  This limit only applies to the COPY operations, more sub-processes will be
-  running at the same time that this limit while the CREATE INDEX operations
-  are in progress, though then the processes are only waiting for the target
-  Postgres instance to do all the work.
+  This limit applies to the COPY and VACUUM ANALYZE operations, more sub-processes will be running at the same time that this limit while the CREATE INDEX operations are in progress, though then the processes are only waiting for the target Postgres instance to do all the work.
 
 --index-jobs
 
-  How many indexes can be built in parallel, globally. A good option is to
-  set this option to the count of CPU cores that are available on the
-  Postgres target system, minus some cores that are going to be used for
-  handling the COPY operations.
+  How many indexes can be built in parallel, globally.
+  A good option is to set this option to the count of CPU cores that are available on the Postgres target system, minus some cores that are going to be used for handling the COPY operations, unless ``--defer-indexes`` is used.
 
 --large-object-jobs
 
@@ -298,6 +290,11 @@ The following options are available to ``pgcopydb copy`` sub-commands:
 
   Skip copying large objects, also known as blobs, when copying the data
   from the source database to the target database.
+
+--defer-indexes
+
+  Build indexes and constraints, and run VACUUM ANALYZE, only once the data of every table has been copied, as :ref:`pgcopydb_clone` does with the same option.
+  The commands ``pgcopydb copy db`` and ``pgcopydb copy data`` take this option.
 
 --restart
 
@@ -335,6 +332,8 @@ The following options are available to ``pgcopydb copy`` sub-commands:
   ``search_path`` and the server version change that text, so one constraint can print differently on the source and the target.
   A resume skips the large-object step only when the previous run finished it, and the configuration rows of an extension only when the previous run finished copying them.
   A large object that a resume copies again is cut to its length on the source.
+  With ``--defer-indexes``, a resume after a run that copied every table starts no COPY supervisor or COPY worker.
+  When that run also built every index and constraint, the resume's deferred phase builds no index and runs only the VACUUM ANALYZE of the tables not yet vacuumed.
 
   Finally, using ``--resume`` requires the use of ``--not-consistent``.
 

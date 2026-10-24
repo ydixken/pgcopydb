@@ -92,6 +92,7 @@ The ``pgcopydb clone`` command implements the following steps:
      a queue mechanism is used. As soon as a table data COPY has completed,
      all the indexes for the table are queued for processing by the CREATE
      INDEX sub-processes.
+     With ``--defer-indexes`` these sub-processes start only after every table has been copied, and pgcopydb then queues the indexes of every table, largest table first.
 
      The primary indexes are created as UNIQUE indexes at this stage.
 
@@ -100,9 +101,9 @@ The ``pgcopydb clone`` command implements the following steps:
      be created in parallel with other indexes on the same table, avoiding
      an EXCLUSIVE LOCK while creating the index.
 
-  8. As many as ``--table-jobs`` VACUUM ANALYZE sub-processes are started to
-     share the workload. As soon as a table data COPY has completed, the
-     table is queued for processing by the VACUUM ANALYZE sub-processes.
+  8. As many as ``--table-jobs`` VACUUM ANALYZE sub-processes are started to share the workload.
+     As soon as a table data COPY has completed, the table is queued for processing by the VACUUM ANALYZE sub-processes, or, for a table with indexes, once its indexes and constraints are built.
+     With ``--defer-indexes`` these sub-processes also start only after every table has been copied, and a table without an index is queued only then.
 
   9. An auxilliary process loops over the sequences on the source database and
      for each of them runs a separate query on the source to fetch the
@@ -291,6 +292,7 @@ The operation is structured in three sequential phases:
      ``--index-jobs`` index/constraint workers, and ``--table-jobs`` VACUUM
      workers. The pools are not allocated per-database; they serve the
      entire workload globally.
+     With ``--defer-indexes`` the index and VACUUM workers start only after the last COPY of Phase II is done, and Phase III starts once they have finished.
 
   3. **Phase III — post-data**: Databases are finalized one at a time:
      large objects (with ``--large-objects-jobs`` workers) and the user rows
@@ -484,17 +486,12 @@ The following options are available to ``pgcopydb clone``:
 
   How many tables can be processed in parallel.
 
-  This limit only applies to the COPY operations, more sub-processes will be
-  running at the same time that this limit while the CREATE INDEX operations
-  are in progress, though then the processes are only waiting for the target
-  Postgres instance to do all the work.
+  This limit applies to the COPY and VACUUM ANALYZE operations, more sub-processes will be running at the same time that this limit while the CREATE INDEX operations are in progress, though then the processes are only waiting for the target Postgres instance to do all the work.
 
 --index-jobs
 
-  How many indexes can be built in parallel, globally. A good option is to
-  set this option to the count of CPU cores that are available on the
-  Postgres target system, minus some cores that are going to be used for
-  handling the COPY operations.
+  How many indexes can be built in parallel, globally.
+  A good option is to set this option to the count of CPU cores that are available on the Postgres target system, minus some cores that are going to be used for handling the COPY operations, unless ``--defer-indexes`` is used.
 
 --restore-jobs
 
@@ -656,6 +653,12 @@ The following options are available to ``pgcopydb clone``:
   you may want to skip this splitting process if the CTID range scan is slow
   in the underlying system.
 
+--defer-indexes
+
+  Build indexes and constraints, and run VACUUM ANALYZE, only once the data of every table has been copied, as steps 6 and 8 above describe.
+  Without this option the indexes of a table are built while other tables are still being copied; with it no index build overlaps a COPY, and without ``--all-databases`` the deferred phase also waits for the extension data, large-object and sequence steps to finish, so the run can take longer.
+  The commands ``pgcopydb copy db`` and ``pgcopydb copy data`` take this option too.
+
 --filters <filename>
 
   This option allows to exclude table and indexes from the copy operations.
@@ -703,6 +706,9 @@ The following options are available to ``pgcopydb clone``:
   ``search_path`` and the server version change that text, so one constraint can print differently on the source and the target.
   A resume skips the large-object step only when the previous run finished it, and the configuration rows of an extension only when the previous run finished copying them.
   A large object that a resume copies again is cut to its length on the source.
+  With ``--defer-indexes``, a resume after a run that copied every table starts no COPY supervisor or COPY worker.
+  When that run also built every index and constraint, the resume's deferred phase builds no index and runs only the VACUUM ANALYZE of the tables not yet vacuumed.
+  With ``--all-databases`` such a resume runs the COPY step again, as it does without ``--defer-indexes``.
 
   Finally, ``--resume`` requires either ``--not-consistent`` or a snapshot that is still live, given with ``--snapshot`` or found in the work directory.
 

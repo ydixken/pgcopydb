@@ -16,6 +16,7 @@
      --no-comments         Do not output commands to restore comments
      --no-tablespaces      Do not output commands to select tablespaces
      --skip-large-objects  Skip copying large objects (blobs)
+     --defer-indexes       Build indexes once all table data is copied
      --filters <filename>  Use the filters defined in <filename>
      --fail-fast           Abort early in case of error
      --restart             Allow restarting when temp files exist already
