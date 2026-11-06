@@ -230,8 +230,12 @@ bool catalog_add_s_table_part(DatabaseCatalog *catalog, SourceTable *table);
 
 bool catalog_add_s_table_chksum(DatabaseCatalog *catalog,
 								SourceTable *table,
-								TableChecksum *srcChk,
-								TableChecksum *dstChk);
+								uint64_t startTime);
+
+bool catalog_finish_s_table_chksum(DatabaseCatalog *catalog,
+								   SourceTable *table,
+								   char *error,
+								   uint64_t doneTime);
 
 bool catalog_add_s_table_size(DatabaseCatalog *catalog,
 							  SourceTableSize *tableSize);
@@ -259,6 +263,10 @@ bool catalog_iter_s_table_generated_columns(DatabaseCatalog *catalog,
 bool catalog_iter_s_table_keyless(DatabaseCatalog *catalog,
 								  void *context,
 								  SourceTableIterFun *callback);
+
+bool catalog_iter_s_table_chksum(DatabaseCatalog *catalog,
+								 void *context,
+								 SourceTableIterFun *callback);
 
 typedef struct SourceTableIterator
 {

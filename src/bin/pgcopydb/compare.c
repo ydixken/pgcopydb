@@ -7,6 +7,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "catalog.h"
@@ -427,6 +428,21 @@ bool
 compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 {
 	ConnStrings *dsn = &(copySpecs->connStrings);
+	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
+
+	instr_time startTime;
+	instr_time duration;
+
+	INSTR_TIME_SET_CURRENT(startTime);
+
+	if (!catalog_add_s_table_chksum(sourceDB, source, time(NULL)))
+	{
+		log_error("Failed to add checksum information to our internal catalogs, "
+				  "see above for details");
+		return false;
+	}
+
+	log_notice("Comparing table %s", source->qname);
 
 	PGSQL src = { 0 };
 	PGSQL dst = { 0 };
@@ -529,15 +545,21 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 		return false;
 	}
 
-	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
+	char *status = "match";
 
-	log_notice("%s %u: %lld rows, checksum %s",
-			   source->qname,
-			   source->oid,
-			   (long long) srcChk->rowcount,
-			   srcChk->checksum);
+	if (srcChk->rowcount != dstChk->rowcount ||
+		!streq(srcChk->checksum, dstChk->checksum))
+	{
+		status = "differ";
+	}
 
-	if (!catalog_add_s_table_chksum(sourceDB, source, srcChk, dstChk))
+	INSTR_TIME_SET_CURRENT(duration);
+	INSTR_TIME_SUBTRACT(duration, startTime);
+
+	strlcpy(source->checksumStatus, status, sizeof(source->checksumStatus));
+	source->checksumDurationMs = INSTR_TIME_GET_MILLISEC(duration);
+
+	if (!catalog_finish_s_table_chksum(sourceDB, source, "", time(NULL)))
 	{
 		log_error("Failed to add checksum information to our internal catalogs, "
 				  "see above for details");
@@ -561,8 +583,10 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 				  dstChk->checksum);
 	}
 
-	log_notice("%s: %lld rows, checksum %s",
+	log_notice("Compared table %s in %lld ms: %s, %lld rows, checksum %s",
 			   source->qname,
+			   (long long) source->checksumDurationMs,
+			   status,
 			   (long long) srcChk->rowcount,
 			   srcChk->checksum);
 
@@ -2057,7 +2081,7 @@ compare_alldb_chksum_hook(void *ctx, SourceTable *table)
 
 	fformat(stdout, "%50s | %s | %64s | %64s \n",
 			fqname,
-			streq(srcChk->checksum, dstChk->checksum) ? " " : "!",
+			streq(table->checksumStatus, "match") ? " " : "!",
 			srcChk->checksum,
 			dstChk->checksum);
 
@@ -2376,7 +2400,9 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 
 		if (catalog_init(&dbCat))
 		{
-			(void) catalog_iter_s_table(&dbCat, NULL, &compare_alldb_chksum_hook);
+			(void) catalog_iter_s_table_chksum(&dbCat,
+											   NULL,
+											   &compare_alldb_chksum_hook);
 			(void) catalog_close(&dbCat);
 		}
 

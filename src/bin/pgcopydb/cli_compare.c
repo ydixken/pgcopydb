@@ -417,9 +417,9 @@ cli_compare_data(int argc, char **argv)
 		JSON_Value *js = json_value_init_array();
 		JSON_Array *jsArray = json_value_get_array(js);
 
-		if (!catalog_iter_s_table(sourceDB,
-								  jsArray,
-								  &cli_compare_data_table_hook))
+		if (!catalog_iter_s_table_chksum(sourceDB,
+										 jsArray,
+										 &cli_compare_data_table_hook))
 		{
 			log_error("Failed to compare tables, see above for details");
 			exit(EXIT_CODE_INTERNAL_ERROR);
@@ -442,9 +442,9 @@ cli_compare_data(int argc, char **argv)
 				"----------------------------------------------------------------",
 				"----------------------------------------------------------------");
 
-		if (!catalog_iter_s_table(sourceDB,
-								  NULL,
-								  &cli_compare_data_table_hook))
+		if (!catalog_iter_s_table_chksum(sourceDB,
+										 NULL,
+										 &cli_compare_data_table_hook))
 		{
 			log_error("Failed to compare tables, see above for details");
 			exit(EXIT_CODE_INTERNAL_ERROR);
@@ -475,17 +475,19 @@ cli_compare_data(int argc, char **argv)
 
 
 /*
- * compare_queue_table_hook is an iterator callback function.
+ * cli_compare_data_table_hook is an iterator callback function.
  */
 static bool
 cli_compare_data_table_hook(void *ctx, SourceTable *table)
 {
 	/*
 	 * Count before formatting, so both the JSON and the tabular output paths
-	 * feed the same verdict.
+	 * feed the same verdict. A table that was never compared is no match.
 	 */
-	if (table->sourceChecksum.rowcount != table->targetChecksum.rowcount ||
-		!streq(table->sourceChecksum.checksum, table->targetChecksum.checksum))
+	bool match = streq(table->checksumStatus, "match");
+	bool compared = match || streq(table->checksumStatus, "differ");
+
+	if (!match)
 	{
 		++compareDataDiffCount;
 	}
@@ -504,17 +506,37 @@ cli_compare_data_table_hook(void *ctx, SourceTable *table)
 								  "source.rowcount",
 								  table->sourceChecksum.rowcount);
 
-		json_object_dotset_string(jsObj,
-								  "source.checksum",
-								  table->sourceChecksum.checksum);
+		if (compared)
+		{
+			json_object_dotset_string(jsObj,
+									  "source.checksum",
+									  table->sourceChecksum.checksum);
+		}
+		else
+		{
+			json_object_dotset_null(jsObj, "source.checksum");
+		}
 
 		json_object_dotset_number(jsObj,
 								  "target.rowcount",
 								  table->targetChecksum.rowcount);
 
-		json_object_dotset_string(jsObj,
-								  "target.checksum",
-								  table->targetChecksum.checksum);
+		if (compared)
+		{
+			json_object_dotset_string(jsObj,
+									  "target.checksum",
+									  table->targetChecksum.checksum);
+		}
+		else
+		{
+			json_object_dotset_null(jsObj, "target.checksum");
+		}
+
+		json_object_dotset_string(jsObj, "status", table->checksumStatus);
+		json_object_dotset_number(jsObj, "bytes", table->bytes);
+		json_object_dotset_number(jsObj,
+								  "durationMs",
+								  table->checksumDurationMs);
 
 		json_array_append_value(jsArray, jsComp);
 	}
@@ -542,7 +564,7 @@ cli_compare_data_table_hook(void *ctx, SourceTable *table)
 
 		fformat(stdout, "%30s | %s | %64s | %64s \n",
 				tableName,
-				streq(srcChk->checksum, dstChk->checksum) ? " " : "!",
+				match ? " " : "!",
 				srcChk->checksum,
 				dstChk->checksum);
 	}

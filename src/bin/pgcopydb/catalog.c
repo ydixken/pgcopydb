@@ -140,7 +140,9 @@ static char *sourceDBcreateTableDDLs[] = {
 
 	"create table s_table_chksum("
 	"  oid integer primary key references s_table(oid), "
-	"  srcrowcount integer, srcsum text, dstrowcount integer, dstsum text "
+	"  srcrowcount integer, srcsum text, dstrowcount integer, dstsum text, "
+	"  status text, error text, "
+	"  start_time_epoch integer, done_time_epoch integer, duration_ms integer "
 	")",
 
 	"create table s_index("
@@ -400,7 +402,9 @@ static char *filterDBcreateTableDDLs[] = {
 
 	"create table s_table_chksum("
 	"  oid integer primary key references s_table(oid), "
-	"  srcrowcount integer, srcsum text, dstrowcount integer, dstsum text "
+	"  srcrowcount integer, srcsum text, dstrowcount integer, dstsum text, "
+	"  status text, error text, "
+	"  start_time_epoch integer, done_time_epoch integer, duration_ms integer "
 	")",
 
 	"create table s_index("
@@ -1662,10 +1666,21 @@ catalog_upgrade_schema(DatabaseCatalog *catalog)
 		return true;
 	}
 
-	char *checkSql =
-		"select exists(select 1 from pragma_table_info('s_index')) "
-		"   and not exists(select 1 from pragma_table_info('s_index') "
-		"                   where name = 'isreplident')";
+	/* the check skips a table the catalog lacks: target has no s_table_chksum */
+	struct
+	{
+		char *table;
+		char *column;
+		char *definition;
+	}
+	columns[] = {
+		{ "s_index", "isreplident", "bool default false" },
+		{ "s_table_chksum", "status", "text" },
+		{ "s_table_chksum", "error", "text" },
+		{ "s_table_chksum", "start_time_epoch", "integer" },
+		{ "s_table_chksum", "done_time_epoch", "integer" },
+		{ "s_table_chksum", "duration_ms", "integer" }
+	};
 
 	if (!semaphore_lock(&(catalog->sema)))
 	{
@@ -1673,42 +1688,67 @@ catalog_upgrade_schema(DatabaseCatalog *catalog)
 		return false;
 	}
 
-	SQLiteQuery query = { 0 };
+	int count = sizeof(columns) / sizeof(columns[0]);
 
-	if (!catalog_sql_prepare(catalog->db, checkSql, &query))
+	for (int i = 0; i < count; i++)
 	{
-		/* errors have already been logged */
-		(void) semaphore_unlock(&(catalog->sema));
-		return false;
-	}
+		char checkSql[BUFSIZE] = { 0 };
 
-	if (catalog_sql_step(&query) != SQLITE_ROW)
-	{
-		log_error("Failed to check catalog \"%s\" for upgrades: %s",
-				  catalog->dbfile,
-				  sqlite3_errmsg(catalog->db));
-		(void) catalog_sql_finalize(&query);
-		(void) semaphore_unlock(&(catalog->sema));
-		return false;
-	}
+		sformat(checkSql, sizeof(checkSql),
+				"select exists(select 1 from pragma_table_info('%s')) "
+				"   and not exists(select 1 from pragma_table_info('%s') "
+				"                   where name = '%s')",
+				columns[i].table,
+				columns[i].table,
+				columns[i].column);
 
-	bool addReplIdent = sqlite3_column_int(query.ppStmt, 0) == 1;
+		SQLiteQuery query = { 0 };
 
-	if (!catalog_sql_finalize(&query))
-	{
-		/* errors have already been logged */
-		(void) semaphore_unlock(&(catalog->sema));
-		return false;
-	}
+		if (!catalog_sql_prepare(catalog->db, checkSql, &query))
+		{
+			/* errors have already been logged */
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
 
-	if (addReplIdent)
-	{
-		log_notice("Adding column s_index.isreplident to catalog \"%s\"",
+		if (catalog_sql_step(&query) != SQLITE_ROW)
+		{
+			log_error("Failed to check catalog \"%s\" for upgrades: %s",
+					  catalog->dbfile,
+					  sqlite3_errmsg(catalog->db));
+			(void) catalog_sql_finalize(&query);
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
+
+		bool addColumn = sqlite3_column_int(query.ppStmt, 0) == 1;
+
+		if (!catalog_sql_finalize(&query))
+		{
+			/* errors have already been logged */
+			(void) semaphore_unlock(&(catalog->sema));
+			return false;
+		}
+
+		if (!addColumn)
+		{
+			continue;
+		}
+
+		log_notice("Adding column %s.%s to catalog \"%s\"",
+				   columns[i].table,
+				   columns[i].column,
 				   catalog->dbfile);
 
-		if (!catalog_execute(catalog,
-							 "alter table s_index "
-							 "add column isreplident bool default false"))
+		char alterSql[BUFSIZE] = { 0 };
+
+		sformat(alterSql, sizeof(alterSql),
+				"alter table %s add column %s %s",
+				columns[i].table,
+				columns[i].column,
+				columns[i].definition);
+
+		if (!catalog_execute(catalog, alterSql))
 		{
 			/* errors have already been logged */
 			(void) semaphore_unlock(&(catalog->sema));
@@ -4240,13 +4280,13 @@ catalog_add_s_table_part(DatabaseCatalog *catalog, SourceTable *table)
 
 
 /*
- * catalog_add_s_table INSERTs a SourceTable to our internal catalogs database.
+ * catalog_add_s_table_chksum INSERTs the running row of a table that compare
+ * data starts to checksum.
  */
 bool
 catalog_add_s_table_chksum(DatabaseCatalog *catalog,
 						   SourceTable *table,
-						   TableChecksum *srcChk,
-						   TableChecksum *dstChk)
+						   uint64_t startTime)
 {
 	sqlite3 *db = catalog->db;
 
@@ -4257,9 +4297,8 @@ catalog_add_s_table_chksum(DatabaseCatalog *catalog,
 	}
 
 	char *sql =
-		"insert into s_table_chksum("
-		"  oid, srcrowcount, srcsum, dstrowcount, dstsum)"
-		"values($1, $2, $3, $4, $5)";
+		"insert into s_table_chksum(oid, status, start_time_epoch) "
+		"values($1, 'running', $2)";
 
 	if (!semaphore_lock(&(catalog->sema)))
 	{
@@ -4279,10 +4318,94 @@ catalog_add_s_table_chksum(DatabaseCatalog *catalog,
 	/* bind our parameters now */
 	BindParam params[] = {
 		{ BIND_PARAMETER_TYPE_INT64, "oid", table->oid, NULL },
+		{ BIND_PARAMETER_TYPE_INT64, "start_time_epoch", startTime, NULL }
+	};
+
+	int count = sizeof(params) / sizeof(params[0]);
+
+	if (!catalog_sql_bind(&query, params, count))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	/* now execute the query, which does not return any row */
+	if (!catalog_sql_execute_once(&query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return true;
+}
+
+
+/*
+ * catalog_finish_s_table_chksum UPDATEs the row of a compared table with its
+ * checksums and its status: match, differ or error.
+ */
+bool
+catalog_finish_s_table_chksum(DatabaseCatalog *catalog,
+							  SourceTable *table,
+							  char *error,
+							  uint64_t doneTime)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: catalog_finish_s_table_chksum: db is NULL");
+		return false;
+	}
+
+	char *sql =
+		"update s_table_chksum "
+		"   set srcrowcount = $1, srcsum = $2, dstrowcount = $3, dstsum = $4, "
+		"       status = $5, error = $6, "
+		"       done_time_epoch = $7, duration_ms = $8 "
+		" where oid = $9";
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	SQLiteQuery query = { 0 };
+
+	if (!catalog_sql_prepare(db, sql, &query))
+	{
+		/* errors have already been logged */
+		(void) semaphore_unlock(&(catalog->sema));
+		return false;
+	}
+
+	TableChecksum *srcChk = &(table->sourceChecksum);
+	TableChecksum *dstChk = &(table->targetChecksum);
+
+	/* bind our parameters now */
+	BindParam params[] = {
 		{ BIND_PARAMETER_TYPE_INT64, "srcrowcount", srcChk->rowcount, NULL },
 		{ BIND_PARAMETER_TYPE_TEXT, "srcsum", 0, srcChk->checksum },
 		{ BIND_PARAMETER_TYPE_INT64, "dstrowcount", dstChk->rowcount, NULL },
-		{ BIND_PARAMETER_TYPE_TEXT, "dstsum", 0, dstChk->checksum }
+		{ BIND_PARAMETER_TYPE_TEXT, "dstsum", 0, dstChk->checksum },
+		{ BIND_PARAMETER_TYPE_TEXT, "status", 0, table->checksumStatus },
+		{
+			IS_EMPTY_STRING_BUFFER(error)
+			? BIND_PARAMETER_TYPE_NULL
+			: BIND_PARAMETER_TYPE_TEXT,
+			"error", 0, error
+		},
+		{ BIND_PARAMETER_TYPE_INT64, "done_time_epoch", doneTime, NULL },
+		{
+			BIND_PARAMETER_TYPE_INT64, "duration_ms",
+			table->checksumDurationMs, NULL
+		},
+		{ BIND_PARAMETER_TYPE_INT64, "oid", table->oid, NULL }
 	};
 
 	int count = sizeof(params) / sizeof(params[0]);
@@ -5259,6 +5382,132 @@ catalog_iter_s_table_finish(SourceTableIterator *iter)
 	}
 
 	return true;
+}
+
+
+/*
+ * catalog_iter_s_table_chksum iterates over the compare data outcome of every
+ * table, largest first. It has its own query rather than the shared positional
+ * catalog_s_table_fetch, whose column count decides what it parses.
+ */
+bool
+catalog_iter_s_table_chksum(DatabaseCatalog *catalog,
+							void *context,
+							SourceTableIterFun *callback)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: catalog_iter_s_table_chksum: db is NULL");
+		return false;
+	}
+
+	/* a table with no row, or a row still running, was never compared */
+	char *sql =
+		"  select t.oid, t.datname, t.qname, t.nspname, t.relname, "
+		"         coalesce(ts.bytes, 0), "
+		"         coalesce(c.srcrowcount, 0), c.srcsum, "
+		"         coalesce(c.dstrowcount, 0), c.dstsum, "
+		"         case when c.status in ('match', 'differ', 'error') "
+		"              then c.status else 'unchecked' end, "
+		"         coalesce(c.duration_ms, 0) "
+		"    from s_table t "
+		"         left join s_table_size ts on ts.oid = t.oid "
+		"         left join s_table_chksum c on c.oid = t.oid "
+		"order by ts.bytes desc, t.oid";
+
+	SourceTable *table = (SourceTable *) calloc(1, sizeof(SourceTable));
+
+	if (table == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	SQLiteQuery query = { 0 };
+
+	if (!catalog_sql_prepare(db, sql, &query))
+	{
+		/* errors have already been logged */
+		free(table);
+		return false;
+	}
+
+	int rc;
+
+	while ((rc = catalog_sql_step(&query)) == SQLITE_ROW)
+	{
+		sqlite3_stmt *stmt = query.ppStmt;
+
+		bzero(table, sizeof(SourceTable));
+
+		table->oid = sqlite3_column_int64(stmt, 0);
+
+		char *names[] = {
+			table->datname, table->qname, table->nspname, table->relname
+		};
+		size_t sizes[] = {
+			sizeof(table->datname), sizeof(table->qname),
+			sizeof(table->nspname), sizeof(table->relname)
+		};
+
+		for (int i = 0; i < 4; i++)
+		{
+			if (sqlite3_column_type(stmt, i + 1) != SQLITE_NULL)
+			{
+				strlcpy(names[i],
+						(char *) sqlite3_column_text(stmt, i + 1),
+						sizes[i]);
+			}
+		}
+
+		table->bytes = sqlite3_column_int64(stmt, 5);
+		table->sourceChecksum.rowcount = sqlite3_column_int64(stmt, 6);
+		table->targetChecksum.rowcount = sqlite3_column_int64(stmt, 8);
+
+		if (sqlite3_column_type(stmt, 7) != SQLITE_NULL)
+		{
+			strlcpy(table->sourceChecksum.checksum,
+					(char *) sqlite3_column_text(stmt, 7),
+					sizeof(table->sourceChecksum.checksum));
+		}
+
+		if (sqlite3_column_type(stmt, 9) != SQLITE_NULL)
+		{
+			strlcpy(table->targetChecksum.checksum,
+					(char *) sqlite3_column_text(stmt, 9),
+					sizeof(table->targetChecksum.checksum));
+		}
+
+		strlcpy(table->checksumStatus,
+				(char *) sqlite3_column_text(stmt, 10),
+				sizeof(table->checksumStatus));
+
+		table->checksumDurationMs = sqlite3_column_int64(stmt, 11);
+
+		if (!(*callback)(context, table))
+		{
+			log_error("Failed to iterate over list of tables, "
+					  "see above for details");
+			(void) catalog_sql_finalize(&query);
+			free(table);
+			return false;
+		}
+	}
+
+	if (rc != SQLITE_DONE)
+	{
+		log_error("Failed to step through statement: %s", sql);
+		log_error("[SQLite] %s", sqlite3_errmsg(db));
+		(void) catalog_sql_finalize(&query);
+		free(table);
+		return false;
+	}
+
+	free(table);
+
+	return catalog_sql_finalize(&query);
 }
 
 
