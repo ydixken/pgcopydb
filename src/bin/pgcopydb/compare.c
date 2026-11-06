@@ -55,6 +55,8 @@ static bool compare_table_checksums(CopyDataSpec *copySpecs,
 									SourceTable *source,
 									char *error,
 									size_t size);
+static bool compare_init_connection(PGSQL *pgsql, char *pguri,
+									ConnectionType connectionType);
 static void compare_cancel_query(PGSQL *pgsql);
 
 static bool compare_queue_table_hook(void *ctx, SourceTable *sourceTable);
@@ -63,6 +65,9 @@ static bool compare_schemas_index_hook(void *ctx, SourceIndex *sourceIndex);
 static bool compare_schemas_seq_hook(void *ctx, SourceSequence *sourceSeq);
 static bool compare_alldb_chksum_hook(void *ctx, SourceTable *table);
 
+
+/* set in a worker when its previous table lost a connection */
+static bool compareConnectionLost = false;
 
 static GUC compareSchemaSettings[] = {
 	{ "quote_all_identifiers", "off" },
@@ -769,7 +774,7 @@ compare_table_checksums(CopyDataSpec *copySpecs,
 	bool dstDone = false;
 
 	/* see srcSettings; row_security exists from Postgres 9.5 */
-	if (!pgsql_init(&src, dsn->source_pguri, PGSQL_CONN_SOURCE) ||
+	if (!compare_init_connection(&src, dsn->source_pguri, PGSQL_CONN_SOURCE) ||
 		!pgsql_begin(&src) ||
 		!pgsql_server_version(&src) ||
 		(src.pgversion_num >= 90500 &&
@@ -779,7 +784,7 @@ compare_table_checksums(CopyDataSpec *copySpecs,
 		goto cleanup;
 	}
 
-	if (!pgsql_init(&dst, dsn->target_pguri, PGSQL_CONN_TARGET) ||
+	if (!compare_init_connection(&dst, dsn->target_pguri, PGSQL_CONN_TARGET) ||
 		!pgsql_begin(&dst) ||
 		!pgsql_execute(&dst, "SET LOCAL row_security TO off"))
 	{
@@ -838,6 +843,12 @@ compare_table_checksums(CopyDataSpec *copySpecs,
 	}
 
 cleanup:
+
+	/* a failed connect, or a session the server closed, leaves no connection */
+	compareConnectionLost =
+		failed != NULL &&
+		(failed->connection == NULL || pgsql_state_is_connection_error(failed));
+
 	if (failed != NULL)
 	{
 		/* the Postgres error itself has already been logged */
@@ -854,6 +865,28 @@ cleanup:
 	(void) pgsql_finish(&dst);
 
 	return failed == NULL;
+}
+
+
+/*
+ * compare_init_connection does not retry the connection after the previous
+ * table lost one, so during an outage each remaining table becomes an error
+ * row in seconds instead of after a minute of retries.
+ */
+static bool
+compare_init_connection(PGSQL *pgsql, char *pguri, ConnectionType connectionType)
+{
+	if (!pgsql_init(pgsql, pguri, connectionType))
+	{
+		return false;
+	}
+
+	if (compareConnectionLost)
+	{
+		(void) pgsql_set_retry_policy(&(pgsql->retryPolicy), 0, 0, 0, 0);
+	}
+
+	return true;
 }
 
 

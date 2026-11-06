@@ -91,6 +91,8 @@ In an ``error`` or ``unchecked`` row, ``source.checksum`` and ``target.checksum`
 
 A failed checksum query does not stop the comparison.
 The worker cancels the query that still runs on the other side, closes both connections, records the error, and goes on with the next table.
+When the table failed because a connection was lost, the worker connects for its next table without retrying.
+While a server is down, each remaining table then fails within seconds instead of after a minute of connection retries.
 The command prints the full report, then exits with code 12 when a table differs, failed, or was not compared.
 With ``--all-databases``, a table that failed or was not compared makes the command exit with code 12.
 

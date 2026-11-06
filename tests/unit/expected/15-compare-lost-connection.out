@@ -1,0 +1,5 @@
+compare data ended within 30s of the lost session: yes
+compare data: exit 12
+report rows: 4
+error: 4
+failed table count logged: 1
