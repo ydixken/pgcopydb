@@ -1,0 +1,8 @@
+b42f560 catalog: exit 0
+public.also_kept: match, 10 rows, checksums match true, bytes true, durationMs number
+public.kept: match, 1000 rows, checksums match true, bytes true, durationMs number
+public.skipped: match, 10 rows, checksums match true, bytes true, durationMs number
+s_table_chksum columns: oid, srcrowcount, srcsum, dstrowcount, dstsum, status, error, start_time_epoch, done_time_epoch, duration_ms
+list tables --filters seeded dir: exit 0
+public.also_kept: match, 10 rows, checksums match true, bytes true, durationMs number
+public.kept: match, 1000 rows, checksums match true, bytes true, durationMs number
