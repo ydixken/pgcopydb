@@ -43,6 +43,12 @@ static bool compare_read_partitions(CopyDataSpec *specs,
 									const ComparePartitionArray *sourcePartitions,
 									ComparePartitionArray *partitions);
 
+static bool compare_table_checksums(CopyDataSpec *copySpecs,
+									SourceTable *source,
+									char *error,
+									size_t size);
+static void compare_cancel_query(PGSQL *pgsql);
+
 static bool compare_queue_table_hook(void *ctx, SourceTable *sourceTable);
 static bool compare_schemas_table_hook(void *ctx, SourceTable *sourceTable);
 static bool compare_schemas_index_hook(void *ctx, SourceIndex *sourceIndex);
@@ -372,6 +378,7 @@ bool
 compare_data_by_table_oid(CopyDataSpec *copySpecs, uint32_t oid)
 {
 	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
+	bool success = false;
 
 	SourceTable *table = (SourceTable *) calloc(1, sizeof(SourceTable));
 
@@ -385,50 +392,50 @@ compare_data_by_table_oid(CopyDataSpec *copySpecs, uint32_t oid)
 	{
 		log_error("Failed to lookup for table %u in our internal catalogs",
 				  oid);
-
-		return false;
 	}
-
-	if (table->oid == 0)
+	else if (table->oid == 0)
 	{
 		log_error("Failed to find table with oid %u in our internal catalogs",
 				  oid);
-
-		return false;
 	}
-
-	if (!catalog_s_table_fetch_attrs(sourceDB, table))
+	else if (!catalog_s_table_fetch_attrs(sourceDB, table))
 	{
 		log_error("Failed to fetch table %s attribute list, "
 				  "see above for details",
 				  table->qname);
-		return false;
 	}
-
-	log_trace("compare_data_by_table_oid: %u %s", oid, table->qname);
-
-	if (!compare_table(copySpecs, table))
+	else
 	{
-		log_error("Failed to compute rowcount and checksum for %s, "
-				  "see above for details",
-				  table->qname);
+		log_trace("compare_data_by_table_oid: %u %s", oid, table->qname);
 
-		return false;
+		success = compare_table(copySpecs, table);
+
+		if (!success)
+		{
+			log_error("Failed to record the comparison of %s, "
+					  "see above for details",
+					  table->qname);
+		}
 	}
 
-	return true;
+	free(table->attributes.array);
+	free(table);
+
+	return success;
 }
 
 
 /*
  * compare_table computes the rowcount and checksum of a table contents on the
- * source and on the target database instances and compare them.
+ * source and on the target database instances and compare them. A Postgres
+ * error makes the table an error row, and only a catalog failure returns false.
  */
 bool
 compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 {
-	ConnStrings *dsn = &(copySpecs->connStrings);
 	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
+	TableChecksum *srcChk = &(source->sourceChecksum);
+	TableChecksum *dstChk = &(source->targetChecksum);
 
 	instr_time startTime;
 	instr_time duration;
@@ -444,111 +451,17 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 
 	log_notice("Comparing table %s", source->qname);
 
-	PGSQL src = { 0 };
-	PGSQL dst = { 0 };
-
-	if (!pgsql_init(&src, dsn->source_pguri, PGSQL_CONN_SOURCE))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	/* see srcSettings; row_security exists from Postgres 9.5 */
-	if (!pgsql_begin(&src) ||
-		!pgsql_server_version(&src) ||
-		(src.pgversion_num >= 90500 &&
-		 !pgsql_execute(&src, "SET LOCAL row_security TO off")))
-	{
-		/* errors have already been logged */
-		(void) pgsql_finish(&src);
-		return false;
-	}
-
-	if (!pgsql_init(&dst, dsn->target_pguri, PGSQL_CONN_TARGET))
-	{
-		/* errors have already been logged */
-		(void) pgsql_finish(&src);
-		return false;
-	}
-
-	if (!pgsql_begin(&dst) ||
-		!pgsql_execute(&dst, "SET LOCAL row_security TO off"))
-	{
-		/* errors have already been logged */
-		(void) pgsql_finish(&src);
-		(void) pgsql_finish(&dst);
-		return false;
-	}
-
-	/*
-	 * First, send both the queries to the source and target databases,
-	 * async.
-	 */
-	if (!schema_send_table_checksum(&src, source))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	if (!schema_send_table_checksum(&dst, source))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	/*
-	 * Second, fetch the results from both the connections.
-	 */
-	TableChecksum *srcChk = &(source->sourceChecksum);
-	TableChecksum *dstChk = &(source->targetChecksum);
-
-	bool srcDone = false;
-	bool dstDone = false;
-
-	do {
-		if (!srcDone)
-		{
-			if (!schema_fetch_table_checksum(&src, srcChk, &srcDone))
-			{
-				/* errors have already been logged */
-				(void) pgsql_finish(&dst);
-				return false;
-			}
-		}
-
-		if (!dstDone)
-		{
-			if (!schema_fetch_table_checksum(&dst, dstChk, &dstDone))
-			{
-				/* errors have already been logged */
-				(void) pgsql_finish(&src);
-				return false;
-			}
-		}
-
-		if (!srcDone || !dstDone)
-		{
-			pg_usleep(10 * 1000); /* 10 ms */
-		}
-	} while (!srcDone || !dstDone);
-
-
-	if (!pgsql_commit(&src))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	if (!pgsql_commit(&dst))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
+	char error[BUFSIZE] = { 0 };
 	char *status = "match";
 
-	if (srcChk->rowcount != dstChk->rowcount ||
-		!streq(srcChk->checksum, dstChk->checksum))
+	if (!compare_table_checksums(copySpecs, source, error, sizeof(error)))
+	{
+		status = "error";
+		bzero(srcChk, sizeof(TableChecksum));
+		bzero(dstChk, sizeof(TableChecksum));
+	}
+	else if (srcChk->rowcount != dstChk->rowcount ||
+			 !streq(srcChk->checksum, dstChk->checksum))
 	{
 		status = "differ";
 	}
@@ -559,14 +472,20 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 	strlcpy(source->checksumStatus, status, sizeof(source->checksumStatus));
 	source->checksumDurationMs = INSTR_TIME_GET_MILLISEC(duration);
 
-	if (!catalog_finish_s_table_chksum(sourceDB, source, "", time(NULL)))
+	if (!catalog_finish_s_table_chksum(sourceDB, source, error, time(NULL)))
 	{
 		log_error("Failed to add checksum information to our internal catalogs, "
 				  "see above for details");
 		return false;
 	}
 
-	if (srcChk->rowcount != dstChk->rowcount)
+	if (!IS_EMPTY_STRING_BUFFER(error))
+	{
+		log_error("Failed to compare table %s: %s, see above for details",
+				  source->qname,
+				  error);
+	}
+	else if (srcChk->rowcount != dstChk->rowcount)
 	{
 		log_error("Table %s has %lld rows on source, %lld rows on target",
 				  source->qname,
@@ -591,6 +510,141 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 			   srcChk->checksum);
 
 	return true;
+}
+
+
+/*
+ * compare_table_checksums runs the checksum query of a table on the source and
+ * on the target. Every exit closes both connections, and on failure error
+ * names the side that failed.
+ */
+static bool
+compare_table_checksums(CopyDataSpec *copySpecs,
+						SourceTable *source,
+						char *error,
+						size_t size)
+{
+	ConnStrings *dsn = &(copySpecs->connStrings);
+	TableChecksum *srcChk = &(source->sourceChecksum);
+	TableChecksum *dstChk = &(source->targetChecksum);
+
+	PGSQL src = { 0 };
+	PGSQL dst = { 0 };
+	PGSQL *failed = NULL;
+
+	bool srcDone = false;
+	bool dstDone = false;
+
+	/* see srcSettings; row_security exists from Postgres 9.5 */
+	if (!pgsql_init(&src, dsn->source_pguri, PGSQL_CONN_SOURCE) ||
+		!pgsql_begin(&src) ||
+		!pgsql_server_version(&src) ||
+		(src.pgversion_num >= 90500 &&
+		 !pgsql_execute(&src, "SET LOCAL row_security TO off")))
+	{
+		failed = &src;
+		goto cleanup;
+	}
+
+	if (!pgsql_init(&dst, dsn->target_pguri, PGSQL_CONN_TARGET) ||
+		!pgsql_begin(&dst) ||
+		!pgsql_execute(&dst, "SET LOCAL row_security TO off"))
+	{
+		failed = &dst;
+		goto cleanup;
+	}
+
+	/*
+	 * First, send both the queries to the source and target databases,
+	 * async.
+	 */
+	if (!schema_send_table_checksum(&src, source))
+	{
+		failed = &src;
+		goto cleanup;
+	}
+
+	if (!schema_send_table_checksum(&dst, source))
+	{
+		failed = &dst;
+		goto cleanup;
+	}
+
+	/*
+	 * Second, fetch the results from both the connections.
+	 */
+	do {
+		if (!srcDone && !schema_fetch_table_checksum(&src, srcChk, &srcDone))
+		{
+			failed = &src;
+			goto cleanup;
+		}
+
+		if (!dstDone && !schema_fetch_table_checksum(&dst, dstChk, &dstDone))
+		{
+			failed = &dst;
+			goto cleanup;
+		}
+
+		if (!srcDone || !dstDone)
+		{
+			pg_usleep(10 * 1000); /* 10 ms */
+		}
+	} while (!srcDone || !dstDone);
+
+	if (!pgsql_commit(&src))
+	{
+		failed = &src;
+		goto cleanup;
+	}
+
+	if (!pgsql_commit(&dst))
+	{
+		failed = &dst;
+		goto cleanup;
+	}
+
+cleanup:
+	if (failed != NULL)
+	{
+		/* the Postgres error itself has already been logged */
+		sformat(error, size, "%s failed%s%s",
+				failed == &src ? "source" : "target",
+				IS_EMPTY_STRING_BUFFER(failed->sqlstate) ? "" : " with SQLSTATE ",
+				failed->sqlstate);
+	}
+
+	(void) compare_cancel_query(&src);
+	(void) compare_cancel_query(&dst);
+
+	(void) pgsql_finish(&src);
+	(void) pgsql_finish(&dst);
+
+	return failed == NULL;
+}
+
+
+/*
+ * compare_cancel_query cancels a checksum query that is still running, which
+ * would otherwise keep scanning on the server after its connection is closed.
+ */
+static void
+compare_cancel_query(PGSQL *pgsql)
+{
+	if (pgsql->connection == NULL || PQisBusy(pgsql->connection) == 0)
+	{
+		return;
+	}
+
+	char errbuf[256] = { 0 };
+	PGcancel *cancel = PQgetCancel(pgsql->connection);
+
+	if (cancel == NULL || PQcancel(cancel, errbuf, sizeof(errbuf)) == 0)
+	{
+		log_warn("Failed to cancel a checksum query: %s", errbuf);
+	}
+
+	PQfreeCancel(cancel);
 }
 
 
@@ -2065,8 +2119,16 @@ compare_all_databases_schema(CopyDataSpec *parentSpecs)
 static bool
 compare_alldb_chksum_hook(void *ctx, SourceTable *table)
 {
+	uint64_t *failedCount = (uint64_t *) ctx;
 	TableChecksum *srcChk = &(table->sourceChecksum);
 	TableChecksum *dstChk = &(table->targetChecksum);
+
+	/* a table error used to fail its database's compare, it still fails it */
+	if (streq(table->checksumStatus, "error") ||
+		streq(table->checksumStatus, "unchecked"))
+	{
+		++(*failedCount);
+	}
 
 	char fqname[2 * PG_NAMEDATALEN + 64] = { 0 };
 
@@ -2386,6 +2448,8 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 			"----------------------------------------------------------------",
 			"----------------------------------------------------------------");
 
+	uint64_t failedCount = 0;
+
 	for (int i = 0; i < dbCount; i++)
 	{
 		/* Reopen per-db catalog to iterate checksum results */
@@ -2401,7 +2465,7 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 		if (catalog_init(&dbCat))
 		{
 			(void) catalog_iter_s_table_chksum(&dbCat,
-											   NULL,
+											   &failedCount,
 											   &compare_alldb_chksum_hook);
 			(void) catalog_close(&dbCat);
 		}
@@ -2410,6 +2474,13 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 	}
 
 	fformat(stdout, "\n");
+
+	if (failedCount > 0)
+	{
+		log_error("Failed to compare %lld table(s), see above for details",
+				  (long long) failedCount);
+		ok = false;
+	}
 
 	free(datnames);
 

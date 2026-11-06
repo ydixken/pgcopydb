@@ -37,6 +37,9 @@ static bool cli_compare_data_table_hook(void *ctx, SourceTable *table);
  */
 static uint64_t compareDataDiffCount = 0;
 
+/* tables that failed or were never compared: no verdict, so no match either */
+static uint64_t compareDataFailCount = 0;
+
 static CommandLine compare_schema_command =
 	make_command(
 		"schema",
@@ -464,11 +467,21 @@ cli_compare_data(int argc, char **argv)
 	 * tables differ. Same verdict shape as compare schema, which already exits
 	 * non-zero on diffCount > 0.
 	 */
+	if (compareDataFailCount > 0)
+	{
+		log_fatal("Failed to compare %lld table(s), see above for details",
+				  (long long) compareDataFailCount);
+	}
+
 	if (compareDataDiffCount > 0)
 	{
 		log_fatal("Data on source and target database differ: "
 				  "%lld table(s) do not match",
 				  (long long) compareDataDiffCount);
+	}
+
+	if (compareDataFailCount > 0 || compareDataDiffCount > 0)
+	{
 		exit(EXIT_CODE_INTERNAL_ERROR);
 	}
 }
@@ -482,12 +495,16 @@ cli_compare_data_table_hook(void *ctx, SourceTable *table)
 {
 	/*
 	 * Count before formatting, so both the JSON and the tabular output paths
-	 * feed the same verdict. A table that was never compared is no match.
+	 * feed the same verdict.
 	 */
 	bool match = streq(table->checksumStatus, "match");
 	bool compared = match || streq(table->checksumStatus, "differ");
 
-	if (!match)
+	if (!compared)
+	{
+		++compareDataFailCount;
+	}
+	else if (!match)
 	{
 		++compareDataDiffCount;
 	}
