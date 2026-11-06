@@ -58,6 +58,44 @@ Running such a query on a large table can take a lot of time.
 
 .. include:: ../include/compare-data.rst
 
+Progress and report
+-------------------
+
+While ``pgcopydb compare data`` runs, it logs a progress line at INFO level when its workers start and then every 10 seconds.
+Once every worker has exited, the main process logs one last line with ``final`` set to ``true``::
+
+   compare progress: {"plannedTables":3,"comparedTables":2,"plannedBytes":24576,"comparedBytes":16384,"comparedRows":20,"differingTables":0,"failedTables":0,"elapsedMs":10215,"final":false,"inFlightCount":1,"inFlight":[{"schema":"public","name":"gated","bytes":8192,"elapsedMs":10000}]}
+
+The text after ``compare progress:`` is one JSON object:
+
+- ``plannedTables`` and ``plannedBytes`` count the selected tables and their size on the source.
+- ``comparedTables`` and ``comparedBytes`` count the tables that have a result: a match, a difference, or an error.
+- ``comparedRows`` adds up the source row counts of the tables that matched or differ.
+- ``differingTables`` counts the tables whose contents differ, and ``failedTables`` the tables whose checksum query failed.
+- ``elapsedMs`` is the time since the data comparison started.
+- ``inFlight`` lists up to 64 tables that are being checksummed, oldest first, each with its ``schema``, ``name``, ``bytes`` and ``elapsedMs``.
+  ``inFlightCount`` counts all of them.
+  The ``elapsedMs`` of a table has a resolution of one second.
+
+A separate process logs the progress lines while the comparison runs.
+It opens the catalog read-only and never writes to it.
+At NOTICE level, each table also logs a line when its comparison starts and one when it ends.
+
+With ``--json``, each row of the report also has these keys:
+
+- ``status`` is ``match``, ``differ``, ``error`` when a checksum query failed, or ``unchecked`` when the table has no result, for instance because its worker stopped.
+- ``bytes`` is the size of the table on the source.
+- ``durationMs`` is how long the checksum queries of the table took.
+
+In an ``error`` or ``unchecked`` row, ``source.checksum`` and ``target.checksum`` are ``null``.
+
+A failed checksum query does not stop the comparison.
+The worker cancels the query that still runs on the other side, closes both connections, records the error, and goes on with the next table.
+When the table failed because a connection was lost, the worker connects for its next table without retrying.
+While a server is down, each remaining table then fails within seconds instead of after a minute of connection retries.
+The command prints the full report, then exits with code 12 when a table differs, failed, or was not compared.
+With ``--all-databases``, a table that failed or was not compared makes the command exit with code 12.
+
 Partitioned tables
 ------------------
 

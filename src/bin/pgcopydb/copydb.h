@@ -814,7 +814,8 @@ bool compare_data(CopyDataSpec *copySpecs);
 bool compare_all_databases_schema(CopyDataSpec *parentSpecs);
 bool compare_all_databases_data(CopyDataSpec *parentSpecs);
 
-bool compare_start_workers(CopyDataSpec *copySpecs, Queue *queue);
+bool compare_start_workers(CopyDataSpec *copySpecs, Queue *queue,
+						   pid_t *workers);
 bool compare_queue_tables(CopyDataSpec *copySpecs, Queue *queue);
 bool compare_data_worker(CopyDataSpec *copySpecs, Queue *queue);
 bool compare_data_by_table_oid(CopyDataSpec *copySpecs, uint32_t oid);

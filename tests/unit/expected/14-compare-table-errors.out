@@ -1,0 +1,10 @@
+worker sessions before the run: source 0, target 0
+worker sessions while gated waits: source 1, target 1
+compare data: exit 12
+report rows: 22
+error: 20
+match: 2
+error rows with null checksums: 20
+failed table count logged: 1
+final: 22 of 22 tables, 20 failed, final true
+worker sessions after the run: source 0, target 0

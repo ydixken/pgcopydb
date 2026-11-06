@@ -5,8 +5,10 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "catalog.h"
@@ -42,12 +44,30 @@ static bool compare_read_partitions(CopyDataSpec *specs,
 									const ComparePartitionArray *sourcePartitions,
 									ComparePartitionArray *partitions);
 
+static bool compare_start_progress(CopyDataSpec *copySpecs,
+								   pid_t *workers,
+								   instr_time *startTime);
+static bool compare_workers_alive(pid_t *workers, int count);
+static bool compare_log_progress(DatabaseCatalog *catalog,
+								 instr_time *startTime,
+								 bool final);
+static bool compare_table_checksums(CopyDataSpec *copySpecs,
+									SourceTable *source,
+									char *error,
+									size_t size);
+static bool compare_init_connection(PGSQL *pgsql, char *pguri,
+									ConnectionType connectionType);
+static void compare_cancel_query(PGSQL *pgsql);
+
 static bool compare_queue_table_hook(void *ctx, SourceTable *sourceTable);
 static bool compare_schemas_table_hook(void *ctx, SourceTable *sourceTable);
 static bool compare_schemas_index_hook(void *ctx, SourceIndex *sourceIndex);
 static bool compare_schemas_seq_hook(void *ctx, SourceSequence *sourceSeq);
 static bool compare_alldb_chksum_hook(void *ctx, SourceTable *table);
 
+
+/* set in a worker when its previous table lost a connection */
+static bool compareConnectionLost = false;
 
 static GUC compareSchemaSettings[] = {
 	{ "quote_all_identifiers", "off" },
@@ -65,7 +85,11 @@ compare_data(CopyDataSpec *copySpecs)
 	Queue compareQueue = { 0 };
 	JSON_Value *filtersJson = NULL;
 	CopyDataSpec targetSpecs = { 0 };
+	pid_t *workers = NULL;
 	bool success = false;
+
+	instr_time startTime;
+	INSTR_TIME_SET_CURRENT(startTime);
 
 	if (!queue_create(&compareQueue, "compare"))
 	{
@@ -114,9 +138,27 @@ compare_data(CopyDataSpec *copySpecs)
 		goto cleanup;
 	}
 
-	if (!compare_start_workers(copySpecs, &compareQueue))
+	workers = (pid_t *) calloc(copySpecs->tableJobs, sizeof(pid_t));
+
+	if (workers == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		goto cleanup;
+	}
+
+	if (!compare_start_workers(copySpecs, &compareQueue, workers))
 	{
 		log_fatal("Failed to start %d compare data workers", copySpecs->tableJobs);
+		goto cleanup;
+	}
+
+	/*
+	 * From here until the wait returns this process writes no catalog row:
+	 * its s_table cursor stays open while it queues the tables.
+	 */
+	if (!compare_start_progress(copySpecs, workers, &startTime))
+	{
+		log_fatal("Failed to start the compare data progress process");
 		goto cleanup;
 	}
 
@@ -126,7 +168,15 @@ compare_data(CopyDataSpec *copySpecs)
 		goto cleanup;
 	}
 
-	if (!copydb_wait_for_subprocesses(copySpecs->failFast))
+	bool workersDone = copydb_wait_for_subprocesses(copySpecs->failFast);
+
+	/* the progress process has exited, so this is the last progress line */
+	if (!compare_log_progress(sourceDB, &startTime, true))
+	{
+		goto cleanup;
+	}
+
+	if (!workersDone)
 	{
 		log_fatal("Some compare data worker process have failed, "
 				  "see above for details");
@@ -136,6 +186,7 @@ compare_data(CopyDataSpec *copySpecs)
 	success = true;
 
 cleanup:
+	free(workers);
 	json_value_free(filtersJson);
 	filters_free(&(targetSpecs.filters));
 	filters_free(&(copySpecs->filters));
@@ -221,10 +272,11 @@ compare_queue_table_hook(void *ctx, SourceTable *table)
 
 
 /*
- * compare_start_workers create as many sub-process as needed, per --table-jobs.
+ * compare_start_workers create as many sub-process as needed, per --table-jobs,
+ * and stores their pids in workers.
  */
 bool
-compare_start_workers(CopyDataSpec *copySpecs, Queue *queue)
+compare_start_workers(CopyDataSpec *copySpecs, Queue *queue, pid_t *workers)
 {
 	log_info("Starting %d table compare processes", copySpecs->tableJobs);
 
@@ -264,10 +316,203 @@ compare_start_workers(CopyDataSpec *copySpecs, Queue *queue)
 			default:
 			{
 				/* fork succeeded, in parent */
+				workers[i] = fpid;
 				break;
 			}
 		}
 	}
+
+	return true;
+}
+
+
+/*
+ * compare_start_progress forks the process that logs a compare progress line
+ * every 10s until no worker is left. It opens its own read-only catalog
+ * handle and never writes, so it cannot make a worker's write fail.
+ */
+static bool
+compare_start_progress(CopyDataSpec *copySpecs,
+					   pid_t *workers,
+					   instr_time *startTime)
+{
+	pid_t parent = getpid();
+
+	fflush(stdout);
+	fflush(stderr);
+
+	int fpid = fork();
+
+	switch (fpid)
+	{
+		case -1:
+		{
+			log_error("Failed to fork the compare progress process: %m");
+			return false;
+		}
+
+		case 0:
+		{
+			(void) set_ps_title("pgcopydb: compare progress");
+
+			/* a copy, so the inherited handle of the parent is never used */
+			DatabaseCatalog catalog = { 0 };
+
+			strlcpy(catalog.dbfile,
+					copySpecs->catalogs.source.dbfile,
+					sizeof(catalog.dbfile));
+
+			if (!catalog_open_readonly(&catalog))
+			{
+				log_warn("Compare data progress is not available, "
+						 "see above for details");
+				exit(EXIT_CODE_QUIT);
+			}
+
+			for (;;)
+			{
+				instr_time lastLine;
+
+				INSTR_TIME_SET_CURRENT(lastLine);
+
+				if (!compare_log_progress(&catalog, startTime, false))
+				{
+					log_warn("Failed to log compare data progress, "
+							 "see above for details");
+				}
+
+				/* 100ms slices, the last one ending before 10s have passed */
+				for (;;)
+				{
+					if (asked_to_stop || asked_to_stop_fast || asked_to_quit ||
+						getppid() != parent ||
+						!compare_workers_alive(workers, copySpecs->tableJobs))
+					{
+						(void) catalog_close(&catalog);
+						exit(EXIT_CODE_QUIT);
+					}
+
+					instr_time elapsed;
+
+					INSTR_TIME_SET_CURRENT(elapsed);
+					INSTR_TIME_SUBTRACT(elapsed, lastLine);
+
+					if (INSTR_TIME_GET_MILLISEC(elapsed) >= 9900)
+					{
+						break;
+					}
+
+					pg_usleep(100 * 1000);
+				}
+			}
+		}
+
+		default:
+		{
+			/* fork succeeded, in parent */
+			return true;
+		}
+	}
+}
+
+
+/*
+ * compare_workers_alive returns true while at least one worker exists. The
+ * parent reaps the workers only after it queued every table, and a zombie
+ * still answers kill(pid, 0).
+ */
+static bool
+compare_workers_alive(pid_t *workers, int count)
+{
+	for (int i = 0; i < count; i++)
+	{
+		if (workers[i] > 0 && kill(workers[i], 0) == 0)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+/*
+ * compare_log_progress logs one compare progress line. Its JSON is read by
+ * callers that follow a compare, so keep the key names stable.
+ */
+static bool
+compare_log_progress(DatabaseCatalog *catalog,
+					 instr_time *startTime,
+					 bool final)
+{
+	CompareProgress progress = { 0 };
+
+	if (!catalog_compare_progress(catalog, &progress))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	instr_time elapsed;
+
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, *startTime);
+
+	uint64_t now = time(NULL);
+
+	JSON_Value *js = json_value_init_object();
+	JSON_Object *jsObj = json_value_get_object(js);
+
+	json_object_set_number(jsObj, "plannedTables", progress.plannedTables);
+	json_object_set_number(jsObj, "comparedTables", progress.comparedTables);
+	json_object_set_number(jsObj, "plannedBytes", progress.plannedBytes);
+	json_object_set_number(jsObj, "comparedBytes", progress.comparedBytes);
+	json_object_set_number(jsObj, "comparedRows", progress.comparedRows);
+	json_object_set_number(jsObj, "differingTables", progress.differingTables);
+	json_object_set_number(jsObj, "failedTables", progress.failedTables);
+	json_object_set_number(jsObj,
+						   "elapsedMs",
+						   (uint64_t) INSTR_TIME_GET_MILLISEC(elapsed));
+	json_object_set_boolean(jsObj, "final", final);
+	json_object_set_number(jsObj, "inFlightCount", progress.inFlightCount);
+
+	JSON_Value *jsInFlight = json_value_init_array();
+	JSON_Array *jsArray = json_value_get_array(jsInFlight);
+
+	for (int i = 0; i < progress.inFlightLen; i++)
+	{
+		CompareInFlightTable *table = &(progress.inFlight[i]);
+
+		JSON_Value *jsTable = json_value_init_object();
+		JSON_Object *jsTableObj = json_value_get_object(jsTable);
+
+		/* the catalog stores whole seconds */
+		uint64_t elapsedMs =
+			now > table->startTime ? (now - table->startTime) * 1000 : 0;
+
+		json_object_set_string(jsTableObj, "schema", table->nspname);
+		json_object_set_string(jsTableObj, "name", table->relname);
+		json_object_set_number(jsTableObj, "bytes", table->bytes);
+		json_object_set_number(jsTableObj, "elapsedMs", elapsedMs);
+
+		json_array_append_value(jsArray, jsTable);
+	}
+
+	json_object_set_value(jsObj, "inFlight", jsInFlight);
+
+	char *serialized = json_serialize_to_string(js);
+
+	if (serialized == NULL)
+	{
+		log_error("Failed to serialize compare data progress to JSON");
+		json_value_free(js);
+		return false;
+	}
+
+	log_info("compare progress: %s", serialized);
+
+	json_free_serialized_string(serialized);
+	json_value_free(js);
 
 	return true;
 }
@@ -371,6 +616,7 @@ bool
 compare_data_by_table_oid(CopyDataSpec *copySpecs, uint32_t oid)
 {
 	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
+	bool success = false;
 
 	SourceTable *table = (SourceTable *) calloc(1, sizeof(SourceTable));
 
@@ -384,167 +630,100 @@ compare_data_by_table_oid(CopyDataSpec *copySpecs, uint32_t oid)
 	{
 		log_error("Failed to lookup for table %u in our internal catalogs",
 				  oid);
-
-		return false;
 	}
-
-	if (table->oid == 0)
+	else if (table->oid == 0)
 	{
 		log_error("Failed to find table with oid %u in our internal catalogs",
 				  oid);
-
-		return false;
 	}
-
-	if (!catalog_s_table_fetch_attrs(sourceDB, table))
+	else if (!catalog_s_table_fetch_attrs(sourceDB, table))
 	{
 		log_error("Failed to fetch table %s attribute list, "
 				  "see above for details",
 				  table->qname);
-		return false;
 	}
-
-	log_trace("compare_data_by_table_oid: %u %s", oid, table->qname);
-
-	if (!compare_table(copySpecs, table))
+	else
 	{
-		log_error("Failed to compute rowcount and checksum for %s, "
-				  "see above for details",
-				  table->qname);
+		log_trace("compare_data_by_table_oid: %u %s", oid, table->qname);
 
-		return false;
+		success = compare_table(copySpecs, table);
+
+		if (!success)
+		{
+			log_error("Failed to record the comparison of %s, "
+					  "see above for details",
+					  table->qname);
+		}
 	}
 
-	return true;
+	free(table->attributes.array);
+	free(table);
+
+	return success;
 }
 
 
 /*
  * compare_table computes the rowcount and checksum of a table contents on the
- * source and on the target database instances and compare them.
+ * source and on the target database instances and compare them. A Postgres
+ * error makes the table an error row, and only a catalog failure returns false.
  */
 bool
 compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 {
-	ConnStrings *dsn = &(copySpecs->connStrings);
-
-	PGSQL src = { 0 };
-	PGSQL dst = { 0 };
-
-	if (!pgsql_init(&src, dsn->source_pguri, PGSQL_CONN_SOURCE))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	/* see srcSettings; row_security exists from Postgres 9.5 */
-	if (!pgsql_begin(&src) ||
-		!pgsql_server_version(&src) ||
-		(src.pgversion_num >= 90500 &&
-		 !pgsql_execute(&src, "SET LOCAL row_security TO off")))
-	{
-		/* errors have already been logged */
-		(void) pgsql_finish(&src);
-		return false;
-	}
-
-	if (!pgsql_init(&dst, dsn->target_pguri, PGSQL_CONN_TARGET))
-	{
-		/* errors have already been logged */
-		(void) pgsql_finish(&src);
-		return false;
-	}
-
-	if (!pgsql_begin(&dst) ||
-		!pgsql_execute(&dst, "SET LOCAL row_security TO off"))
-	{
-		/* errors have already been logged */
-		(void) pgsql_finish(&src);
-		(void) pgsql_finish(&dst);
-		return false;
-	}
-
-	/*
-	 * First, send both the queries to the source and target databases,
-	 * async.
-	 */
-	if (!schema_send_table_checksum(&src, source))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	if (!schema_send_table_checksum(&dst, source))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	/*
-	 * Second, fetch the results from both the connections.
-	 */
+	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
 	TableChecksum *srcChk = &(source->sourceChecksum);
 	TableChecksum *dstChk = &(source->targetChecksum);
 
-	bool srcDone = false;
-	bool dstDone = false;
+	instr_time startTime;
+	instr_time duration;
 
-	do {
-		if (!srcDone)
-		{
-			if (!schema_fetch_table_checksum(&src, srcChk, &srcDone))
-			{
-				/* errors have already been logged */
-				(void) pgsql_finish(&dst);
-				return false;
-			}
-		}
+	INSTR_TIME_SET_CURRENT(startTime);
 
-		if (!dstDone)
-		{
-			if (!schema_fetch_table_checksum(&dst, dstChk, &dstDone))
-			{
-				/* errors have already been logged */
-				(void) pgsql_finish(&src);
-				return false;
-			}
-		}
-
-		if (!srcDone || !dstDone)
-		{
-			pg_usleep(10 * 1000); /* 10 ms */
-		}
-	} while (!srcDone || !dstDone);
-
-
-	if (!pgsql_commit(&src))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	if (!pgsql_commit(&dst))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	DatabaseCatalog *sourceDB = &(copySpecs->catalogs.source);
-
-	log_notice("%s %u: %lld rows, checksum %s",
-			   source->qname,
-			   source->oid,
-			   (long long) srcChk->rowcount,
-			   srcChk->checksum);
-
-	if (!catalog_add_s_table_chksum(sourceDB, source, srcChk, dstChk))
+	if (!catalog_add_s_table_chksum(sourceDB, source, time(NULL)))
 	{
 		log_error("Failed to add checksum information to our internal catalogs, "
 				  "see above for details");
 		return false;
 	}
 
-	if (srcChk->rowcount != dstChk->rowcount)
+	log_notice("Comparing table %s", source->qname);
+
+	char error[BUFSIZE] = { 0 };
+	char *status = "match";
+
+	if (!compare_table_checksums(copySpecs, source, error, sizeof(error)))
+	{
+		status = "error";
+		bzero(srcChk, sizeof(TableChecksum));
+		bzero(dstChk, sizeof(TableChecksum));
+	}
+	else if (srcChk->rowcount != dstChk->rowcount ||
+			 !streq(srcChk->checksum, dstChk->checksum))
+	{
+		status = "differ";
+	}
+
+	INSTR_TIME_SET_CURRENT(duration);
+	INSTR_TIME_SUBTRACT(duration, startTime);
+
+	strlcpy(source->checksumStatus, status, sizeof(source->checksumStatus));
+	source->checksumDurationMs = INSTR_TIME_GET_MILLISEC(duration);
+
+	if (!catalog_finish_s_table_chksum(sourceDB, source, error, time(NULL)))
+	{
+		log_error("Failed to add checksum information to our internal catalogs, "
+				  "see above for details");
+		return false;
+	}
+
+	if (!IS_EMPTY_STRING_BUFFER(error))
+	{
+		log_error("Failed to compare table %s: %s, see above for details",
+				  source->qname,
+				  error);
+	}
+	else if (srcChk->rowcount != dstChk->rowcount)
 	{
 		log_error("Table %s has %lld rows on source, %lld rows on target",
 				  source->qname,
@@ -561,12 +740,177 @@ compare_table(CopyDataSpec *copySpecs, SourceTable *source)
 				  dstChk->checksum);
 	}
 
-	log_notice("%s: %lld rows, checksum %s",
+	log_notice("Compared table %s in %lld ms: %s, %lld rows, checksum %s",
 			   source->qname,
+			   (long long) source->checksumDurationMs,
+			   status,
 			   (long long) srcChk->rowcount,
 			   srcChk->checksum);
 
 	return true;
+}
+
+
+/*
+ * compare_table_checksums runs the checksum query of a table on the source and
+ * on the target. Every exit closes both connections, and on failure error
+ * names the side that failed.
+ */
+static bool
+compare_table_checksums(CopyDataSpec *copySpecs,
+						SourceTable *source,
+						char *error,
+						size_t size)
+{
+	ConnStrings *dsn = &(copySpecs->connStrings);
+	TableChecksum *srcChk = &(source->sourceChecksum);
+	TableChecksum *dstChk = &(source->targetChecksum);
+
+	PGSQL src = { 0 };
+	PGSQL dst = { 0 };
+	PGSQL *failed = NULL;
+
+	bool srcDone = false;
+	bool dstDone = false;
+
+	/* see srcSettings; row_security exists from Postgres 9.5 */
+	if (!compare_init_connection(&src, dsn->source_pguri, PGSQL_CONN_SOURCE) ||
+		!pgsql_begin(&src) ||
+		!pgsql_server_version(&src) ||
+		(src.pgversion_num >= 90500 &&
+		 !pgsql_execute(&src, "SET LOCAL row_security TO off")))
+	{
+		failed = &src;
+		goto cleanup;
+	}
+
+	if (!compare_init_connection(&dst, dsn->target_pguri, PGSQL_CONN_TARGET) ||
+		!pgsql_begin(&dst) ||
+		!pgsql_execute(&dst, "SET LOCAL row_security TO off"))
+	{
+		failed = &dst;
+		goto cleanup;
+	}
+
+	/*
+	 * First, send both the queries to the source and target databases,
+	 * async.
+	 */
+	if (!schema_send_table_checksum(&src, source))
+	{
+		failed = &src;
+		goto cleanup;
+	}
+
+	if (!schema_send_table_checksum(&dst, source))
+	{
+		failed = &dst;
+		goto cleanup;
+	}
+
+	/*
+	 * Second, fetch the results from both the connections.
+	 */
+	do {
+		if (!srcDone && !schema_fetch_table_checksum(&src, srcChk, &srcDone))
+		{
+			failed = &src;
+			goto cleanup;
+		}
+
+		if (!dstDone && !schema_fetch_table_checksum(&dst, dstChk, &dstDone))
+		{
+			failed = &dst;
+			goto cleanup;
+		}
+
+		if (!srcDone || !dstDone)
+		{
+			pg_usleep(10 * 1000); /* 10 ms */
+		}
+	} while (!srcDone || !dstDone);
+
+	if (!pgsql_commit(&src))
+	{
+		failed = &src;
+		goto cleanup;
+	}
+
+	if (!pgsql_commit(&dst))
+	{
+		failed = &dst;
+		goto cleanup;
+	}
+
+cleanup:
+
+	/* a failed connect, or a session the server closed, leaves no connection */
+	compareConnectionLost =
+		failed != NULL &&
+		(failed->connection == NULL || pgsql_state_is_connection_error(failed));
+
+	if (failed != NULL)
+	{
+		/* the Postgres error itself has already been logged */
+		sformat(error, size, "%s failed%s%s",
+				failed == &src ? "source" : "target",
+				IS_EMPTY_STRING_BUFFER(failed->sqlstate) ? "" : " with SQLSTATE ",
+				failed->sqlstate);
+	}
+
+	(void) compare_cancel_query(&src);
+	(void) compare_cancel_query(&dst);
+
+	(void) pgsql_finish(&src);
+	(void) pgsql_finish(&dst);
+
+	return failed == NULL;
+}
+
+
+/*
+ * compare_init_connection does not retry the connection after the previous
+ * table lost one, so during an outage each remaining table becomes an error
+ * row in seconds instead of after a minute of retries.
+ */
+static bool
+compare_init_connection(PGSQL *pgsql, char *pguri, ConnectionType connectionType)
+{
+	if (!pgsql_init(pgsql, pguri, connectionType))
+	{
+		return false;
+	}
+
+	if (compareConnectionLost)
+	{
+		(void) pgsql_set_retry_policy(&(pgsql->retryPolicy), 0, 0, 0, 0);
+	}
+
+	return true;
+}
+
+
+/*
+ * compare_cancel_query cancels a checksum query that is still running, which
+ * would otherwise keep scanning on the server after its connection is closed.
+ */
+static void
+compare_cancel_query(PGSQL *pgsql)
+{
+	if (pgsql->connection == NULL || PQisBusy(pgsql->connection) == 0)
+	{
+		return;
+	}
+
+	char errbuf[256] = { 0 };
+	PGcancel *cancel = PQgetCancel(pgsql->connection);
+
+	if (cancel == NULL || PQcancel(cancel, errbuf, sizeof(errbuf)) == 0)
+	{
+		log_warn("Failed to cancel a checksum query: %s", errbuf);
+	}
+
+	PQfreeCancel(cancel);
 }
 
 
@@ -2041,8 +2385,16 @@ compare_all_databases_schema(CopyDataSpec *parentSpecs)
 static bool
 compare_alldb_chksum_hook(void *ctx, SourceTable *table)
 {
+	uint64_t *failedCount = (uint64_t *) ctx;
 	TableChecksum *srcChk = &(table->sourceChecksum);
 	TableChecksum *dstChk = &(table->targetChecksum);
+
+	/* a table error used to fail its database's compare, it still fails it */
+	if (streq(table->checksumStatus, "error") ||
+		streq(table->checksumStatus, "unchecked"))
+	{
+		++(*failedCount);
+	}
 
 	char fqname[2 * PG_NAMEDATALEN + 64] = { 0 };
 
@@ -2057,7 +2409,7 @@ compare_alldb_chksum_hook(void *ctx, SourceTable *table)
 
 	fformat(stdout, "%50s | %s | %64s | %64s \n",
 			fqname,
-			streq(srcChk->checksum, dstChk->checksum) ? " " : "!",
+			streq(table->checksumStatus, "match") ? " " : "!",
 			srcChk->checksum,
 			dstChk->checksum);
 
@@ -2362,6 +2714,8 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 			"----------------------------------------------------------------",
 			"----------------------------------------------------------------");
 
+	uint64_t failedCount = 0;
+
 	for (int i = 0; i < dbCount; i++)
 	{
 		/* Reopen per-db catalog to iterate checksum results */
@@ -2376,7 +2730,9 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 
 		if (catalog_init(&dbCat))
 		{
-			(void) catalog_iter_s_table(&dbCat, NULL, &compare_alldb_chksum_hook);
+			(void) catalog_iter_s_table_chksum(&dbCat,
+											   &failedCount,
+											   &compare_alldb_chksum_hook);
 			(void) catalog_close(&dbCat);
 		}
 
@@ -2384,6 +2740,13 @@ compare_all_databases_data(CopyDataSpec *parentSpecs)
 	}
 
 	fformat(stdout, "\n");
+
+	if (failedCount > 0)
+	{
+		log_error("Failed to compare %lld table(s), see above for details",
+				  (long long) failedCount);
+		ok = false;
+	}
 
 	free(datnames);
 

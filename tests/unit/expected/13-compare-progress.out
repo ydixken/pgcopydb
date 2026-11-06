@@ -1,0 +1,9 @@
+progress line: gated in flight for 5s or more
+in-flight entry keys: schema, name, bytes, elapsedMs, schema public, bytes true
+compare data: exit 0
+final lines: 1, last line final: true
+keys: plannedTables, comparedTables, plannedBytes, comparedBytes, comparedRows, differingTables, failedTables, elapsedMs, final, inFlightCount, inFlight
+final: 3 of 3 tables, bytes all compared true, 120 rows, 0 differing, 0 failed, 0 in flight 0, elapsedMs true
+public.free_a: match
+public.free_b: match
+public.gated: match

@@ -139,6 +139,53 @@ same pagila "cfgdump_seq" "select last_value || ' ' || is_called from cfgdump_se
 test "${status}" = 0
 
 #
+# A table whose checksum query fails is an error row, and a database whose
+# compare stops before its workers start leaves unchecked rows. Each such row
+# gets "!" in the report and makes compare data exit 12.
+#
+compare_failing() {
+    local exit_code=0
+    pgcopydb compare data \
+             --all-databases \
+             --source "${PGCOPYDB_SOURCE_PGURI}" \
+             --target "${PGCOPYDB_TARGET_PGURI}" \
+             --dir "/tmp/pgcopydb-$1" > "/tmp/$1.out" 2> "/tmp/$1.log" || exit_code=$?
+    cat "/tmp/$1.out"
+    test "${exit_code}" -eq 12
+    grep -F "Failed to compare $2 table(s)" "/tmp/$1.log"
+}
+
+for host in source target; do
+    createdb -h "${host}" -U postgres compare_errors
+    psql -v ON_ERROR_STOP=1 -h "${host}" -U postgres -d compare_errors <<'EOF'
+create table good(id integer primary key);
+insert into good select generate_series(1, 10);
+create table broken(id integer primary key, extra text);
+insert into broken select i, i::text from generate_series(1, 10) i;
+EOF
+done
+psql -v ON_ERROR_STOP=1 -h target -U postgres -d compare_errors \
+     -c 'alter table broken drop column extra'
+
+compare_failing compare-errors 1
+grep -E '^ *compare_errors[.]public[.]broken [|] ! [|]' /tmp/compare-errors.out
+grep -E '^ *compare_errors[.]public[.]good [|]   [|]' /tmp/compare-errors.out
+
+# a partition missing on the target stops that database's compare before its workers start
+for host in source target; do
+    createdb -h "${host}" -U postgres compare_unchecked
+    psql -v ON_ERROR_STOP=1 -h "${host}" -U postgres -d compare_unchecked <<'EOF'
+create table measure(id integer) partition by range (id);
+create table measure_1 partition of measure for values from (1) to (100);
+EOF
+done
+psql -v ON_ERROR_STOP=1 -h source -U postgres -d compare_unchecked \
+     -c 'create table measure_2 partition of measure for values from (100) to (200)'
+
+compare_failing compare-unchecked 3
+test "$(grep -cE '^ *compare_unchecked[.]public[.]measure_[12] [|] ! [|]' /tmp/compare-unchecked.out)" -eq 2
+
+#
 # Debug: dump timing tables from per-database catalogs
 #
 echo "=== Timing table dump ==="

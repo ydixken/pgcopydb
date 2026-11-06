@@ -178,6 +178,10 @@ typedef struct SourceTable
 	TableChecksum sourceChecksum;
 	TableChecksum targetChecksum;
 
+	/* compare data: running, match, differ, error or unchecked */
+	char checksumStatus[16];
+	uint64_t checksumDurationMs;
+
 	char partKey[PG_NAMEDATALEN];
 	SourceTableParts partition;
 
