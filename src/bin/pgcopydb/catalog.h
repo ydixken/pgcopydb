@@ -268,6 +268,34 @@ bool catalog_iter_s_table_chksum(DatabaseCatalog *catalog,
 								 void *context,
 								 SourceTableIterFun *callback);
 
+/* the in-flight list of a progress line is capped, inFlightCount is not */
+#define COMPARE_PROGRESS_MAX_IN_FLIGHT 64
+
+typedef struct CompareInFlightTable
+{
+	char nspname[PG_NAMEDATALEN];
+	char relname[PG_NAMEDATALEN];
+	int64_t bytes;
+	uint64_t startTime;
+} CompareInFlightTable;
+
+typedef struct CompareProgress
+{
+	uint64_t plannedTables;
+	uint64_t comparedTables;
+	int64_t plannedBytes;
+	int64_t comparedBytes;
+	int64_t comparedRows;
+	uint64_t differingTables;
+	uint64_t failedTables;
+	uint64_t inFlightCount;
+	int inFlightLen;
+	CompareInFlightTable inFlight[COMPARE_PROGRESS_MAX_IN_FLIGHT];
+} CompareProgress;
+
+bool catalog_compare_progress(DatabaseCatalog *catalog,
+							  CompareProgress *progress);
+
 typedef struct SourceTableIterator
 {
 	DatabaseCatalog *catalog;

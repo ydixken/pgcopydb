@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -43,6 +44,13 @@ static bool compare_read_partitions(CopyDataSpec *specs,
 									const ComparePartitionArray *sourcePartitions,
 									ComparePartitionArray *partitions);
 
+static bool compare_start_progress(CopyDataSpec *copySpecs,
+								   pid_t *workers,
+								   instr_time *startTime);
+static bool compare_workers_alive(pid_t *workers, int count);
+static bool compare_log_progress(DatabaseCatalog *catalog,
+								 instr_time *startTime,
+								 bool final);
 static bool compare_table_checksums(CopyDataSpec *copySpecs,
 									SourceTable *source,
 									char *error,
@@ -72,7 +80,11 @@ compare_data(CopyDataSpec *copySpecs)
 	Queue compareQueue = { 0 };
 	JSON_Value *filtersJson = NULL;
 	CopyDataSpec targetSpecs = { 0 };
+	pid_t *workers = NULL;
 	bool success = false;
+
+	instr_time startTime;
+	INSTR_TIME_SET_CURRENT(startTime);
 
 	if (!queue_create(&compareQueue, "compare"))
 	{
@@ -121,9 +133,27 @@ compare_data(CopyDataSpec *copySpecs)
 		goto cleanup;
 	}
 
-	if (!compare_start_workers(copySpecs, &compareQueue))
+	workers = (pid_t *) calloc(copySpecs->tableJobs, sizeof(pid_t));
+
+	if (workers == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		goto cleanup;
+	}
+
+	if (!compare_start_workers(copySpecs, &compareQueue, workers))
 	{
 		log_fatal("Failed to start %d compare data workers", copySpecs->tableJobs);
+		goto cleanup;
+	}
+
+	/*
+	 * From here until the wait returns this process writes no catalog row:
+	 * its s_table cursor stays open while it queues the tables.
+	 */
+	if (!compare_start_progress(copySpecs, workers, &startTime))
+	{
+		log_fatal("Failed to start the compare data progress process");
 		goto cleanup;
 	}
 
@@ -133,7 +163,15 @@ compare_data(CopyDataSpec *copySpecs)
 		goto cleanup;
 	}
 
-	if (!copydb_wait_for_subprocesses(copySpecs->failFast))
+	bool workersDone = copydb_wait_for_subprocesses(copySpecs->failFast);
+
+	/* the progress process has exited, so this is the last progress line */
+	if (!compare_log_progress(sourceDB, &startTime, true))
+	{
+		goto cleanup;
+	}
+
+	if (!workersDone)
 	{
 		log_fatal("Some compare data worker process have failed, "
 				  "see above for details");
@@ -143,6 +181,7 @@ compare_data(CopyDataSpec *copySpecs)
 	success = true;
 
 cleanup:
+	free(workers);
 	json_value_free(filtersJson);
 	filters_free(&(targetSpecs.filters));
 	filters_free(&(copySpecs->filters));
@@ -228,10 +267,11 @@ compare_queue_table_hook(void *ctx, SourceTable *table)
 
 
 /*
- * compare_start_workers create as many sub-process as needed, per --table-jobs.
+ * compare_start_workers create as many sub-process as needed, per --table-jobs,
+ * and stores their pids in workers.
  */
 bool
-compare_start_workers(CopyDataSpec *copySpecs, Queue *queue)
+compare_start_workers(CopyDataSpec *copySpecs, Queue *queue, pid_t *workers)
 {
 	log_info("Starting %d table compare processes", copySpecs->tableJobs);
 
@@ -271,10 +311,203 @@ compare_start_workers(CopyDataSpec *copySpecs, Queue *queue)
 			default:
 			{
 				/* fork succeeded, in parent */
+				workers[i] = fpid;
 				break;
 			}
 		}
 	}
+
+	return true;
+}
+
+
+/*
+ * compare_start_progress forks the process that logs a compare progress line
+ * every 10s until no worker is left. It opens its own read-only catalog
+ * handle and never writes, so it cannot make a worker's write fail.
+ */
+static bool
+compare_start_progress(CopyDataSpec *copySpecs,
+					   pid_t *workers,
+					   instr_time *startTime)
+{
+	pid_t parent = getpid();
+
+	fflush(stdout);
+	fflush(stderr);
+
+	int fpid = fork();
+
+	switch (fpid)
+	{
+		case -1:
+		{
+			log_error("Failed to fork the compare progress process: %m");
+			return false;
+		}
+
+		case 0:
+		{
+			(void) set_ps_title("pgcopydb: compare progress");
+
+			/* a copy, so the inherited handle of the parent is never used */
+			DatabaseCatalog catalog = { 0 };
+
+			strlcpy(catalog.dbfile,
+					copySpecs->catalogs.source.dbfile,
+					sizeof(catalog.dbfile));
+
+			if (!catalog_open_readonly(&catalog))
+			{
+				log_warn("Compare data progress is not available, "
+						 "see above for details");
+				exit(EXIT_CODE_QUIT);
+			}
+
+			for (;;)
+			{
+				instr_time lastLine;
+
+				INSTR_TIME_SET_CURRENT(lastLine);
+
+				if (!compare_log_progress(&catalog, startTime, false))
+				{
+					log_warn("Failed to log compare data progress, "
+							 "see above for details");
+				}
+
+				/* 100ms slices, the last one ending before 10s have passed */
+				for (;;)
+				{
+					if (asked_to_stop || asked_to_stop_fast || asked_to_quit ||
+						getppid() != parent ||
+						!compare_workers_alive(workers, copySpecs->tableJobs))
+					{
+						(void) catalog_close(&catalog);
+						exit(EXIT_CODE_QUIT);
+					}
+
+					instr_time elapsed;
+
+					INSTR_TIME_SET_CURRENT(elapsed);
+					INSTR_TIME_SUBTRACT(elapsed, lastLine);
+
+					if (INSTR_TIME_GET_MILLISEC(elapsed) >= 9900)
+					{
+						break;
+					}
+
+					pg_usleep(100 * 1000);
+				}
+			}
+		}
+
+		default:
+		{
+			/* fork succeeded, in parent */
+			return true;
+		}
+	}
+}
+
+
+/*
+ * compare_workers_alive returns true while at least one worker exists. The
+ * parent reaps the workers only after it queued every table, and a zombie
+ * still answers kill(pid, 0).
+ */
+static bool
+compare_workers_alive(pid_t *workers, int count)
+{
+	for (int i = 0; i < count; i++)
+	{
+		if (workers[i] > 0 && kill(workers[i], 0) == 0)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+/*
+ * compare_log_progress logs one compare progress line. Its JSON is read by
+ * callers that follow a compare, so keep the key names stable.
+ */
+static bool
+compare_log_progress(DatabaseCatalog *catalog,
+					 instr_time *startTime,
+					 bool final)
+{
+	CompareProgress progress = { 0 };
+
+	if (!catalog_compare_progress(catalog, &progress))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	instr_time elapsed;
+
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, *startTime);
+
+	uint64_t now = time(NULL);
+
+	JSON_Value *js = json_value_init_object();
+	JSON_Object *jsObj = json_value_get_object(js);
+
+	json_object_set_number(jsObj, "plannedTables", progress.plannedTables);
+	json_object_set_number(jsObj, "comparedTables", progress.comparedTables);
+	json_object_set_number(jsObj, "plannedBytes", progress.plannedBytes);
+	json_object_set_number(jsObj, "comparedBytes", progress.comparedBytes);
+	json_object_set_number(jsObj, "comparedRows", progress.comparedRows);
+	json_object_set_number(jsObj, "differingTables", progress.differingTables);
+	json_object_set_number(jsObj, "failedTables", progress.failedTables);
+	json_object_set_number(jsObj,
+						   "elapsedMs",
+						   (uint64_t) INSTR_TIME_GET_MILLISEC(elapsed));
+	json_object_set_boolean(jsObj, "final", final);
+	json_object_set_number(jsObj, "inFlightCount", progress.inFlightCount);
+
+	JSON_Value *jsInFlight = json_value_init_array();
+	JSON_Array *jsArray = json_value_get_array(jsInFlight);
+
+	for (int i = 0; i < progress.inFlightLen; i++)
+	{
+		CompareInFlightTable *table = &(progress.inFlight[i]);
+
+		JSON_Value *jsTable = json_value_init_object();
+		JSON_Object *jsTableObj = json_value_get_object(jsTable);
+
+		/* the catalog stores whole seconds */
+		uint64_t elapsedMs =
+			now > table->startTime ? (now - table->startTime) * 1000 : 0;
+
+		json_object_set_string(jsTableObj, "schema", table->nspname);
+		json_object_set_string(jsTableObj, "name", table->relname);
+		json_object_set_number(jsTableObj, "bytes", table->bytes);
+		json_object_set_number(jsTableObj, "elapsedMs", elapsedMs);
+
+		json_array_append_value(jsArray, jsTable);
+	}
+
+	json_object_set_value(jsObj, "inFlight", jsInFlight);
+
+	char *serialized = json_serialize_to_string(js);
+
+	if (serialized == NULL)
+	{
+		log_error("Failed to serialize compare data progress to JSON");
+		json_value_free(js);
+		return false;
+	}
+
+	log_info("compare progress: %s", serialized);
+
+	json_free_serialized_string(serialized);
+	json_value_free(js);
 
 	return true;
 }

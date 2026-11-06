@@ -5512,6 +5512,131 @@ catalog_iter_s_table_chksum(DatabaseCatalog *catalog,
 
 
 /*
+ * catalog_compare_progress counts what compare data planned, finished and has
+ * in flight. It only reads, so that a read-only catalog handle can run it.
+ */
+bool
+catalog_compare_progress(DatabaseCatalog *catalog, CompareProgress *progress)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
+	{
+		log_error("BUG: catalog_compare_progress: db is NULL");
+		return false;
+	}
+
+	char *sql =
+		"select count(*), coalesce(sum(ts.bytes), 0), "
+		"       count(case when c.status in ('match', 'differ', 'error') "
+		"                  then 1 end), "
+		"       coalesce(sum(case when c.status in ('match', 'differ', 'error') "
+		"                         then ts.bytes end), 0), "
+		"       coalesce(sum(case when c.status in ('match', 'differ') "
+		"                         then c.srcrowcount end), 0), "
+		"       count(case when c.status = 'differ' then 1 end), "
+		"       count(case when c.status = 'error' then 1 end) "
+		"  from s_table t "
+		"       left join s_table_size ts on ts.oid = t.oid "
+		"       left join s_table_chksum c on c.oid = t.oid";
+
+	SQLiteQuery query = { 0 };
+
+	if (!catalog_sql_prepare(db, sql, &query))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (catalog_sql_step(&query) != SQLITE_ROW)
+	{
+		log_error("Failed to step through statement: %s", sql);
+		log_error("[SQLite] %s", sqlite3_errmsg(db));
+		(void) catalog_sql_finalize(&query);
+		return false;
+	}
+
+	progress->plannedTables = sqlite3_column_int64(query.ppStmt, 0);
+	progress->plannedBytes = sqlite3_column_int64(query.ppStmt, 1);
+	progress->comparedTables = sqlite3_column_int64(query.ppStmt, 2);
+	progress->comparedBytes = sqlite3_column_int64(query.ppStmt, 3);
+	progress->comparedRows = sqlite3_column_int64(query.ppStmt, 4);
+	progress->differingTables = sqlite3_column_int64(query.ppStmt, 5);
+	progress->failedTables = sqlite3_column_int64(query.ppStmt, 6);
+
+	if (!catalog_sql_finalize(&query))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	char *inFlightSql =
+		"  select t.nspname, t.relname, coalesce(ts.bytes, 0), "
+		"         c.start_time_epoch "
+		"    from s_table_chksum c "
+		"         join s_table t on t.oid = c.oid "
+		"         left join s_table_size ts on ts.oid = c.oid "
+		"   where c.status = 'running' "
+		"order by c.start_time_epoch, c.oid";
+
+	SQLiteQuery inFlight = { 0 };
+
+	if (!catalog_sql_prepare(db, inFlightSql, &inFlight))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	progress->inFlightCount = 0;
+	progress->inFlightLen = 0;
+
+	int rc;
+
+	while ((rc = catalog_sql_step(&inFlight)) == SQLITE_ROW)
+	{
+		++progress->inFlightCount;
+
+		if (progress->inFlightLen >= COMPARE_PROGRESS_MAX_IN_FLIGHT)
+		{
+			continue;
+		}
+
+		CompareInFlightTable *table =
+			&(progress->inFlight[progress->inFlightLen++]);
+
+		bzero(table, sizeof(CompareInFlightTable));
+
+		if (sqlite3_column_type(inFlight.ppStmt, 0) != SQLITE_NULL)
+		{
+			strlcpy(table->nspname,
+					(char *) sqlite3_column_text(inFlight.ppStmt, 0),
+					sizeof(table->nspname));
+		}
+
+		if (sqlite3_column_type(inFlight.ppStmt, 1) != SQLITE_NULL)
+		{
+			strlcpy(table->relname,
+					(char *) sqlite3_column_text(inFlight.ppStmt, 1),
+					sizeof(table->relname));
+		}
+
+		table->bytes = sqlite3_column_int64(inFlight.ppStmt, 2);
+		table->startTime = sqlite3_column_int64(inFlight.ppStmt, 3);
+	}
+
+	if (rc != SQLITE_DONE)
+	{
+		log_error("Failed to step through statement: %s", inFlightSql);
+		log_error("[SQLite] %s", sqlite3_errmsg(db));
+		(void) catalog_sql_finalize(&inFlight);
+		return false;
+	}
+
+	return catalog_sql_finalize(&inFlight);
+}
+
+
+/*
  * catalog_iter_s_table_part iterates over the list of a table partitions in
  * our catalogs.
  */
