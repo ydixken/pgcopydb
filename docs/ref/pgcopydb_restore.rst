@@ -139,6 +139,12 @@ The following options are available to ``pgcopydb restore schema``:
   If this value is not set, we reuse the ``--index-jobs`` value. If that value
   is not set either, we use the the default value for ``--index-jobs``.
 
+  When the post-data section attaches indexes of partitioned tables and this
+  value is greater than 1, pg_restore runs in three passes to avoid lock
+  conflicts: first everything else with ``--jobs``, then the ``INDEX ATTACH``
+  entries one at a time, then the ``FK CONSTRAINT`` and ``COMMENT``
+  entries with ``--jobs``.
+
 --drop-if-exists
 
   When restoring the schema on the target Postgres instance, ``pgcopydb``

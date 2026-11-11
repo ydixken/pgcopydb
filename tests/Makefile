@@ -6,7 +6,7 @@ export PGVERSION
 BUILD_ARGS = --build-arg PGVERSION=$(PGVERSION)
 
 all: pagila pagila-multi-steps blobs unit filtering extensions \
-	 partitioned-target all-databases \
+	 partitioned-target post-data-partitioned all-databases \
 	 cdc-wal2json cdc-test-decoding cdc-endpos-mid-txn cdc-low-level \
 	 cdc-replica-identity-index cdc-replica-identity-full \
 	 cdc-partitioned-target cdc-matview \
@@ -42,6 +42,9 @@ filtering: build
 	$(MAKE) -C $@
 
 partitioned-target: build
+	$(MAKE) -C $@
+
+post-data-partitioned: build
 	$(MAKE) -C $@
 
 extensions: build
@@ -207,7 +210,7 @@ clean-images:
 	-docker rmi pagila multi 2>/dev/null; true
 
 .PHONY: all build build-pagila build-multi force-build clean-images
-.PHONY: pagila pagila-multi-steps blobs unit filtering partitioned-target extensions
+.PHONY: pagila pagila-multi-steps blobs unit filtering partitioned-target post-data-partitioned extensions
 .PHONY: all-databases three-databases
 .PHONY: cdc-wal2json cdc-test-decoding cdc-endpos-mid-txn cdc-low-level cdc-replica-identity-index cdc-partitioned-target
 .PHONY: cdc-replica-identity-full

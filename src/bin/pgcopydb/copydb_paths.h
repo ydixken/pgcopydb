@@ -65,6 +65,11 @@ typedef struct DumpPaths
 
 	char postListOutFilename[MAXPGPATH]; /* pg_restore --list */
 	char postListFilename[MAXPGPATH];    /* pg_restore --use-list */
+
+	/* post-data split in passes when partitioned indexes are attached */
+	char postMainListFilename[MAXPGPATH];   /* everything else, --jobs */
+	char postAttachListFilename[MAXPGPATH]; /* INDEX ATTACH, serial */
+	char postFkListFilename[MAXPGPATH];     /* FK CONSTRAINT, COMMENT */
 } DumpPaths;
 
 
