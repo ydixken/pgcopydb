@@ -34,6 +34,12 @@ static bool copydb_write_restore_list_hook(void *ctx,
 										   ArchiveContentItem *item);
 
 static bool copydb_restore_replica_identity(CopyDataSpec *specs);
+static bool copydb_restore_post_data(CopyDataSpec *specs);
+static bool copydb_write_post_data_pass_lists(CopyDataSpec *specs,
+											  int *attachCount,
+											  int *fkCount);
+static bool copydb_write_post_data_pass_hook(void *ctx,
+											 ArchiveContentItem *item);
 
 
 /*
@@ -610,12 +616,8 @@ copydb_target_finalize_schema(CopyDataSpec *specs)
 	}
 
 	specs->restoreOptions.section = PG_RESTORE_SECTION_POST_DATA;
-	if (!pg_restore_db(&(specs->pgPaths),
-					   &(specs->connStrings),
-					   &(specs->filters),
-					   specs->dumpPaths.dumpFilename,
-					   specs->dumpPaths.postListFilename,
-					   specs->restoreOptions))
+
+	if (!copydb_restore_post_data(specs))
 	{
 		/* errors have already been logged */
 		return false;
@@ -645,6 +647,233 @@ copydb_target_finalize_schema(CopyDataSpec *specs)
 	}
 
 	return true;
+}
+
+
+/*
+ * copydb_restore_post_data runs pg_restore for the post-data section.
+ *
+ * With --restore-jobs > 1 and partitioned indexes in the archive, a single
+ * parallel pg_restore can deadlock. When the last INDEX ATTACH of a
+ * partitioned index completes it, Postgres validates the parent index and
+ * then its table, taking AccessExclusiveLock on both. Meanwhile a FK
+ * CONSTRAINT on that partitioned table, or referencing it, holds a lock on
+ * the table and waits for the parent index. pg_dump only makes such a FK
+ * depend on the ATTACH entries of the index it uses, and pg_restore only
+ * checks TABLE dependencies for lock conflicts, so both run concurrently.
+ *
+ * In that case we restore post-data in three passes:
+ *
+ *   1. everything except INDEX ATTACH, FK CONSTRAINT and COMMENT, parallel;
+ *   2. INDEX ATTACH entries, one at a time, each in its own transaction so
+ *      that locks do not pile up on schemas with many partitions;
+ *   3. FK CONSTRAINT and COMMENT entries, parallel.
+ *
+ * COMMENT entries go last because a comment may be on a FK constraint, and
+ * pg_restore ignores dependencies on entries that are not in its list.
+ */
+static bool
+copydb_restore_post_data(CopyDataSpec *specs)
+{
+	DumpPaths *dumpPaths = &(specs->dumpPaths);
+	int attachCount = 0;
+	int fkCount = 0;
+
+	if (specs->restoreOptions.jobs > 1)
+	{
+		if (!copydb_write_post_data_pass_lists(specs, &attachCount, &fkCount))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+	}
+
+	if (attachCount == 0)
+	{
+		return pg_restore_db(&(specs->pgPaths),
+							 &(specs->connStrings),
+							 &(specs->filters),
+							 dumpPaths->dumpFilename,
+							 dumpPaths->postListFilename,
+							 specs->restoreOptions);
+	}
+
+	log_info("Restoring post-data in 3 passes to avoid lock conflicts "
+			 "on partitioned indexes: %d INDEX ATTACH entries serially, "
+			 "then %d FK CONSTRAINT and COMMENT entries",
+			 attachCount,
+			 fkCount);
+
+	RestoreOptions serialOptions = specs->restoreOptions;
+	serialOptions.jobs = 1;
+	serialOptions.noSingleTransaction = true;
+
+	if (!pg_restore_db(&(specs->pgPaths),
+					   &(specs->connStrings),
+					   &(specs->filters),
+					   dumpPaths->dumpFilename,
+					   dumpPaths->postMainListFilename,
+					   specs->restoreOptions))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!pg_restore_db(&(specs->pgPaths),
+					   &(specs->connStrings),
+					   &(specs->filters),
+					   dumpPaths->dumpFilename,
+					   dumpPaths->postAttachListFilename,
+					   serialOptions))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (fkCount > 0 &&
+		!pg_restore_db(&(specs->pgPaths),
+					   &(specs->connStrings),
+					   &(specs->filters),
+					   dumpPaths->dumpFilename,
+					   dumpPaths->postFkListFilename,
+					   specs->restoreOptions))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	return true;
+}
+
+
+typedef struct PostDataPassContext
+{
+	FILE *mainStream;
+	FILE *attachStream;
+	FILE *fkStream;
+	int attachCount;
+	int fkCount;
+} PostDataPassContext;
+
+
+/*
+ * copydb_write_post_data_pass_lists splits the active entries of the
+ * post-data --use-list file into one list file per pass. The pass files are
+ * truncated, so that a resumed run starts from the current list.
+ */
+static bool
+copydb_write_post_data_pass_lists(CopyDataSpec *specs,
+								  int *attachCount,
+								  int *fkCount)
+{
+	DumpPaths *dumpPaths = &(specs->dumpPaths);
+	PostDataPassContext context = { 0 };
+	bool success = true;
+
+	context.mainStream =
+		fopen_with_umask(dumpPaths->postMainListFilename,
+						 "wb", FOPEN_FLAGS_W, 0644);
+	context.attachStream =
+		fopen_with_umask(dumpPaths->postAttachListFilename,
+						 "wb", FOPEN_FLAGS_W, 0644);
+	context.fkStream =
+		fopen_with_umask(dumpPaths->postFkListFilename,
+						 "wb", FOPEN_FLAGS_W, 0644);
+
+	if (context.mainStream == NULL ||
+		context.attachStream == NULL ||
+		context.fkStream == NULL)
+	{
+		/* errors have already been logged */
+		success = false;
+	}
+
+	if (success &&
+		!archive_iter_toc(dumpPaths->postListFilename,
+						  &context,
+						  copydb_write_post_data_pass_hook))
+	{
+		log_error("Failed to split the post-data pg_restore list file "
+				  "\"%s\" in passes, see above for details",
+				  dumpPaths->postListFilename);
+		success = false;
+	}
+
+	FILE *streams[] = {
+		context.mainStream, context.attachStream, context.fkStream
+	};
+
+	for (int i = 0; i < 3; i++)
+	{
+		if (streams[i] != NULL && fclose(streams[i]) == EOF)
+		{
+			log_error("Failed to write a post-data pg_restore list file: %m");
+			success = false;
+		}
+	}
+
+	*attachCount = context.attachCount;
+	*fkCount = context.fkCount;
+
+	return success;
+}
+
+
+/*
+ * copydb_write_post_data_pass_hook is an iterator callback function. Lines
+ * commented out in the --use-list file are not passed to the callback.
+ */
+static bool
+copydb_write_post_data_pass_hook(void *ctx, ArchiveContentItem *item)
+{
+	PostDataPassContext *context = (PostDataPassContext *) ctx;
+	FILE *stream = context->mainStream;
+
+	switch (item->desc)
+	{
+		case ARCHIVE_TAG_INDEX_ATTACH:
+		{
+			stream = context->attachStream;
+			++context->attachCount;
+			break;
+		}
+
+		case ARCHIVE_TAG_FK_CONSTRAINT:
+		case ARCHIVE_TAG_COMMENT:
+		{
+			stream = context->fkStream;
+			++context->fkCount;
+			break;
+		}
+
+		default:
+		{
+			break;
+		}
+	}
+
+	/* pg_restore --use-list only reads the dumpId from each line */
+	PQExpBuffer buf = createPQExpBuffer();
+
+	printfPQExpBuffer(buf, "%d; %u %u %s %s\n",
+					  item->dumpId,
+					  item->catalogOid,
+					  item->objectOid,
+					  item->description,
+					  item->restoreListName != NULL ? item->restoreListName : "");
+
+	if (PQExpBufferBroken(buf))
+	{
+		log_error("Failed to create pg_restore list file: out of memory");
+		destroyPQExpBuffer(buf);
+		return false;
+	}
+
+	bool success = write_to_stream(stream, buf->data, buf->len);
+
+	destroyPQExpBuffer(buf);
+
+	return success;
 }
 
 
