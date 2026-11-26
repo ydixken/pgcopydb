@@ -1,0 +1,13 @@
+Mutant: A writer whose segment create fails leaves descriptor 0 in its relation log. Must fail: a writer whose segment file name does not fit holds no relation log descriptor.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1063,7 +1063,6 @@
+ 		.maxSegmentSize = maxSegmentSize,
+ 		.header = *header,
+ 		.segment = { .fd = -1 },
+-		.relationLog = { .fd = -1 },
+ 		.nextSeq = header->firstSeq,
+ 		.lastFinalLSN = header->lastFinalLSN,
+ 		.lastEndLSN = header->lastEndLSN,

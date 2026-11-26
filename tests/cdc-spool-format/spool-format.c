@@ -507,6 +507,8 @@ test_writer(const char *dir)
 		  one_line(logged_since(mark), " ERROR ", longLine) &&
 		  longName.held.data == NULL && longName.pendingIndex.data == NULL,
 		  "a writer whose segment file name does not fit fails with an ERROR line and holds no buffer");
+	check(longName.relationLog.fd == -1,
+		  "a writer whose segment file name does not fit holds no relation log descriptor");
 
 	char want[256];
 	uint64_t wantSize = frame(want, xlogdata, sizeof(xlogdata));
