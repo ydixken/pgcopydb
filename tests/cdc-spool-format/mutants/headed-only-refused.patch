@@ -1,0 +1,14 @@
+Mutant: an only segment without an indexed transaction is refused also when its header is valid. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header; a last segment whose index file holds no valid record is removed with it, and created again from its header.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2106,7 +2106,7 @@
+ 		}
+ 
+ 		/* a torn header hides where the spool goes on: only a new one restarts */
+-		if (!tail.headed && seq != SPOOL_FIRST_SEQ &&
++		if (seq != SPOOL_FIRST_SEQ &&
+ 			spool_highest_below(indexes, seq) == 0)
+ 		{
+ 			log_error("Spool file \"%s\" has no valid header, and no segment "

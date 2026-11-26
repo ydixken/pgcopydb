@@ -2105,6 +2105,15 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 			return false;
 		}
 
+		/* a torn header hides where the spool goes on: only a new one restarts */
+		if (!tail.headed && seq != SPOOL_FIRST_SEQ &&
+			spool_highest_below(indexes, seq) == 0)
+		{
+			log_error("Spool file \"%s\" has no valid header, and no segment "
+					  "before it to continue from", tail.segment.filename);
+			return false;
+		}
+
 		/* the index file first, as cleanup does */
 		if (!unlink_file(tail.index) || !unlink_file(tail.segment.filename))
 		{

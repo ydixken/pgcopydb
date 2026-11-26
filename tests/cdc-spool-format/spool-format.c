@@ -3080,6 +3080,24 @@ test_start_cut(const char *dir)
 		  "a first segment with a torn header is removed, the directory synced, and the spool starts again");
 	kill_writer(&opened);
 
+	/* cleanup removed the segment before a last one whose create was cut short */
+	char first[MAXPGPATH];
+
+	made = make_rotated(&writer, dir, false) &&
+		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
+		   unlink(spool_file(idx, writer.dirname, 5, ".idx")) == 0 &&
+		   unlink(spool_file(first, writer.dirname, 5, ".seg")) == 0;
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has no valid header, and no segment before it to continue from",
+			seg);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+
+	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  file_size(seg) == 10 &&
+		  access(spool_file(first, writer.dirname, SPOOL_FIRST_SEQ, ".seg"), F_OK) != 0,
+		  "an only segment with a torn header and a sequence number above 1 ends the start with an error that names it, and is kept");
+
 	made = make_spool(&writer, dir) &&
 		   flip_byte(spool_file(seg, writer.dirname, 5, ".seg"), 0);
 	sformat(line, sizeof(line),
