@@ -767,7 +767,9 @@ spool_relation_cursor_read(SpoolRelationCursor *cursor)
 
 		if (PQExpBufferBroken(&cursor->entries))
 		{
+			/* libpq freed the entries, so count must not walk them */
 			log_error(ALLOCATION_FAILED_ERROR);
+			cursor->count = 0;
 			kept = false;
 			break;
 		}
@@ -825,6 +827,13 @@ spool_relation_cursor_advance(SpoolRelationCursor *cursor,
 							  uint64_t seq, uint64_t changes,
 							  struct StreamContext *context)
 {
+	/* a read that could not keep the records leaves none to apply */
+	if (PQExpBufferBroken(&cursor->entries))
+	{
+		log_error("Spool file \"%s\" was not read into memory", cursor->filename);
+		return false;
+	}
+
 	if (spool_position_before(seq, changes,
 							  cursor->pendingSeq, cursor->pendingChanges))
 	{

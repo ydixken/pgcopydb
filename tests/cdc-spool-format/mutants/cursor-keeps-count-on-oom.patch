@@ -1,0 +1,13 @@
+Mutant: A read that could not keep its records keeps counting the entries that libpq freed. Must fail: a cursor that cannot keep its records counts none.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -769,7 +769,6 @@
+ 		{
+ 			/* libpq freed the entries, so count must not walk them */
+ 			log_error(ALLOCATION_FAILED_ERROR);
+-			cursor->count = 0;
+ 			kept = false;
+ 			break;
+ 		}

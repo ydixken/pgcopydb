@@ -2327,6 +2327,13 @@ test_relation_cursor(const char *dir)
 
 	check(opened && injected && !loaded,
 		  "a record that cannot be kept in memory fails the cursor");
+	check(cursor.count * sizeof(SpoolRelationEntry) <= cursor.entries.len,
+		  "a cursor that cannot keep its records counts none");
+
+	StreamContext lost = { 0 };
+
+	check(opened && !spool_relation_cursor_advance(&cursor, 5, 0, &lost),
+		  "a cursor that could not keep its records refuses to advance");
 	spool_relation_cursor_close(&cursor);
 }
 
