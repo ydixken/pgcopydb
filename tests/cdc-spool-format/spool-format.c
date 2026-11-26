@@ -379,7 +379,7 @@ test_header(void)
 	char want[SPOOL_HEADER_SIZE] = { 'P', 'G', 'C', 'S' };
 	char buf[SPOOL_HEADER_SIZE];
 
-	be32(want + 4, 1);
+	be32(want + 4, 2);
 	be64(want + 8, header.firstSeq);
 	be64(want + 16, header.systemId);
 	be32(want + 24, header.timeline);
@@ -413,7 +413,8 @@ test_header(void)
 	}
 	check(ok, "a header with any one bit flipped is invalid");
 
-	be32(want + 4, 2);
+	/* version 1 had index records without relationLogEnd */
+	be32(want + 4, 1);
 	be32(want + 60, spool_crc32c(want, 60));
 	check(!spool_header_decode(want, SPOOL_HEADER_SIZE, &read),
 		  "a header of another format version is invalid");
@@ -884,7 +885,8 @@ test_index_record(void)
 		.endOffset = 0x4142434445464748,
 		.finalLSN = 0x5152535455565758,
 		.endLSN = 0x6162636465666768,
-		.commitTime = 0x7172737475767778
+		.commitTime = 0x7172737475767778,
+		.relationLogEnd = 0x8182838485868788
 	};
 	char want[SPOOL_INDEX_RECORD_SIZE] = { 0 };
 	char buf[SPOOL_INDEX_RECORD_SIZE];
@@ -898,7 +900,8 @@ test_index_record(void)
 	be64(want + 36, record.finalLSN);
 	be64(want + 44, record.endLSN);
 	be64(want + 52, record.commitTime);
-	be32(want + 60, spool_crc32c(want, 60));
+	be64(want + 60, record.relationLogEnd);
+	be32(want + 68, spool_crc32c(want, 68));
 
 	spool_index_encode(&record, buf);
 	check(memcmp(buf, want, SPOOL_INDEX_RECORD_SIZE) == 0,
@@ -909,7 +912,8 @@ test_index_record(void)
 		  read.beginOffset == record.beginOffset &&
 		  read.endOffset == record.endOffset &&
 		  read.finalLSN == record.finalLSN && read.endLSN == record.endLSN &&
-		  read.commitTime == record.commitTime,
+		  read.commitTime == record.commitTime &&
+		  read.relationLogEnd == record.relationLogEnd,
 		  "an index record decodes to its fields");
 	check(!spool_index_decode(buf, SPOOL_INDEX_RECORD_SIZE - 1, &read),
 		  "an index record cut short is invalid");
@@ -1509,7 +1513,7 @@ test_out_of_memory(const char *dir)
 	check(fed && !held,
 		  "a held frame that cannot be stored in memory is an error");
 
-	/* the fourth record of 64 bytes is the first above those 256 bytes */
+	/* the fourth record of 72 bytes is the first above those 256 bytes */
 	Msg txns[12];
 
 	for (int i = 0; i < 4; i++)
@@ -2630,18 +2634,30 @@ flip_byte(const char *path, uint64_t offset)
 
 /*
  * The flush of receive up to the sync of the index file, which F8 adds: the
- * segment and the relation log are synced, and the records in memory are
- * appended to the index file of the open segment.
+ * segment and the relation log are synced, and the records in memory get the
+ * synced length of the log and are appended to the index file of the segment.
  */
 static bool
 write_index(SpoolWriter *writer)
 {
 	char path[MAXPGPATH];
 	PQExpBuffer pending = &writer->pendingIndex;
-	bool written =
-		spool_sync(&writer->segment) && spool_sync(&writer->relationLog) &&
-		put_bytes(spool_file(path, writer->dirname, writer->header.firstSeq, ".idx"),
-				  -1, pending->data, pending->len);
+	bool written = spool_sync(&writer->segment) && spool_sync(&writer->relationLog);
+
+	for (size_t at = 0; written && at < pending->len; at += SPOOL_INDEX_RECORD_SIZE)
+	{
+		SpoolIndexRecord record = { 0 };
+
+		written = spool_index_decode(pending->data + at, SPOOL_INDEX_RECORD_SIZE,
+									 &record);
+		record.relationLogEnd = writer->relationLog.synced;
+		spool_index_encode(&record, pending->data + at);
+	}
+
+	written = written &&
+			  put_bytes(spool_file(path, writer->dirname, writer->header.firstSeq,
+								   ".idx"),
+						-1, pending->data, pending->len);
 
 	resetPQExpBuffer(pending);
 
@@ -3588,8 +3604,8 @@ test_reader(const char *dir)
 					 SPOOL_INDEX_RECORD_SIZE + 10);
 	kill_writer(&writer);
 	sformat(line, sizeof(line),
-			"Spool file \"%s\" holds no valid index record at offset 64",
-			idx);
+			"Spool file \"%s\" holds no valid index record at offset %d",
+			idx, SPOOL_INDEX_RECORD_SIZE);
 
 	long mark = log_mark();
 
@@ -3819,8 +3835,8 @@ test_reader_failures(const char *dir)
 		   truncate(spool_file(path, writer.dirname, 5, ".idx"),
 					SPOOL_INDEX_RECORD_SIZE) == 0;
 	sformat(line, sizeof(line),
-			"Spool file \"%s\" has 64 bytes, and 128 were read before",
-			path);
+			"Spool file \"%s\" has %d bytes, and %d were read before",
+			path, SPOOL_INDEX_RECORD_SIZE, 2 * SPOOL_INDEX_RECORD_SIZE);
 	mark = log_mark();
 	check(made && !spool_reader_next(&reader, &found) &&
 		  one_line(logged_since(mark), " ERROR ", line),

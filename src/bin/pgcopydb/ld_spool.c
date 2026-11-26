@@ -503,7 +503,7 @@ spool_sync(SpoolSegment *segment)
 
 
 /*
- * spool_index_encode writes the 64 bytes of a transaction index record to buf.
+ * spool_index_encode writes the 72 bytes of a transaction index record to buf.
  */
 void
 spool_index_encode(const SpoolIndexRecord *record, char *buf)
@@ -516,7 +516,8 @@ spool_index_encode(const SpoolIndexRecord *record, char *buf)
 	spool_put_u64(buf + 36, record->finalLSN);
 	spool_put_u64(buf + 44, record->endLSN);
 	spool_put_u64(buf + 52, record->commitTime);
-	spool_put_u32(buf + 60, spool_crc32c(buf, 60));
+	spool_put_u64(buf + 60, record->relationLogEnd);
+	spool_put_u32(buf + 68, spool_crc32c(buf, 68));
 }
 
 
@@ -543,8 +544,9 @@ spool_index_decode(const char *buf, uint64_t size, SpoolIndexRecord *record)
 	read.finalLSN = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
 	read.endLSN = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
 	read.commitTime = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.relationLogEnd = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
 
-	if (pgout_u32(buf, &pos, SPOOL_INDEX_RECORD_SIZE) != spool_crc32c(buf, 60))
+	if (pgout_u32(buf, &pos, SPOOL_INDEX_RECORD_SIZE) != spool_crc32c(buf, 68))
 	{
 		return false;
 	}

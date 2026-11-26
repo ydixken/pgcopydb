@@ -16,7 +16,7 @@
 #include "pqexpbuffer.h"
 
 #define SPOOL_MAGIC 0x50474353  /* "PGCS" */
-#define SPOOL_FORMAT_VERSION 1
+#define SPOOL_FORMAT_VERSION 2
 
 /*
  * A segment starts with a header of 64 bytes: magic (offset 0), version (4),
@@ -82,11 +82,11 @@ typedef struct SpoolSegment
 } SpoolSegment;
 
 /*
- * A transaction index record has 64 bytes: seq (offset 0), xid (8), changes
+ * A transaction index record has 72 bytes: seq (offset 0), xid (8), changes
  * (12), beginOffset (20), endOffset (28), finalLSN (36), endLSN (44),
- * commitTime (52), and the CRC-32C of bytes 0 to 59 (60).
+ * commitTime (52), relationLogEnd (60), and the CRC-32C of bytes 0 to 67 (68).
  */
-#define SPOOL_INDEX_RECORD_SIZE 64
+#define SPOOL_INDEX_RECORD_SIZE 72
 
 typedef struct SpoolIndexRecord
 {
@@ -98,6 +98,7 @@ typedef struct SpoolIndexRecord
 	uint64_t finalLSN;          /* from BEGIN, read only by the rule for resends */
 	uint64_t endLSN;            /* from COMMIT: c(T) */
 	uint64_t commitTime;        /* from COMMIT, a TimestampTz */
+	uint64_t relationLogEnd;    /* length of the relation log that the flush synced */
 } SpoolIndexRecord;
 
 /*
