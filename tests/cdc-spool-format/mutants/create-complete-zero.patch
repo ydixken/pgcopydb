@@ -11,4 +11,4 @@ Apply from the repository root with git apply, and never commit it applied.
 +		.completeSize = 0
  	};
  
- 	if (sformat(writer->dirname, sizeof(writer->dirname), "%s",
+ 	if (!spool_segment_create(&writer->segment, dirname, header))

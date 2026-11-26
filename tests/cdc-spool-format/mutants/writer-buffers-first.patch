@@ -3,9 +3,9 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -575,15 +575,14 @@ spool_writer_create(SpoolWriter *writer, const char *d
- 		return false;
- 	}
+@@ -568,6 +568,9 @@ spool_writer_create(SpoolWriter *writer, const char *d
+ 		.completeSize = SPOOL_HEADER_SIZE
+ 	};
  
 +	initPQExpBuffer(&writer->held);
 +	initPQExpBuffer(&writer->pendingIndex);
@@ -13,7 +13,9 @@ Apply from the repository root with git apply, and never commit it applied.
  	if (!spool_segment_create(&writer->segment, dirname, header))
  	{
  		return false;
- 	}
+@@ -576,10 +579,6 @@ spool_writer_create(SpoolWriter *writer, const char *d
+ 	/* it fits, as the name of the segment file starts with it */
+ 	sformat(writer->dirname, sizeof(writer->dirname), "%s", dirname);
  
 -	/* after the create, so that a failed one leaves no buffer to free */
 -	initPQExpBuffer(&writer->held);

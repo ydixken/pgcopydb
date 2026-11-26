@@ -568,17 +568,13 @@ spool_writer_create(SpoolWriter *writer, const char *dirname,
 		.completeSize = SPOOL_HEADER_SIZE
 	};
 
-	if (sformat(writer->dirname, sizeof(writer->dirname), "%s",
-				dirname) >= (int) sizeof(writer->dirname))
-	{
-		log_error("Spool directory name \"%s\" is too long", dirname);
-		return false;
-	}
-
 	if (!spool_segment_create(&writer->segment, dirname, header))
 	{
 		return false;
 	}
+
+	/* it fits, as the name of the segment file starts with it */
+	sformat(writer->dirname, sizeof(writer->dirname), "%s", dirname);
 
 	/* after the create, so that a failed one leaves no buffer to free */
 	initPQExpBuffer(&writer->held);
