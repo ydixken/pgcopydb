@@ -1387,6 +1387,12 @@ test_rotation(const char *dir)
 		  spool_writer_rotate_due(&other),
 		  "rotation is not due while the segment is below the limit");
 
+	/* the first transaction ends at the limit exactly */
+	check(new_writer(&other, dir, &header, limit - 1) &&
+		  feed(&other, msgs, lengthof(msgs)) &&
+		  spool_writer_rotate_due(&other),
+		  "rotation is due when a COMMIT ends at the limit exactly");
+
 	check(new_writer(&other, dir, &header, 0) &&
 		  feed(&other, msgs, lengthof(msgs)) &&
 		  !spool_writer_rotate_due(&other),

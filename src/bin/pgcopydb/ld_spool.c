@@ -898,8 +898,9 @@ spool_writer_rewind(SpoolWriter *writer)
 
 
 /*
- * spool_writer_rotate_due is true after a COMMIT that took the segment past
- * the limit. A segment is named by its first transaction, so it must hold one.
+ * spool_writer_rotate_due is true after a COMMIT that took the segment to the
+ * limit or past it, as the limit rotates output.db in sqlite mode. A segment
+ * is named by its first transaction, so it must hold one.
  */
 bool
 spool_writer_rotate_due(const SpoolWriter *writer)

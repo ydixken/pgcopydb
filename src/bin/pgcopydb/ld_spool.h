@@ -115,7 +115,7 @@ typedef enum
 typedef struct SpoolWriter
 {
 	char dirname[MAXPGPATH];
-	uint64_t maxSegmentSize;    /* rotate after a COMMIT past it, 0 never */
+	uint64_t maxSegmentSize;    /* rotate after a COMMIT at or past it, 0 never */
 	SpoolHeader header;         /* of the open segment */
 	SpoolSegment segment;
 
