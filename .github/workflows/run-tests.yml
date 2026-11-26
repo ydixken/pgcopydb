@@ -137,6 +137,7 @@ jobs:
           - cdc-pgoutput
           - cdc-pgoutput-resume
           - cdc-keepalive
+          - cdc-filtering-pgoutput
           - cdc-partitioned-target
           - cdc-matview
           - cdc-replica-identity-index
@@ -193,6 +194,8 @@ jobs:
           - TEST: cdc-pgoutput-resume
             PGVERSION: 16
           - TEST: cdc-keepalive
+            PGVERSION: 16
+          - TEST: cdc-filtering-pgoutput
             PGVERSION: 16
           - TEST: cdc-partitioned-target
             PGVERSION: 16
