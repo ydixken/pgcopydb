@@ -393,6 +393,8 @@ spool_segment_create(SpoolSegment *segment, const char *dirname,
 				"%s/%016" PRIX64 ".seg",
 				dirname, header->firstSeq) >= (int) sizeof(segment->filename))
 	{
+		log_error("Spool file name \"%s/%016" PRIX64 ".seg\" is too long",
+				  dirname, header->firstSeq);
 		return false;
 	}
 
@@ -566,9 +568,6 @@ spool_writer_create(SpoolWriter *writer, const char *dirname,
 		.completeSize = SPOOL_HEADER_SIZE
 	};
 
-	initPQExpBuffer(&writer->held);
-	initPQExpBuffer(&writer->pendingIndex);
-
 	if (sformat(writer->dirname, sizeof(writer->dirname), "%s",
 				dirname) >= (int) sizeof(writer->dirname))
 	{
@@ -576,7 +575,16 @@ spool_writer_create(SpoolWriter *writer, const char *dirname,
 		return false;
 	}
 
-	return spool_segment_create(&writer->segment, dirname, header);
+	if (!spool_segment_create(&writer->segment, dirname, header))
+	{
+		return false;
+	}
+
+	/* after the create, so that a failed one leaves no buffer to free */
+	initPQExpBuffer(&writer->held);
+	initPQExpBuffer(&writer->pendingIndex);
+
+	return true;
 }
 
 

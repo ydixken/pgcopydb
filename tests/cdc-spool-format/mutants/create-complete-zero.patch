@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -558,7 +558,7 @@ spool_writer_create(SpoolWriter *writer, const char *d
+@@ -565,7 +565,7 @@ spool_writer_create(SpoolWriter *writer, const char *d
  		.nextSeq = header->firstSeq,
  		.lastFinalLSN = header->lastFinalLSN,
  		.lastEndLSN = header->lastEndLSN,
@@ -11,4 +11,4 @@ Apply from the repository root with git apply, and never commit it applied.
 +		.completeSize = 0
  	};
  
- 	initPQExpBuffer(&writer->held);
+ 	if (sformat(writer->dirname, sizeof(writer->dirname), "%s",

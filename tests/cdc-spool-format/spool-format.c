@@ -434,6 +434,23 @@ test_writer(const char *dir)
 
 	(void) close(unopened.fd);
 
+	/* the directory name fits, the name of the segment file does not */
+	char longDir[MAXPGPATH];
+	char longLine[2 * MAXPGPATH];
+	SpoolWriter longName = { 0 };
+
+	memset(longDir, 'd', sizeof(longDir));
+	longDir[0] = '/';
+	longDir[MAXPGPATH - 10] = '\0';
+	sformat(longLine, sizeof(longLine),
+			"Spool file name \"%s/000000000000002A.seg\" is too long", longDir);
+	mark = log_mark();
+
+	check(!spool_writer_create(&longName, longDir, &header, 0) &&
+		  one_line(logged_since(mark), " ERROR ", longLine) &&
+		  longName.held.data == NULL && longName.pendingIndex.data == NULL,
+		  "a writer whose segment file name does not fit fails with an ERROR line and holds no buffer");
+
 	char want[256];
 	uint64_t wantSize = frame(want, xlogdata, sizeof(xlogdata));
 
