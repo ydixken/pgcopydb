@@ -18,7 +18,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-receive-status-interval cdc-apply-wakeup catalog-stmt-cache \
 	 cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers \
 	 cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume \
-	 cdc-wal-workers-idle wal-workers-assign \
+	 cdc-wal-workers-idle wal-workers-assign cdc-spool-format \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering follow-resume-snapshot \
 	 orphaned-target-backend split-table-resume \
@@ -165,6 +165,10 @@ catalog-stmt-cache:
 wal-workers-assign:
 	$(MAKE) -C $@
 
+# builds its own image from the build stage of the top-level Dockerfile
+cdc-spool-format:
+	$(MAKE) -C $@
+
 follow-pgoutput: build
 	$(MAKE) -C $@
 
@@ -242,7 +246,7 @@ clean-images:
 .PHONY: cdc-receive-reconnect-dying-source cdc-receive-status-interval cdc-apply-wakeup
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
-.PHONY: cdc-wal-workers-idle wal-workers-assign
+.PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases

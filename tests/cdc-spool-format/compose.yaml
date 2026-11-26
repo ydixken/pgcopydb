@@ -1,0 +1,16 @@
+services:
+  test:
+    image: cdc-spool-format
+    build:
+      # the build stage keeps the objects that spool-format.c links against,
+      # and it has strace
+      context: ../..
+      target: build
+      args:
+        PGVERSION: ${PGVERSION:-16}
+    cap_add:
+      - SYS_PTRACE
+    tmpfs:
+      # one page, so that the disk-full check runs out of space
+      - /spool-full:size=4k
+    command: /usr/src/pgcopydb/tests/cdc-spool-format/run.sh

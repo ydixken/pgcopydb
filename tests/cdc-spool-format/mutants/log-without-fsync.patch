@@ -1,0 +1,14 @@
+Mutant: the sync helper logs its debug line and does not call fsync. Must fail: the strace check of run.sh.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -216,7 +216,7 @@
+ static bool
+ spool_fsync(int fd, const char *path, bool directory, uint64_t length)
+ {
+-	if (fsync(fd) != 0)
++	if (false)
+ 	{
+ 		log_error("Failed to sync spool %s \"%s\": %m",
+ 				  directory ? "directory" : "file", path);

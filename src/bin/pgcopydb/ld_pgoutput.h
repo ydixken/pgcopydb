@@ -107,5 +107,8 @@ bool parsePgoutputMessage(struct StreamContext *context,
 						  int64_t outputId);
 void free_pgoutput_message(PgoutputMessage *msg);
 
+uint32_t pgout_u32(const char *buf, int *pos, int bufLen);
+uint64_t pgout_u64(const char *buf, int *pos, int bufLen);
+
 
 #endif  /* LD_PGOUTPUT_H */

@@ -83,7 +83,7 @@ pgout_i16(const char *buf, int *pos, int bufLen)
 }
 
 
-static uint32_t
+uint32_t
 pgout_u32(const char *buf, int *pos, int bufLen)
 {
 	if (*pos + 4 > bufLen)
@@ -108,7 +108,7 @@ pgout_i32(const char *buf, int *pos, int bufLen)
 }
 
 
-static uint64_t
+uint64_t
 pgout_u64(const char *buf, int *pos, int bufLen)
 {
 	if (*pos + 8 > bufLen)

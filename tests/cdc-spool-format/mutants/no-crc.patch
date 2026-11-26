@@ -1,0 +1,17 @@
+Mutant: the reader accepts a frame without checking its CRC. Must fail: a frame with any one bit flipped is not valid.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -195,8 +195,9 @@
+ 	pos = 0;
+ 	uint32_t crc = pgout_u32(buf + 4 + messageLength, &pos, 4);
+ 
+-	if (crc != spool_frame_crc(buf, buf + 4, messageLength) ||
+-		!spool_message_valid(buf + 4, messageLength))
++	(void) crc;
++
++	if (!spool_message_valid(buf + 4, messageLength))
+ 	{
+ 		return SPOOL_FRAME_BAD;
+ 	}
