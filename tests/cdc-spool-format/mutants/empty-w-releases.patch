@@ -1,0 +1,14 @@
+Mutant: the empty XLogData message of PostgreSQL 13 opens the body like a RELATION. Must fail: BEGIN, an empty XLogData message and COMMIT leave no byte and no record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -761,7 +761,7 @@ spool_writer_message(SpoolWriter *writer, const char *
+ 
+ 	/* PostgreSQL 13 sends an empty message for an origin it cannot name */
+ 	char type = length > SPOOL_XLOGDATA_HEADER_SIZE ?
+-				message[SPOOL_XLOGDATA_HEADER_SIZE] : 'O';
++				message[SPOOL_XLOGDATA_HEADER_SIZE] : 'R';
+ 
+ 	switch (type)
+ 	{

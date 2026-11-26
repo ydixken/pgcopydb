@@ -878,6 +878,13 @@ test_begin_without_lsn(const char *dir)
 		commit_msg(0x4230, 0x4200, 0x4230, 6)
 	};
 
+	/* the empty message stands for an ORIGIN, so it does not open the body */
+	Msg empty[] = {
+		begin_msg(0, 0x4300, 914),
+		xlog(0x4310, NULL, 0),
+		commit_msg(0x4330, 0x4300, 0x4330, 14)
+	};
+
 	bool fed = new_writer(&writer, dir, &header, 0) &&
 			   feed(&writer, msgs, lengthof(msgs));
 
@@ -889,6 +896,12 @@ test_begin_without_lsn(const char *dir)
 		  second.beginOffset == first.endOffset &&
 		  segment_holds(&writer, msgs, lengthof(msgs)),
 		  "a BEGIN with header LSN 0/0 and an empty XLogData message are accepted");
+
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, empty, lengthof(empty));
+
+	check(fed && records(&writer) == 0 && segment_holds(&writer, NULL, 0),
+		  "BEGIN, an empty XLogData message and COMMIT leave no byte and no record");
 }
 
 
@@ -938,6 +951,18 @@ test_cut_off(const char *dir)
 		  record_at(&writer, 1, &second) && second.changes == 2 &&
 		  segment_holds(&writer, msgs, lengthof(msgs)),
 		  "a transaction cut off before COMMIT, then sent in full, gives one record, and the segment holds no byte of the first attempt");
+
+	/* one rewind only, as a second one cuts a stale held frame off again */
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, msgs, 3) &&
+		  feed(&writer, held, lengthof(held)) &&
+		  spool_writer_rewind(&writer) &&
+		  feed(&writer, msgs + 3, 4);
+
+	check(fed && records(&writer) == 2 &&
+		  record_at(&writer, 1, &second) && second.changes == 2 &&
+		  segment_holds(&writer, msgs, lengthof(msgs)),
+		  "a transaction cut off while its BEGIN and ORIGIN wait in memory, then sent in full, leaves no byte of the first attempt");
 }
 
 
@@ -1035,6 +1060,7 @@ test_rotation(const char *dir)
 	};
 	SpoolWriter writer = { 0 };
 	SpoolWriter restarted = { 0 };
+	SpoolWriter other = { 0 };
 	SpoolHeader read = { 0 };
 	SpoolIndexRecord record = { 0 };
 	char path[MAXPGPATH];
@@ -1063,10 +1089,44 @@ test_rotation(const char *dir)
 	check(fed && !dueAtStart && !dueInside && spool_writer_rotate_due(&writer),
 		  "rotation is due only after a COMMIT that takes the segment past the limit");
 
-	sformat(path, sizeof(path), "%s/0000000000000015.seg", writer.dirname);
+	/* one byte above the end of the first transaction */
+	uint64_t limit = SPOOL_HEADER_SIZE + frames_size(msgs, lengthof(msgs)) + 1;
+	bool below = new_writer(&other, dir, &header, limit) &&
+				 feed(&other, msgs, lengthof(msgs)) &&
+				 !spool_writer_rotate_due(&other);
 
-	check(fed && !spool_writer_rotate(&writer) && access(path, F_OK) != 0,
-		  "rotation waits until the flush has synced the frames and written the index records");
+	check(below && feed(&other, next, lengthof(next)) &&
+		  spool_writer_rotate_due(&other),
+		  "rotation is not due while the segment is below the limit");
+
+	/* the frames are synced and their record waits in memory */
+	bool refused = new_writer(&other, dir, &header, 50) &&
+				   feed(&other, msgs, lengthof(msgs)) &&
+				   spool_sync(&other.segment) && records(&other) == 1 &&
+				   spool_writer_rotate_due(&other) && !spool_writer_rotate(&other);
+
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
+
+	check(refused && access(path, F_OK) != 0,
+		  "rotation waits until the flush has written the index records");
+
+	/* the record is taken and the frames wait in the write block */
+	refused = new_writer(&other, dir, &header, 50) &&
+			  feed(&other, msgs, lengthof(msgs));
+
+	if (refused)
+	{
+		resetPQExpBuffer(&other.pendingIndex);
+	}
+
+	refused = refused && other.segment.blockLength > 0 &&
+			  spool_writer_rotate_due(&other) && !spool_writer_rotate(&other);
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
+
+	check(refused && access(path, F_OK) != 0,
+		  "rotation waits until the flush has synced the frames");
+
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", writer.dirname);
 
 	/* the flush of receive: sync the frames, then write the records */
 	bool rotated = fed && spool_sync(&writer.segment);
