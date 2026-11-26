@@ -1,0 +1,14 @@
+Mutant: a reader opened on a spool without index files opens one. Must fail: a reader opened before the first index file exists reads it once it is there.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2357,7 +2357,7 @@
+ 
+ 	/* below the header of every segment, as after cleanup: the first one */
+ 	return opened &&
+-		   (count == 0 || spool_reader_switch(reader, start > 0 ? start : first));
++		   spool_reader_switch(reader, start > 0 ? start : first);
+ }
+ 
+ 

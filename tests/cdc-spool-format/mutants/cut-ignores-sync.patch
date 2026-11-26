@@ -1,0 +1,16 @@
+Mutant: a cut whose fsync fails goes on. Must fail: a cut that cannot sync its file fails the start with an ERROR line that names it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1678,7 +1678,9 @@
+ 		return false;
+ 	}
+ 
+-	return spool_fsync(fd, path, false, length);
++	(void) spool_fsync(fd, path, false, length);
++
++	return true;
+ }
+ 
+ 

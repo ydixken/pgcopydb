@@ -1,0 +1,18 @@
+Mutant: an index file whose size cannot be read is read as empty. Must fail: a reader that cannot read the size of an index file fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2230,11 +2230,7 @@
+ 	reader->chunkNext = 0;
+ 
+ 	/* the size first: receive appends, so every byte below it is written */
+-	if (fstat(reader->indexFd, &st) != 0)
+-	{
+-		log_error("Failed to read spool file \"%s\": %m", reader->indexFilename);
+-		return false;
+-	}
++	(void) fstat(reader->indexFd, &st);
+ 
+ 	uint64_t size = (uint64_t) st.st_size;
+ 

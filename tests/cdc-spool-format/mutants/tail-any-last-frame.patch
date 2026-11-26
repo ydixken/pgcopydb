@@ -1,0 +1,20 @@
+Mutant: the last indexed transaction may end with any frame. Must fail: a last indexed transaction that does not end with a COMMIT ends the start with an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1982,14 +1982,6 @@
+ 
+ 	termPQExpBuffer(&frames.buffer);
+ 
+-	if (cut && type != 'C')
+-	{
+-		log_error("Spool file \"%s\" holds no COMMIT at the end of its last "
+-				  "indexed transaction, at offset %" PRIu64,
+-				  segment->filename, tail->last.endOffset);
+-		return false;
+-	}
+-
+ 	return cut &&
+ 		   (!removed || spool_sync_directory(dirname)) &&
+ 		   spool_cut_file(segment->fd, segment->filename, tail->last.endOffset) &&

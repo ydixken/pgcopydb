@@ -1,0 +1,14 @@
+Mutant: a readdir that fails ends the scan as if the directory were listed. Must fail: a spool directory that cannot be listed fails the start with an ERROR line; a reader that cannot list its directory fails.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1569,7 +1569,7 @@
+ 		}
+ 	}
+ 
+-	bool listed = errno == 0;
++	bool listed = true;
+ 
+ 	if (!listed)
+ 	{

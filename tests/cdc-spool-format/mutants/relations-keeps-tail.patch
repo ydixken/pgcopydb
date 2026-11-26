@@ -1,0 +1,20 @@
+Mutant: the start keeps the torn tail of the relation log. Must fail: the start cuts the relation log after its last valid record, and syncs it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1838,12 +1838,8 @@
+ 
+ 	bool cut = read_file(path, &bytes, &size);
+ 
+-	while (cut && end < (uint64_t) size &&
+-		   spool_relation_decode(bytes + end, (uint64_t) size - end,
+-								 &record) == SPOOL_FRAME_OK)
+-	{
+-		end += SPOOL_RELATION_RECORD_SIZE(record.length);
+-	}
++	(void) record;
++	end = (uint64_t) size;
+ 
+ 	cut = cut && spool_cut_file(fd, path, end);
+ 

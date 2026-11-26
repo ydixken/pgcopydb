@@ -1,0 +1,19 @@
+Mutant: a cut whose ftruncate fails goes on. Must fail: a cut that cannot truncate its file fails the start with an ERROR line that names it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1671,12 +1671,7 @@
+ static bool
+ spool_cut_file(int fd, const char *path, uint64_t length)
+ {
+-	if (ftruncate(fd, (off_t) length) != 0)
+-	{
+-		log_error("Failed to truncate spool file \"%s\" to %" PRIu64 " bytes: %m",
+-				  path, length);
+-		return false;
+-	}
++	(void) ftruncate(fd, (off_t) length);
+ 
+ 	return spool_fsync(fd, path, false, length);
+ }

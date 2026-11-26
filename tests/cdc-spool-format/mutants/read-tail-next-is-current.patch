@@ -1,0 +1,16 @@
+Mutant: the next segment of an invalid tail is named before the records of the same read. Must fail: an invalid index record at the tail of a closed index file fails the reader.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2260,9 +2260,7 @@
+ 		if (!spool_index_decode(bytes + at, done - at, record))
+ 		{
+ 			uint64_t offset = reader->indexOffset + at;
+-			uint64_t next = reader->chunkCount > 0 ?
+-							reader->chunk[reader->chunkCount - 1].seq + 1 :
+-							reader->nextSeq;
++			uint64_t next = reader->nextSeq;
+ 
+ 			if (offset + SPOOL_INDEX_RECORD_SIZE < size ||
+ 				spool_reader_closed(reader, next))

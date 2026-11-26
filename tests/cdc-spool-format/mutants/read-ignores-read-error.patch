@@ -1,0 +1,21 @@
+Mutant: a read of index records that fails reads as nothing new. Must fail: a reader that cannot read the segment or its index fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2246,12 +2246,9 @@
+ 		return false;
+ 	}
+ 
+-	if (!spool_pread(reader->indexFd, reader->indexFilename, bytes,
+-					 Min(sizeof(bytes), size - reader->indexOffset),
+-					 reader->indexOffset, &done))
+-	{
+-		return false;
+-	}
++	(void) spool_pread(reader->indexFd, reader->indexFilename, bytes,
++					   Min(sizeof(bytes), size - reader->indexOffset),
++					   reader->indexOffset, &done);
+ 
+ 	for (uint64_t at = 0; at < done; at += SPOOL_INDEX_RECORD_SIZE)
+ 	{

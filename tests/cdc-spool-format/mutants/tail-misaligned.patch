@@ -1,0 +1,15 @@
+Mutant: the backward scan of the index starts at the end of a partial record. Must fail: the start cuts the invalid index records at the tail, and syncs the index file.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1915,8 +1915,7 @@
+ 		return false;
+ 	}
+ 
+-	for (uint64_t end = (uint64_t) st.st_size - (uint64_t) st.st_size %
+-						SPOOL_INDEX_RECORD_SIZE;
++	for (uint64_t end = (uint64_t) st.st_size;
+ 		 end >= SPOOL_INDEX_RECORD_SIZE; end -= SPOOL_INDEX_RECORD_SIZE)
+ 	{
+ 		char record[SPOOL_INDEX_RECORD_SIZE];

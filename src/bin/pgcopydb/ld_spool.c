@@ -4,10 +4,12 @@
  *	 the index of the transactions they hold, and the relation log.
  */
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "postgres_fe.h"
@@ -1051,6 +1053,33 @@ spool_writer_log_relation(SpoolWriter *writer, const char *message,
 
 
 /*
+ * spool_writer_start opens the relation log and the buffers of a writer whose
+ * segment is open.
+ */
+static bool
+spool_writer_start(SpoolWriter *writer, const char *dirname)
+{
+	/* it fits, as the name of the segment file starts with it */
+	sformat(writer->dirname, sizeof(writer->dirname), "%s", dirname);
+
+	initPQExpBuffer(&writer->lasts);
+
+	if (!spool_writer_open_relations(writer))
+	{
+		spool_writer_free_relations(writer);
+		spool_fail(&writer->segment);
+		return false;
+	}
+
+	/* after the create, so that a failed one leaves no buffer to free */
+	initPQExpBuffer(&writer->held);
+	initPQExpBuffer(&writer->pendingIndex);
+
+	return true;
+}
+
+
+/*
  * spool_writer_create creates the segment of header->firstSeq. The header also
  * gives the last complete transaction, so the rule for transactions sent again
  * holds after cleanup deleted the segments before it.
@@ -1075,23 +1104,7 @@ spool_writer_create(SpoolWriter *writer, const char *dirname,
 		return false;
 	}
 
-	/* it fits, as the name of the segment file starts with it */
-	sformat(writer->dirname, sizeof(writer->dirname), "%s", dirname);
-
-	initPQExpBuffer(&writer->lasts);
-
-	if (!spool_writer_open_relations(writer))
-	{
-		spool_writer_free_relations(writer);
-		spool_fail(&writer->segment);
-		return false;
-	}
-
-	/* after the create, so that a failed one leaves no buffer to free */
-	initPQExpBuffer(&writer->held);
-	initPQExpBuffer(&writer->pendingIndex);
-
-	return true;
+	return spool_writer_start(writer, dirname);
 }
 
 
@@ -1471,4 +1484,982 @@ spool_writer_rotate(SpoolWriter *writer)
 	writer->completeSize = SPOOL_HEADER_SIZE;
 
 	return true;
+}
+
+
+/*
+ * spool_dirname_fits logs an error when the names of the spool files in
+ * dirname do not fit, so that the code after it builds them unchecked.
+ */
+static bool
+spool_dirname_fits(const char *dirname)
+{
+	if (strlen(dirname) + strlen("/0000000000000000.seg") >= MAXPGPATH)
+	{
+		log_error("Spool directory name \"%s\" is too long", dirname);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * spool_name_seq returns the suffix of a segment or index file name, and its
+ * sequence number, or NULL for a name that the writer does not make.
+ */
+static const char *
+spool_name_seq(const char *name, uint64_t *seq)
+{
+	uint64_t value = 0;
+
+	for (int i = 0; i < 16; i++)
+	{
+		char c = name[i];
+		int digit = c >= '0' && c <= '9' ? c - '0' :
+					c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+
+		if (digit < 0)
+		{
+			return NULL;
+		}
+
+		value = value << 4 | (uint64_t) digit;
+	}
+
+	/* sequence numbers start at SPOOL_FIRST_SEQ */
+	if (value == 0 ||
+		(strcmp(name + 16, ".seg") != 0 && strcmp(name + 16, ".idx") != 0))
+	{
+		return NULL;
+	}
+
+	*seq = value;
+
+	return name + 16;
+}
+
+
+/*
+ * spool_scan lists the sequence numbers of the segment files and of the index
+ * files in dirname, in directory order.
+ */
+static bool
+spool_scan(const char *dirname, PQExpBuffer segments, PQExpBuffer indexes)
+{
+	DIR *dir = opendir(dirname);
+
+	if (dir == NULL)
+	{
+		log_error("Failed to open spool directory \"%s\": %m", dirname);
+		return false;
+	}
+
+	struct dirent *entry = NULL;
+
+	for (errno = 0; (entry = readdir(dir)) != NULL; errno = 0)
+	{
+		uint64_t seq = 0;
+		const char *suffix = spool_name_seq(entry->d_name, &seq);
+
+		if (suffix != NULL)
+		{
+			appendBinaryPQExpBuffer(strcmp(suffix, ".seg") == 0 ? segments : indexes,
+									(char *) &seq, sizeof(seq));
+		}
+	}
+
+	bool listed = errno == 0;
+
+	if (!listed)
+	{
+		log_error("Failed to read spool directory \"%s\": %m", dirname);
+	}
+
+	(void) closedir(dir);
+
+	if (listed && (PQExpBufferBroken(segments) || PQExpBufferBroken(indexes)))
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	return listed;
+}
+
+
+static uint64_t *
+spool_seqs(PQExpBuffer list, int *count)
+{
+	*count = (int) (list->len / sizeof(uint64_t));
+
+	return (uint64_t *) list->data;
+}
+
+
+static bool
+spool_listed(PQExpBuffer list, uint64_t seq)
+{
+	int count = 0;
+	uint64_t *seqs = spool_seqs(list, &count);
+
+	for (int i = 0; i < count; i++)
+	{
+		if (seqs[i] == seq)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+/* the highest sequence number of the list below bound, 0 for none */
+static uint64_t
+spool_highest_below(PQExpBuffer list, uint64_t bound)
+{
+	int count = 0;
+	uint64_t *seqs = spool_seqs(list, &count);
+	uint64_t highest = 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		if (seqs[i] < bound && seqs[i] > highest)
+		{
+			highest = seqs[i];
+		}
+	}
+
+	return highest;
+}
+
+
+/*
+ * spool_pread reads length bytes at offset, fewer only at the end of the
+ * file, and sets done to the number read.
+ */
+static bool
+spool_pread(int fd, const char *path, char *buf, uint64_t length,
+			uint64_t offset, uint64_t *done)
+{
+	*done = 0;
+
+	while (*done < length)
+	{
+		ssize_t n = pread(fd, buf + *done, length - *done, (off_t) (offset + *done));
+
+		if (n < 0)
+		{
+			log_error("Failed to read spool file \"%s\": %m", path);
+			return false;
+		}
+
+		if (n == 0)
+		{
+			break;
+		}
+
+		*done += (uint64_t) n;
+	}
+
+	return true;
+}
+
+
+/* spool_cut_file cuts the file at length and syncs it */
+static bool
+spool_cut_file(int fd, const char *path, uint64_t length)
+{
+	if (ftruncate(fd, (off_t) length) != 0)
+	{
+		log_error("Failed to truncate spool file \"%s\" to %" PRIu64 " bytes: %m",
+				  path, length);
+		return false;
+	}
+
+	return spool_fsync(fd, path, false, length);
+}
+
+
+static const char *
+spool_frames_at(const SpoolFrames *frames)
+{
+	return frames->buffer.data + (frames->offset - frames->bufferStart);
+}
+
+
+/*
+ * spool_frames_fill makes the buffer hold the need bytes at the next frame,
+ * and reads the rest of the transaction up to a write block with them, never
+ * a byte past its end.
+ */
+static bool
+spool_frames_fill(SpoolFrames *frames, uint64_t need)
+{
+	PQExpBuffer buffer = &frames->buffer;
+	uint64_t done = 0;
+
+	if (frames->offset + need <= frames->bufferStart + buffer->len)
+	{
+		return true;
+	}
+
+	uint64_t want = Max(need, Min(frames->end - frames->offset, SPOOL_BLOCK_SIZE));
+
+	resetPQExpBuffer(buffer);
+	frames->bufferStart = frames->offset;
+
+	if (!enlargePQExpBuffer(buffer, want))
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	if (!spool_pread(frames->fd, frames->filename, buffer->data, want,
+					 frames->offset, &done))
+	{
+		return false;
+	}
+
+	buffer->len = done;
+
+	if (done < want)
+	{
+		log_error("Spool file \"%s\" ends at %" PRIu64
+				  " bytes, inside the transaction that ends at %" PRIu64,
+				  frames->filename, frames->offset + done, frames->end);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * spool_frames_next returns the next frame of the transaction that is not a
+ * keepalive marker or an empty XLogData message, or done after the last one.
+ */
+static bool
+spool_frames_next(SpoolFrames *frames, const char **message, uint32_t *length,
+				  bool *done)
+{
+	*done = false;
+
+	while (frames->offset < frames->end)
+	{
+		uint64_t left = frames->end - frames->offset;
+		int pos = 0;
+
+		if (!spool_frames_fill(frames, Min(left, 4)))
+		{
+			return false;
+		}
+
+		/* a length that ends past the transaction is damage, and is not read */
+		uint64_t size = SPOOL_FRAME_SIZE(pgout_u32(spool_frames_at(frames), &pos,
+												   (int) Min(left, 4)));
+
+		if (size <= left && !spool_frames_fill(frames, size))
+		{
+			return false;
+		}
+
+		if (size > left ||
+			spool_frame_decode(spool_frames_at(frames), size,
+							   message, length) != SPOOL_FRAME_OK)
+		{
+			log_error("Spool file \"%s\" holds no valid frame at offset %" PRIu64,
+					  frames->filename, frames->offset);
+			return false;
+		}
+
+		frames->offset += size;
+
+		/* a keepalive marker has 17 bytes, and an empty XLogData message 25 */
+		if (*length > SPOOL_XLOGDATA_HEADER_SIZE)
+		{
+			return true;
+		}
+	}
+
+	*done = true;
+
+	return true;
+}
+
+
+/* spool_read_header reads a segment header, and headed is false when torn */
+static bool
+spool_read_header(int fd, const char *path, SpoolHeader *header, bool *headed)
+{
+	char buf[SPOOL_HEADER_SIZE];
+	uint64_t done = 0;
+
+	if (!spool_pread(fd, path, buf, sizeof(buf), 0, &done))
+	{
+		return false;
+	}
+
+	*headed = spool_header_decode(buf, done, header);
+
+	return true;
+}
+
+
+/*
+ * spool_cut_relations cuts the relation log after its last valid record, as
+ * receive may have appended a record and not synced it, and syncs the log.
+ */
+static bool
+spool_cut_relations(const char *dirname)
+{
+	char path[MAXPGPATH];
+	char *bytes = NULL;
+	long size = 0;
+	uint64_t end = 0;
+	SpoolRelationRecord record = { 0 };
+
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, dirname);
+
+	int fd = open(path, O_WRONLY);
+
+	if (fd < 0 && errno == ENOENT)
+	{
+		/* a new spool, whose writer creates the log */
+		return true;
+	}
+
+	if (fd < 0)
+	{
+		log_error("Failed to open spool file \"%s\": %m", path);
+		return false;
+	}
+
+	bool cut = read_file(path, &bytes, &size);
+
+	while (cut && end < (uint64_t) size &&
+		   spool_relation_decode(bytes + end, (uint64_t) size - end,
+								 &record) == SPOOL_FRAME_OK)
+	{
+		end += SPOOL_RELATION_RECORD_SIZE(record.length);
+	}
+
+	cut = cut && spool_cut_file(fd, path, end);
+
+	free(bytes);
+	(void) close(fd);
+
+	return cut;
+}
+
+
+/* the last segment of a spool at start, and its index file */
+typedef struct SpoolTail
+{
+	SpoolSegment segment;       /* open to read, cut and append */
+	char index[MAXPGPATH];
+	int indexFd;
+	SpoolHeader header;
+	bool headed;                /* false when the header is torn */
+	SpoolIndexRecord last;      /* the last valid index record */
+	uint64_t keep;              /* index length up to the end of last, or 0 */
+} SpoolTail;
+
+
+static void
+spool_tail_close(SpoolTail *tail)
+{
+	spool_fail(&tail->segment);
+	(void) close(tail->indexFd);
+	tail->indexFd = -1;
+}
+
+
+/*
+ * spool_tail_read opens segment seq, reads its header, and the last valid
+ * record of its index file, from the end: a torn write leaves invalid records
+ * only after the last record that receive synced.
+ */
+static bool
+spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed)
+{
+	struct stat st = { 0 };
+	uint64_t done = 0;
+
+	*tail = (SpoolTail) {
+		.segment = { .fd = -1 },
+		.indexFd = -1
+	};
+
+	sformat(tail->segment.filename, MAXPGPATH, "%s/%016" PRIX64 ".seg", dirname, seq);
+	sformat(tail->index, MAXPGPATH, "%s/%016" PRIX64 ".idx", dirname, seq);
+
+	if (!spool_file_open(&tail->segment, O_RDWR | O_APPEND) ||
+		!spool_read_header(tail->segment.fd, tail->segment.filename,
+						   &tail->header, &tail->headed))
+	{
+		return false;
+	}
+
+	if (!indexed)
+	{
+		return true;
+	}
+
+	tail->indexFd = open(tail->index, O_RDWR);
+
+	if (tail->indexFd < 0 || fstat(tail->indexFd, &st) != 0)
+	{
+		log_error("Failed to open spool file \"%s\": %m", tail->index);
+		return false;
+	}
+
+	for (uint64_t end = (uint64_t) st.st_size - (uint64_t) st.st_size %
+						SPOOL_INDEX_RECORD_SIZE;
+		 end >= SPOOL_INDEX_RECORD_SIZE; end -= SPOOL_INDEX_RECORD_SIZE)
+	{
+		char record[SPOOL_INDEX_RECORD_SIZE];
+
+		if (!spool_pread(tail->indexFd, tail->index, record, sizeof(record),
+						 end - sizeof(record), &done))
+		{
+			return false;
+		}
+
+		if (spool_index_decode(record, done, &tail->last))
+		{
+			tail->keep = end;
+			break;
+		}
+	}
+
+	return true;
+}
+
+
+/*
+ * spool_tail_cut checks that the last indexed transaction ends with its
+ * COMMIT, then cuts the segment after it and the index after its record, and
+ * syncs both: receive may have written that record and not synced it.
+ */
+static bool
+spool_tail_cut(SpoolTail *tail, const char *dirname, bool removed)
+{
+	SpoolSegment *segment = &tail->segment;
+	SpoolFrames frames = {
+		.fd = segment->fd,
+		.offset = tail->last.beginOffset,
+		.end = tail->last.endOffset,
+		.bufferStart = tail->last.beginOffset
+	};
+	bool cut = true;
+	bool done = false;
+	char type = 0;
+
+	if (!tail->headed)
+	{
+		log_error("Spool file \"%s\" has no valid header, and its index file "
+				  "holds transactions", segment->filename);
+		return false;
+	}
+
+	sformat(frames.filename, sizeof(frames.filename), "%s", segment->filename);
+	initPQExpBuffer(&frames.buffer);
+
+	while (cut && !done)
+	{
+		const char *message = NULL;
+		uint32_t length = 0;
+
+		cut = spool_frames_next(&frames, &message, &length, &done);
+
+		if (cut && !done)
+		{
+			type = message[SPOOL_XLOGDATA_HEADER_SIZE];
+		}
+	}
+
+	termPQExpBuffer(&frames.buffer);
+
+	if (cut && type != 'C')
+	{
+		log_error("Spool file \"%s\" holds no COMMIT at the end of its last "
+				  "indexed transaction, at offset %" PRIu64,
+				  segment->filename, tail->last.endOffset);
+		return false;
+	}
+
+	return cut &&
+		   (!removed || spool_sync_directory(dirname)) &&
+		   spool_cut_file(segment->fd, segment->filename, tail->last.endOffset) &&
+		   spool_cut_file(tail->indexFd, tail->index, tail->keep);
+}
+
+
+/*
+ * spool_tail_append hands the cut segment to the writer, which appends after
+ * its last indexed transaction.
+ */
+static bool
+spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
+				  uint64_t maxSegmentSize)
+{
+	*writer = (SpoolWriter) {
+		.maxSegmentSize = maxSegmentSize,
+		.header = tail->header,
+		.segment = tail->segment,
+		.relationLog = { .fd = -1 },
+		.nextSeq = tail->last.seq + 1,
+		.lastFinalLSN = tail->last.finalLSN,
+		.lastEndLSN = tail->last.endLSN,
+		.completeSize = tail->last.endOffset
+	};
+
+	/* the cut synced the segment at that length */
+	writer->segment.size = tail->last.endOffset;
+	writer->segment.synced = tail->last.endOffset;
+
+	/* the writer owns the descriptor and the write block now */
+	tail->segment.fd = -1;
+	tail->segment.block = NULL;
+	spool_tail_close(tail);
+
+	return spool_writer_start(writer, dirname);
+}
+
+
+/*
+ * spool_writer_resume continues the spool from its last segment. A last
+ * segment without an indexed transaction is removed, and its header, or the
+ * segment before it, gives where the spool continues.
+ */
+static bool
+spool_writer_resume(SpoolWriter *writer, const char *dirname,
+					PQExpBuffer segments, PQExpBuffer indexes,
+					const SpoolHeader *fresh, uint64_t maxSegmentSize)
+{
+	uint64_t seq = spool_highest_below(segments, UINT64_MAX);
+	bool removed = false;
+	int count = 0;
+	uint64_t *seqs = spool_seqs(indexes, &count);
+
+	/* cleanup unlinks the index file first, so every index has its segment */
+	for (int i = 0; i < count; i++)
+	{
+		if (!spool_listed(segments, seqs[i]))
+		{
+			log_error("Spool index file \"%s/%016" PRIX64
+					  ".idx\" has no segment file", dirname, seqs[i]);
+			return false;
+		}
+	}
+
+	/* and a segment without its index file, but the last one, is its leftover */
+	seqs = spool_seqs(segments, &count);
+
+	for (int i = 0; i < count; i++)
+	{
+		if (seqs[i] != seq && !spool_listed(indexes, seqs[i]))
+		{
+			char path[MAXPGPATH];
+
+			sformat(path, sizeof(path), "%s/%016" PRIX64 ".seg", dirname, seqs[i]);
+
+			if (!unlink_file(path))
+			{
+				return false;
+			}
+
+			removed = true;
+		}
+	}
+
+	for (int round = 0; seq > 0; round++)
+	{
+		SpoolTail tail = { 0 };
+
+		if (!spool_tail_read(&tail, dirname, seq, spool_listed(indexes, seq)))
+		{
+			spool_tail_close(&tail);
+			return false;
+		}
+
+		if (tail.keep > 0)
+		{
+			bool resumed = spool_tail_cut(&tail, dirname, removed) &&
+						   spool_tail_append(&tail, writer, dirname, maxSegmentSize);
+
+			spool_tail_close(&tail);
+
+			return resumed;
+		}
+
+		spool_tail_close(&tail);
+
+		/* a later segment exists only once the flush indexed this one */
+		if (round > 0)
+		{
+			log_error("Spool file \"%s\" holds no indexed transaction, but a "
+					  "segment after it was created", tail.segment.filename);
+			return false;
+		}
+
+		/* the index file first, as cleanup does */
+		if (!unlink_file(tail.index) || !unlink_file(tail.segment.filename))
+		{
+			return false;
+		}
+
+		removed = true;
+
+		/* the header gives the last transaction before it, also after cleanup */
+		if (tail.headed)
+		{
+			return spool_sync_directory(dirname) &&
+				   spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
+		}
+
+		seq = spool_highest_below(indexes, seq);
+	}
+
+	return (!removed || spool_sync_directory(dirname)) &&
+		   spool_writer_create(writer, dirname, fresh, maxSegmentSize);
+}
+
+
+/*
+ * spool_writer_open starts receive on the spool of dirname, which a kill or a
+ * power loss may have left with a torn tail. The spool then ends at its last
+ * indexed transaction, every cut is synced, and the writer appends after it,
+ * with that transaction in lastFinalLSN and lastEndLSN.
+ */
+bool
+spool_writer_open(SpoolWriter *writer, const char *dirname,
+				  uint64_t systemId, uint32_t timeline,
+				  uint64_t maxSegmentSize)
+{
+	PQExpBufferData segments;
+	PQExpBufferData indexes;
+
+	/* a new spool skips no transaction, so a commit at the consistent point stays */
+	SpoolHeader fresh = {
+		.firstSeq = SPOOL_FIRST_SEQ,
+		.systemId = systemId,
+		.timeline = timeline
+	};
+
+	*writer = (SpoolWriter) {
+		.segment = { .fd = -1 },
+		.relationLog = { .fd = -1 }
+	};
+
+	initPQExpBuffer(&segments);
+	initPQExpBuffer(&indexes);
+
+	bool opened = spool_dirname_fits(dirname) &&
+				  spool_cut_relations(dirname) &&
+				  spool_scan(dirname, &segments, &indexes) &&
+				  spool_writer_resume(writer, dirname, &segments, &indexes,
+									  &fresh, maxSegmentSize);
+
+	termPQExpBuffer(&segments);
+	termPQExpBuffer(&indexes);
+
+	return opened;
+}
+
+
+/* spool_reader_switch reads segment seq and its index file from their start */
+static bool
+spool_reader_switch(SpoolReader *reader, uint64_t seq)
+{
+	SpoolFrames *frames = &reader->frames;
+
+	(void) close(reader->indexFd);
+	(void) close(frames->fd);
+
+	sformat(reader->indexFilename, MAXPGPATH, "%s/%016" PRIX64 ".idx",
+			reader->dirname, seq);
+	sformat(frames->filename, MAXPGPATH, "%s/%016" PRIX64 ".seg",
+			reader->dirname, seq);
+
+	reader->indexFd = open(reader->indexFilename, O_RDONLY);
+	frames->fd = reader->indexFd < 0 ? -1 : open(frames->filename, O_RDONLY);
+
+	if (reader->indexFd < 0 || frames->fd < 0)
+	{
+		log_error("Failed to open spool file \"%s\": %m",
+				  reader->indexFd < 0 ? reader->indexFilename : frames->filename);
+		return false;
+	}
+
+	reader->segment = seq;
+	reader->nextSeq = seq;
+	reader->indexOffset = 0;
+
+	return true;
+}
+
+
+/* the next segment exists, which proves the index file read complete */
+static bool
+spool_reader_closed(SpoolReader *reader, uint64_t seq)
+{
+	char path[MAXPGPATH];
+
+	sformat(path, sizeof(path), "%s/%016" PRIX64 ".idx", reader->dirname, seq);
+
+	return seq != reader->segment && file_exists(path);
+}
+
+
+/*
+ * spool_reader_read reads the next index records of the segment. It stops at
+ * an invalid record at the tail of the file, which receive is still writing,
+ * and fails on any other.
+ */
+static bool
+spool_reader_read(SpoolReader *reader)
+{
+	char bytes[SPOOL_READER_CHUNK * SPOOL_INDEX_RECORD_SIZE];
+	struct stat st = { 0 };
+	uint64_t done = 0;
+
+	reader->chunkCount = 0;
+	reader->chunkNext = 0;
+
+	/* the size first: receive appends, so every byte below it is written */
+	if (fstat(reader->indexFd, &st) != 0)
+	{
+		log_error("Failed to read spool file \"%s\": %m", reader->indexFilename);
+		return false;
+	}
+
+	uint64_t size = (uint64_t) st.st_size;
+
+	if (size < reader->indexOffset)
+	{
+		log_error("Spool file \"%s\" has %" PRIu64 " bytes, and %" PRIu64
+				  " were read before", reader->indexFilename, size,
+				  reader->indexOffset);
+		return false;
+	}
+
+	if (!spool_pread(reader->indexFd, reader->indexFilename, bytes,
+					 Min(sizeof(bytes), size - reader->indexOffset),
+					 reader->indexOffset, &done))
+	{
+		return false;
+	}
+
+	for (uint64_t at = 0; at < done; at += SPOOL_INDEX_RECORD_SIZE)
+	{
+		SpoolIndexRecord *record = &reader->chunk[reader->chunkCount];
+
+		if (!spool_index_decode(bytes + at, done - at, record))
+		{
+			uint64_t offset = reader->indexOffset + at;
+			uint64_t next = reader->chunkCount > 0 ?
+							reader->chunk[reader->chunkCount - 1].seq + 1 :
+							reader->nextSeq;
+
+			if (offset + SPOOL_INDEX_RECORD_SIZE < size ||
+				spool_reader_closed(reader, next))
+			{
+				log_error("Spool file \"%s\" holds no valid index record at "
+						  "offset %" PRIu64, reader->indexFilename, offset);
+				return false;
+			}
+
+			break;
+		}
+
+		reader->chunkCount++;
+	}
+
+	reader->indexOffset += (uint64_t) reader->chunkCount * SPOOL_INDEX_RECORD_SIZE;
+
+	/* receive synced the definitions of these records before it wrote them */
+	return reader->chunkCount == 0 ||
+		   spool_relation_cursor_read(&reader->relations);
+}
+
+
+/*
+ * spool_reader_open opens a reader of the spool of dirname that returns the
+ * index records whose end LSN is above after, and never writes.
+ */
+bool
+spool_reader_open(SpoolReader *reader, const char *dirname, uint64_t after)
+{
+	PQExpBufferData segments;
+	PQExpBufferData indexes;
+	uint64_t start = 0;
+	uint64_t first = UINT64_MAX;
+	int count = 0;
+
+	*reader = (SpoolReader) {
+		.after = after,
+		.nextSeq = SPOOL_FIRST_SEQ,
+		.indexFd = -1,
+		.frames = { .fd = -1 }
+	};
+
+	initPQExpBuffer(&reader->frames.buffer);
+	initPQExpBuffer(&segments);
+	initPQExpBuffer(&indexes);
+
+	bool opened = spool_dirname_fits(dirname) &&
+				  spool_relation_cursor_open(&reader->relations, dirname) &&
+				  spool_scan(dirname, &segments, &indexes);
+	uint64_t *seqs = spool_seqs(&indexes, &count);
+
+	sformat(reader->dirname, sizeof(reader->dirname), "%s", dirname);
+
+	/* the last segment whose header is at or below after holds the next record */
+	for (int i = 0; opened && i < count; i++)
+	{
+		char path[MAXPGPATH];
+		SpoolHeader header = { 0 };
+		bool headed = false;
+
+		sformat(path, sizeof(path), "%s/%016" PRIX64 ".seg", dirname, seqs[i]);
+
+		int fd = open(path, O_RDONLY);
+
+		if (fd < 0)
+		{
+			log_error("Failed to open spool file \"%s\": %m", path);
+			opened = false;
+			break;
+		}
+
+		opened = spool_read_header(fd, path, &header, &headed);
+		(void) close(fd);
+
+		if (opened && !headed)
+		{
+			log_error("Spool file \"%s\" has no valid header", path);
+			opened = false;
+		}
+
+		if (opened && header.lastEndLSN <= after && seqs[i] > start)
+		{
+			start = seqs[i];
+		}
+
+		first = Min(first, seqs[i]);
+	}
+
+	termPQExpBuffer(&segments);
+	termPQExpBuffer(&indexes);
+
+	/* below the header of every segment, as after cleanup: the first one */
+	return opened &&
+		   (count == 0 || spool_reader_switch(reader, start > 0 ? start : first));
+}
+
+
+/*
+ * spool_reader_next returns the next index record above the end LSN of the
+ * open, and found false when receive has not written it yet.
+ */
+bool
+spool_reader_next(SpoolReader *reader, bool *found)
+{
+	*found = false;
+
+	for (;;)
+	{
+		while (reader->chunkNext < reader->chunkCount)
+		{
+			SpoolIndexRecord *record = &reader->chunk[reader->chunkNext++];
+
+			reader->nextSeq = record->seq + 1;
+
+			if (record->endLSN > reader->after)
+			{
+				reader->record = *record;
+				reader->changes = 0;
+				reader->frames.offset = record->beginOffset;
+				reader->frames.end = record->endOffset;
+
+				/* the buffer may hold the bytes of another segment */
+				resetPQExpBuffer(&reader->frames.buffer);
+				reader->frames.bufferStart = record->beginOffset;
+
+				*found = true;
+				return true;
+			}
+		}
+
+		if (reader->segment > 0 && !spool_reader_read(reader))
+		{
+			return false;
+		}
+
+		if (reader->chunkCount > 0)
+		{
+			continue;
+		}
+
+		/* the next segment has its index file once this one is complete */
+		if (!spool_reader_closed(reader, reader->nextSeq))
+		{
+			return true;
+		}
+
+		if (!spool_reader_switch(reader, reader->nextSeq))
+		{
+			return false;
+		}
+	}
+}
+
+
+/*
+ * spool_reader_frame returns the next frame of the record that
+ * spool_reader_next returned, after the relation cache of context took the
+ * definitions logged before it, and done after its COMMIT.
+ */
+bool
+spool_reader_frame(SpoolReader *reader, struct StreamContext *context,
+				   const char **message, uint32_t *length, bool *done)
+{
+	if (!spool_frames_next(&reader->frames, message, length, done))
+	{
+		return false;
+	}
+
+	if (*done)
+	{
+		return true;
+	}
+
+	char type = (*message)[SPOOL_XLOGDATA_HEADER_SIZE];
+
+	if (type == 'I' || type == 'U' || type == 'D' || type == 'T')
+	{
+		if (!spool_relation_cursor_advance(&reader->relations, reader->record.seq,
+										   reader->changes, context))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		reader->changes++;
+	}
+
+	return true;
+}
+
+
+void
+spool_reader_close(SpoolReader *reader)
+{
+	(void) close(reader->indexFd);
+	(void) close(reader->frames.fd);
+	termPQExpBuffer(&reader->frames.buffer);
+	spool_relation_cursor_close(&reader->relations);
 }

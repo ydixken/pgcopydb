@@ -1,0 +1,14 @@
+Mutant: the rule for transactions sent again starts from the header of the last segment. Must fail: a writer opened on a spool continues after its last indexed transaction, with the final_lsn and end LSN of its record; a writer opened on a spool skips its last transaction sent again and appends the next one after it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2011,7 +2011,7 @@
+ 		.segment = tail->segment,
+ 		.relationLog = { .fd = -1 },
+ 		.nextSeq = tail->last.seq + 1,
+-		.lastFinalLSN = tail->last.finalLSN,
++		.lastFinalLSN = tail->header.lastFinalLSN,
+ 		.lastEndLSN = tail->last.endLSN,
+ 		.completeSize = tail->last.endOffset
+ 	};

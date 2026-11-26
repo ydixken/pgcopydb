@@ -1,0 +1,19 @@
+Mutant: a reader reads the header of a segment it could not open. Must fail: a reader that cannot open a segment or its index file fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2328,13 +2328,6 @@
+ 
+ 		int fd = open(path, O_RDONLY);
+ 
+-		if (fd < 0)
+-		{
+-			log_error("Failed to open spool file \"%s\": %m", path);
+-			opened = false;
+-			break;
+-		}
+-
+ 		opened = spool_read_header(fd, path, &header, &headed);
+ 		(void) close(fd);
+ 

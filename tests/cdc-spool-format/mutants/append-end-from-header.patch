@@ -1,0 +1,14 @@
+Mutant: the durable end LSN at start comes from the header of the last segment. Must fail: a writer opened on a spool continues after its last indexed transaction, with the final_lsn and end LSN of its record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2012,7 +2012,7 @@
+ 		.relationLog = { .fd = -1 },
+ 		.nextSeq = tail->last.seq + 1,
+ 		.lastFinalLSN = tail->last.finalLSN,
+-		.lastEndLSN = tail->last.endLSN,
++		.lastEndLSN = tail->header.lastEndLSN,
+ 		.completeSize = tail->last.endOffset
+ 	};
+ 

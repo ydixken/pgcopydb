@@ -1,0 +1,17 @@
+Mutant: a file name with a character that is not an uppercase hexadecimal digit is taken for a spool file. Must fail: files of other names in the spool directory are left alone.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1519,11 +1519,6 @@
+ 		int digit = c >= '0' && c <= '9' ? c - '0' :
+ 					c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+ 
+-		if (digit < 0)
+-		{
+-			return NULL;
+-		}
+-
+ 		value = value << 4 | (uint64_t) digit;
+ 	}
+ 

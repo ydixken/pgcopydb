@@ -1,0 +1,13 @@
+Mutant: the writer counts the cut segment as not synced. Must fail: a writer opened on a spool past its limit can rotate before it appends.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2018,7 +2018,6 @@
+ 
+ 	/* the cut synced the segment at that length */
+ 	writer->segment.size = tail->last.endOffset;
+-	writer->segment.synced = tail->last.endOffset;
+ 
+ 	/* the writer owns the descriptor and the write block now */
+ 	tail->segment.fd = -1;

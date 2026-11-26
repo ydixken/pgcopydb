@@ -1,0 +1,18 @@
+Mutant: a failed read of the index is ignored. Must fail: an invalid index record before the tail of an index file fails the reader with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2394,9 +2394,9 @@
+ 			}
+ 		}
+ 
+-		if (reader->segment > 0 && !spool_reader_read(reader))
+-		{
+-			return false;
++		if (reader->segment > 0)
++		{
++			(void) spool_reader_read(reader);
+ 		}
+ 
+ 		if (reader->chunkCount > 0)

@@ -1,0 +1,14 @@
+Mutant: a reader returns the record that ends at the given end LSN. Must fail: a reader opened after an end LSN skips the transactions at or below it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2378,7 +2378,7 @@
+ 
+ 			reader->nextSeq = record->seq + 1;
+ 
+-			if (record->endLSN > reader->after)
++			if (record->endLSN >= reader->after)
+ 			{
+ 				reader->record = *record;
+ 				reader->changes = 0;

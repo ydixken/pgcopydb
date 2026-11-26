@@ -1,0 +1,16 @@
+Mutant: the start reports a writer whose relation log failed as open. Must fail: a writer opened on a spool whose definitions cannot be kept in memory fails and closes its files.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2025,7 +2025,9 @@
+ 	tail->segment.block = NULL;
+ 	spool_tail_close(tail);
+ 
+-	return spool_writer_start(writer, dirname);
++	(void) spool_writer_start(writer, dirname);
++
++	return true;
+ }
+ 
+ 

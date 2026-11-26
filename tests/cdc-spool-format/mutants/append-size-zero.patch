@@ -1,0 +1,13 @@
+Mutant: the writer counts the cut segment as empty. Must fail: a writer opened on a spool continues after its last indexed transaction, with the final_lsn and end LSN of its record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2017,7 +2017,6 @@
+ 	};
+ 
+ 	/* the cut synced the segment at that length */
+-	writer->segment.size = tail->last.endOffset;
+ 	writer->segment.synced = tail->last.endOffset;
+ 
+ 	/* the writer owns the descriptor and the write block now */

@@ -1,0 +1,13 @@
+Mutant: the start pads a segment that is shorter than its last index record. Must fail: a segment that ends before its last index record ends the start with an error and is not extended.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1966,6 +1966,7 @@
+ 
+ 	sformat(frames.filename, sizeof(frames.filename), "%s", segment->filename);
+ 	initPQExpBuffer(&frames.buffer);
++	(void) ftruncate(segment->fd, (off_t) tail->last.endOffset);
+ 
+ 	while (cut && !done)
+ 	{

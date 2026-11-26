@@ -1,0 +1,15 @@
+Mutant: a new spool is created before the removal of a torn first segment is synced. Must fail: a first segment with a torn header is removed, the directory synced, and the spool starts again.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2123,8 +2123,7 @@
+ 		seq = spool_highest_below(indexes, seq);
+ 	}
+ 
+-	return (!removed || spool_sync_directory(dirname)) &&
+-		   spool_writer_create(writer, dirname, fresh, maxSegmentSize);
++	return spool_writer_create(writer, dirname, fresh, maxSegmentSize);
+ }
+ 
+ 

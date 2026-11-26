@@ -1,0 +1,14 @@
+Mutant: the start keeps a segment file whose index file cleanup unlinked. Must fail: a segment file without its index file is deleted as a leftover of cleanup, and the directory synced.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2060,7 +2060,7 @@
+ 
+ 	for (int i = 0; i < count; i++)
+ 	{
+-		if (seqs[i] != seq && !spool_listed(indexes, seqs[i]))
++		if (false && seqs[i] != seq && !spool_listed(indexes, seqs[i]))
+ 		{
+ 			char path[MAXPGPATH];
+ 

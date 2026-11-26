@@ -1,0 +1,14 @@
+Mutant: the scan lists segment files as index files, and the reverse. Must fail: a segment file without its index file is deleted as a leftover of cleanup, and the directory synced.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1564,7 +1564,7 @@
+ 
+ 		if (suffix != NULL)
+ 		{
+-			appendBinaryPQExpBuffer(strcmp(suffix, ".seg") == 0 ? segments : indexes,
++			appendBinaryPQExpBuffer(strcmp(suffix, ".seg") == 0 ? indexes : segments,
+ 									(char *) &seq, sizeof(seq));
+ 		}
+ 	}

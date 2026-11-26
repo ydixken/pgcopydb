@@ -1,0 +1,14 @@
+Mutant: a next segment that cannot be opened reads as not there yet. Must fail: a reader that cannot open a segment or its index file fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2412,7 +2412,7 @@
+ 
+ 		if (!spool_reader_switch(reader, reader->nextSeq))
+ 		{
+-			return false;
++			return true;
+ 		}
+ 	}
+ }

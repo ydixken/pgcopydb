@@ -1,4 +1,4 @@
-Mutant: the reader accepts a frame without checking its CRC. Must fail: a frame with any one bit flipped is not valid.
+Mutant: the reader accepts a frame without checking its CRC. Must fail: a frame with any one bit flipped is not valid; a frame with a flipped bit fails the reader; a last indexed transaction with a damaged frame ends the start with an error.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

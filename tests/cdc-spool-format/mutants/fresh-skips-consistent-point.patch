@@ -1,0 +1,15 @@
+Mutant: a new spool skips every transaction whose final_lsn is 0/1 or below. Must fail: a writer opened on an empty directory starts a new spool at sequence number 1, whose header carries final_lsn and end LSN 0.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2146,7 +2146,8 @@
+ 	SpoolHeader fresh = {
+ 		.firstSeq = SPOOL_FIRST_SEQ,
+ 		.systemId = systemId,
+-		.timeline = timeline
++		.timeline = timeline,
++		.lastFinalLSN = 1
+ 	};
+ 
+ 	*writer = (SpoolWriter) {

@@ -1,0 +1,17 @@
+Mutant: the start opens the index file of a last segment that has none. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1902,11 +1902,6 @@
+ 		return false;
+ 	}
+ 
+-	if (!indexed)
+-	{
+-		return true;
+-	}
+-
+ 	tail->indexFd = open(tail->index, O_RDWR);
+ 
+ 	if (tail->indexFd < 0 || fstat(tail->indexFd, &st) != 0)

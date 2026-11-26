@@ -1,0 +1,22 @@
+Mutant: an index file without its segment is ignored. Must fail: an index file without its segment file ends the start with an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2045,16 +2045,6 @@
+ 	uint64_t *seqs = spool_seqs(indexes, &count);
+ 
+ 	/* cleanup unlinks the index file first, so every index has its segment */
+-	for (int i = 0; i < count; i++)
+-	{
+-		if (!spool_listed(segments, seqs[i]))
+-		{
+-			log_error("Spool index file \"%s/%016" PRIX64
+-					  ".idx\" has no segment file", dirname, seqs[i]);
+-			return false;
+-		}
+-	}
+-
+ 	/* and a segment without its index file, but the last one, is its leftover */
+ 	seqs = spool_seqs(segments, &count);
+ 

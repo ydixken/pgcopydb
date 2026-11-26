@@ -1,0 +1,13 @@
+Mutant: the change count of a record starts where the last record ended. Must fail: a reader applies before each change the definition logged before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2381,7 +2381,6 @@
+ 			if (record->endLSN > reader->after)
+ 			{
+ 				reader->record = *record;
+-				reader->changes = 0;
+ 				reader->frames.offset = record->beginOffset;
+ 				reader->frames.end = record->endOffset;
+ 

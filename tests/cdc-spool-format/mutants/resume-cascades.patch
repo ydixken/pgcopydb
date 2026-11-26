@@ -1,0 +1,19 @@
+Mutant: the start removes segments without an indexed transaction one after the other. Must fail: a segment before a removed last segment that holds no indexed transaction ends the start with an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2098,13 +2098,6 @@
+ 		spool_tail_close(&tail);
+ 
+ 		/* a later segment exists only once the flush indexed this one */
+-		if (round > 0)
+-		{
+-			log_error("Spool file \"%s\" holds no indexed transaction, but a "
+-					  "segment after it was created", tail.segment.filename);
+-			return false;
+-		}
+-
+ 		/* the index file first, as cleanup does */
+ 		if (!unlink_file(tail.index) || !unlink_file(tail.segment.filename))
+ 		{

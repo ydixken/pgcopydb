@@ -1,0 +1,19 @@
+Mutant: a record of the index file that cannot be read counts as invalid. Must fail: a start that cannot read the segment or its index fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1921,11 +1921,8 @@
+ 	{
+ 		char record[SPOOL_INDEX_RECORD_SIZE];
+ 
+-		if (!spool_pread(tail->indexFd, tail->index, record, sizeof(record),
+-						 end - sizeof(record), &done))
+-		{
+-			return false;
+-		}
++		(void) spool_pread(tail->indexFd, tail->index, record, sizeof(record),
++						   end - sizeof(record), &done);
+ 
+ 		if (spool_index_decode(record, done, &tail->last))
+ 		{

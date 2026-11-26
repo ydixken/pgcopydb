@@ -1,0 +1,15 @@
+Mutant: a file of sequence number 0 is taken for a spool file. Must fail: files of other names in the spool directory are left alone.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1528,8 +1528,7 @@
+ 	}
+ 
+ 	/* sequence numbers start at SPOOL_FIRST_SEQ */
+-	if (value == 0 ||
+-		(strcmp(name + 16, ".seg") != 0 && strcmp(name + 16, ".idx") != 0))
++	if (strcmp(name + 16, ".seg") != 0 && strcmp(name + 16, ".idx") != 0)
+ 	{
+ 		return NULL;
+ 	}

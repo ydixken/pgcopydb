@@ -189,6 +189,46 @@ typedef struct SpoolWriter
 	PQExpBufferData lasts;      /* SpoolRelationLast, one per relation or type */
 } SpoolWriter;
 
+/* the sequence number of the first transaction of a new spool */
+#define SPOOL_FIRST_SEQ 1
+
+/* the frames of one transaction, read by byte range and never past its end */
+typedef struct SpoolFrames
+{
+	char filename[MAXPGPATH];
+	int fd;
+	uint64_t offset;            /* of the next frame */
+	uint64_t end;               /* after the COMMIT frame */
+	PQExpBufferData buffer;     /* the bytes of the file from bufferStart */
+	uint64_t bufferStart;
+} SpoolFrames;
+
+/* index records that one read of an index file takes */
+#define SPOOL_READER_CHUNK 64
+
+/*
+ * A read-only cursor over the index records of a spool and their frames. An
+ * invalid record at the tail of the last index file is one that receive is
+ * still writing, and any other invalid record or frame is an error.
+ */
+typedef struct SpoolReader
+{
+	char dirname[MAXPGPATH];
+	uint64_t after;             /* records at or below this end LSN are skipped */
+	uint64_t segment;           /* first sequence number of the segment read */
+	uint64_t nextSeq;           /* of the next record, which names the next segment */
+	char indexFilename[MAXPGPATH];
+	int indexFd;
+	uint64_t indexOffset;       /* of the next record to read from the file */
+	SpoolIndexRecord chunk[SPOOL_READER_CHUNK];
+	int chunkCount;
+	int chunkNext;
+	SpoolIndexRecord record;    /* that spool_reader_next returned */
+	uint64_t changes;           /* change frames of that record returned so far */
+	SpoolFrames frames;
+	SpoolRelationCursor relations;
+} SpoolReader;
+
 uint32_t spool_crc32c(const char *data, size_t length);
 
 void spool_header_encode(const SpoolHeader *header, char *buf);
@@ -212,6 +252,9 @@ bool spool_writer_message(SpoolWriter *writer, const char *message,
 bool spool_writer_rewind(SpoolWriter *writer);
 bool spool_writer_rotate_due(const SpoolWriter *writer);
 bool spool_writer_rotate(SpoolWriter *writer);
+bool spool_writer_open(SpoolWriter *writer, const char *dirname,
+					   uint64_t systemId, uint32_t timeline,
+					   uint64_t maxSegmentSize);
 
 SpoolFrameStatus spool_relation_decode(const char *buf, uint64_t size,
 									   SpoolRelationRecord *record);
@@ -222,5 +265,11 @@ bool spool_relation_cursor_advance(SpoolRelationCursor *cursor,
 								   uint64_t seq, uint64_t changes,
 								   struct StreamContext *context);
 void spool_relation_cursor_close(SpoolRelationCursor *cursor);
+
+bool spool_reader_open(SpoolReader *reader, const char *dirname, uint64_t after);
+bool spool_reader_next(SpoolReader *reader, bool *found);
+bool spool_reader_frame(SpoolReader *reader, struct StreamContext *context,
+						const char **message, uint32_t *length, bool *done);
+void spool_reader_close(SpoolReader *reader);
 
 #endif /* LD_SPOOL_H */

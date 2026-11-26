@@ -1,0 +1,18 @@
+Mutant: a directory without a relation log fails the start. Must fail: a writer opened on an empty directory starts a new spool at sequence number 1, whose header carries final_lsn and end LSN 0.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1824,12 +1824,6 @@
+ 
+ 	int fd = open(path, O_WRONLY);
+ 
+-	if (fd < 0 && errno == ENOENT)
+-	{
+-		/* a new spool, whose writer creates the log */
+-		return true;
+-	}
+-
+ 	if (fd < 0)
+ 	{
+ 		log_error("Failed to open spool file \"%s\": %m", path);

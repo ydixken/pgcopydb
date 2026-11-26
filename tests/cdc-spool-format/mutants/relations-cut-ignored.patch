@@ -1,0 +1,14 @@
+Mutant: a failed cut of the relation log is ignored. Must fail: a cut that cannot truncate its file fails the start with an ERROR line that names it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1845,7 +1845,7 @@
+ 		end += SPOOL_RELATION_RECORD_SIZE(record.length);
+ 	}
+ 
+-	cut = cut && spool_cut_file(fd, path, end);
++	(void) spool_cut_file(fd, path, end);
+ 
+ 	free(bytes);
+ 	(void) close(fd);

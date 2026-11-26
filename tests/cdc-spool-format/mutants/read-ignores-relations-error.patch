@@ -1,0 +1,18 @@
+Mutant: a failed read of the relation log after new index records is ignored. Must fail: a reader that cannot read the relation log again fails.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2281,8 +2281,10 @@
+ 	reader->indexOffset += (uint64_t) reader->chunkCount * SPOOL_INDEX_RECORD_SIZE;
+ 
+ 	/* receive synced the definitions of these records before it wrote them */
+-	return reader->chunkCount == 0 ||
+-		   spool_relation_cursor_read(&reader->relations);
++	(void) (reader->chunkCount == 0 ||
++				spool_relation_cursor_read(&reader->relations));
++
++	return true;
+ }
+ 
+ 

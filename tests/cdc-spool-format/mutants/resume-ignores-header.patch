@@ -1,0 +1,18 @@
+Mutant: a removed last segment with a valid header is not created again from it. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header; a last segment whose index file holds no valid record is removed with it, and created again from its header.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2114,12 +2114,6 @@
+ 		removed = true;
+ 
+ 		/* the header gives the last transaction before it, also after cleanup */
+-		if (tail.headed)
+-		{
+-			return spool_sync_directory(dirname) &&
+-				   spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
+-		}
+-
+ 		seq = spool_highest_below(indexes, seq);
+ 	}
+ 
