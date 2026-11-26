@@ -9,7 +9,7 @@
 spool_apply() {
     local topdir=${TMPDIR:-/tmp}/pgcopydb
     local cdcdir=${XDG_DATA_HOME:-${HOME}/.local/share}/pgcopydb
-    local copy rc=0
+    local copy left rc=0 fail=""
 
     test -d "${topdir}" && test -d "${cdcdir}" || {
         echo "FAIL: no work directory at ${topdir} and ${cdcdir}" >&2
@@ -21,14 +21,28 @@ spool_apply() {
                  where filename like '${cdcdir}/%';
                  select count(*) from cdc_files where filename not like '${copy}/cdc/%';"
     cp -a "${topdir}/." "${copy}/" && mkdir -p "${copy}/cdc" &&
-        cp -a "${cdcdir}/." "${copy}/cdc/" && rm -f "${copy}"/cdc/*-replay.db* &&
-        test "$(sqlite3 -init /dev/null -batch -noheader "${copy}/schema/source.db" "${moved}")" = 0 &&
-        timeout -s KILL 120 pgcopydb stream apply --target - --dir "${copy}" > "${copy}/apply.out" &&
-        grep -q '^COMMIT$' "${copy}/apply.out" &&
-        cat "${copy}/apply.out" || rc=1
+        cp -a "${cdcdir}/." "${copy}/cdc/" && rm -f "${copy}"/cdc/*-replay.db* ||
+        fail="cannot copy the work directory"
+    if test -z "${fail}"; then
+        left=$(sqlite3 -init /dev/null -batch -noheader "${copy}/schema/source.db" "${moved}")
+        test "${left}" = 0 || fail="cdc_files rewrite left '${left}' rows outside the copy"
+    fi
+    if test -z "${fail}"; then
+        timeout -s KILL 120 pgcopydb stream apply --target - --dir "${copy}" > "${copy}/apply.out" || rc=$?
+        if test ${rc} -eq 137; then
+            fail="stream apply --target - was killed, or ran past 120s"
+        elif test ${rc} -ne 0; then
+            fail="stream apply --target - exited with status ${rc}"
+        elif ! grep -q '^COMMIT$' "${copy}/apply.out"; then
+            fail="stream apply --target - printed no transaction"
+        fi
+    fi
+    test -n "${fail}" || cat "${copy}/apply.out" || fail="cannot print the apply output"
     rm -rf "${copy}"
-    test ${rc} -eq 0 || echo "FAIL: stream apply --target - printed no transaction" >&2
-    return ${rc}
+    test -z "${fail}" || {
+        echo "FAIL: ${fail}" >&2
+        return 1
+    }
 }
 
 # spool_stmts: the distinct statement texts, in first-use order
