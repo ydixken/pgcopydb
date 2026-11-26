@@ -1487,8 +1487,8 @@ cli_stream_apply(int argc, char **argv)
 	 * Open outputDB (its filename is looked up in the cdc_files table of
 	 * sourceDB) and derive + open replayDB from the outputDB path.
 	 *
-	 * In stdoutMode these two calls are combined with an inline transform
-	 * pass that populates replayDB from outputDB before stream_apply_to_stdout
+	 * In stdoutMode these two calls are combined with the inline transform,
+	 * whose passes populate replayDB from outputDB before stream_apply_to_stdout
 	 * reads from the replay table.
 	 */
 	if (!ld_store_open_outputdb(&specs))
@@ -1523,17 +1523,77 @@ cli_stream_apply(int argc, char **argv)
 		}
 
 		/*
-		 * Start from the beginning of the output table (replay_lsn == 0).
-		 * Any rows previously transformed are skipped by the cursor inside
-		 * ld_store_iter_output (it uses replay_lsn as the start position).
+		 * Skip what replayDB already holds, as the apply driver does when it
+		 * drains replayDB before it transforms, or a filled directory gets
+		 * every transaction twice.  The cursors only grow, so this ends.
 		 */
-		specs.sentinel.replay_lsn = InvalidXLogRecPtr;
+		uint64_t previousLSN = InvalidXLogRecPtr;
+		uint64_t keepaliveLSN = InvalidXLogRecPtr;
 
-		if (!stream_transform_from_outputdb(&specs,
-											InvalidXLogRecPtr,
-											InvalidXLogRecPtr))
+		for (;;)
 		{
-			exit(EXIT_CODE_INTERNAL_ERROR);
+			ReplayDBStmt s = { 0 };
+
+			if (!ld_store_replay_next_event(specs.replayDB,
+											previousLSN,
+											keepaliveLSN,
+											&s))
+			{
+				/* errors have already been logged */
+				exit(EXIT_CODE_INTERNAL_ERROR);
+			}
+
+			if (s.action == STREAM_ACTION_BEGIN && s.endlsn > previousLSN)
+			{
+				previousLSN = s.endlsn;
+			}
+			else if (s.action == STREAM_ACTION_KEEPALIVE)
+			{
+				keepaliveLSN = s.lsn;
+			}
+			else
+			{
+				break;
+			}
+		}
+
+		/*
+		 * A pass hands over one transaction or one marker, so repeat until a
+		 * pass moves neither cursor.
+		 */
+		LogicalMessageMetadata *last = &(specs.private.metadata);
+
+		for (;;)
+		{
+			if (specs.endpos != InvalidXLogRecPtr &&
+				specs.endpos <= previousLSN)
+			{
+				break;
+			}
+
+			if (!stream_transform_from_outputdb(&specs,
+												previousLSN,
+												keepaliveLSN))
+			{
+				exit(EXIT_CODE_INTERNAL_ERROR);
+			}
+
+			if ((last->action == STREAM_ACTION_COMMIT ||
+				 last->action == STREAM_ACTION_ROLLBACK) &&
+				last->lsn > previousLSN)
+			{
+				previousLSN = last->lsn;
+			}
+			else if ((last->action == STREAM_ACTION_KEEPALIVE ||
+					  last->action == STREAM_ACTION_SWITCH) &&
+					 last->lsn > keepaliveLSN)
+			{
+				keepaliveLSN = last->lsn;
+			}
+			else
+			{
+				break;
+			}
 		}
 
 		if (!stream_apply_to_stdout(&specs, stdout))

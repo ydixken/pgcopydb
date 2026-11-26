@@ -90,6 +90,47 @@ diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
 
 sqlite3 ${REPLAYDB} "select count(*) as replay_rows from replay;"
 
+#
+# 'stream apply --target -' prints every committed transaction of outputDB.
+# It writes a replayDB again, so it runs on a copy of the work directory
+# without one, and cdc_files holds absolute paths that must point at the copy.
+#
+COPYDIR=$(mktemp -d)
+cp -a ${TMPDIR:-/tmp}/pgcopydb/. ${COPYDIR}/
+mkdir -p ${COPYDIR}/cdc
+cp -a ${SHAREDIR}/. ${COPYDIR}/cdc/
+rm -f ${COPYDIR}/cdc/*-replay.db*
+
+sqlite3 -init /dev/null -batch -noheader ${COPYDIR}/schema/source.db \
+  "update cdc_files set filename = '${COPYDIR}/cdc/' || substr(filename, length('${SHAREDIR}/') + 1) where filename like '${SHAREDIR}/%'"
+moved=`sqlite3 -init /dev/null -batch -noheader ${COPYDIR}/schema/source.db "select count(*) from cdc_files where filename not like '${COPYDIR}/cdc/%'"`
+test "${moved}" -eq 0
+
+timeout -s KILL 60 pgcopydb stream apply --target - --dir ${COPYDIR} > /tmp/apply-stdout.sql
+
+txns=`sqlite3 -init /dev/null -batch -noheader ${OUTPUTDB} "select count(distinct xid) from output where action = 'C'"`
+begins=`grep -c '^BEGIN$' /tmp/apply-stdout.sql || true`
+commits=`grep -c '^COMMIT$' /tmp/apply-stdout.sql || true`
+
+echo "outputDB transactions: ${txns}, stdout BEGIN: ${begins}, COMMIT: ${commits}"
+
+# with one transaction, printing only the first one would pass
+test "${txns}" -ge 2
+test "${begins}" -eq "${txns}"
+test "${commits}" -eq "${txns}"
+
+# a last transaction without its COMMIT row must not keep the command looping
+rm -f ${COPYDIR}/cdc/*-replay.db*
+sqlite3 -init /dev/null -batch -noheader ${COPYDIR}/cdc/$(basename ${OUTPUTDB}) \
+  "delete from output where action = 'C' and xid = (select xid from output where action = 'C' order by lsn desc limit 1)"
+
+timeout -s KILL 60 pgcopydb stream apply --target - --dir ${COPYDIR} > /tmp/apply-stdout-open.sql
+
+commits=`grep -c '^COMMIT$' /tmp/apply-stdout-open.sql || true`
+test "${commits}" -eq $((txns - 1))
+
+rm -rf ${COPYDIR}
+
 # Applying again must be idempotent
 pgcopydb stream catchup --resume --endpos "${lsn}" -vv
 

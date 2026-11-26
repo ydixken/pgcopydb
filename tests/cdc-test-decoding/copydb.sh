@@ -185,6 +185,9 @@ do
 done
 
 # stdout apply: the all-NULL DELETE has no parameters, "EXECUTE name ()" fails
+replay_commits=$(sqlite3 -init /dev/null -batch -noheader ${REPLAYDB} \
+    "select count(*) from replay where action = 'C'")
+
 pgcopydb stream apply --target - > /tmp/apply-stdout.sql
 
 allnull=$(sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
@@ -192,6 +195,16 @@ allnull=$(sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
 
 test -n "${allnull}"
 grep -x "EXECUTE ${allnull}" /tmp/apply-stdout.sql
+
+# the catchup filled replayDB: stdout apply prints each commit once, adds none
+stdout_commits=$(grep -c '^COMMIT$' /tmp/apply-stdout.sql || true)
+replay_after=$(sqlite3 -init /dev/null -batch -noheader ${REPLAYDB} \
+    "select count(*) from replay where action = 'C'")
+
+echo "replayDB commits: ${replay_commits}, after: ${replay_after}, stdout COMMIT: ${stdout_commits}"
+test "${replay_commits}" -ge 2
+test "${stdout_commits}" -eq "${replay_commits}"
+test "${replay_after}" -eq "${replay_commits}"
 
 #
 # Stream prune between rounds: remove already-applied CDC file pairs.

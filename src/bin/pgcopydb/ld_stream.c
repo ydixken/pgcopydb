@@ -1842,6 +1842,16 @@ prepareMessageMetadataFromContext(LogicalStreamContext *context)
 		previous->skipping = false;
 		metadata->skipping = false;
 
+		/*
+		 * pgoutput sends 0/0 as the BEGIN header of a transaction with a
+		 * replication origin: such BEGINs share one output.db key, and apply
+		 * reads 0 as no row. The first change has what a plain BEGIN has on 15+.
+		 */
+		if (previous->lsn == InvalidXLogRecPtr)
+		{
+			previous->lsn = metadata->lsn;
+		}
+
 		/* This BEGIN is written before streamWrite inserts the current message. */
 		if (!ld_store_output_begin(privateContext->outputDB))
 		{

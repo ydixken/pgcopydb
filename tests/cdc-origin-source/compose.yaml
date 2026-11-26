@@ -1,0 +1,50 @@
+services:
+  source:
+    image: postgres:${PGVERSION:-16}
+    expose:
+      - 5432
+    env_file:
+      - ../postgres.env
+    command: >
+      -c wal_level=logical
+      -c ssl=on
+      -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
+      -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+
+  # pgoutput 13 and 14 send BEGIN from the begin callback, 15 and later from the first change
+  source13:
+    image: postgres:13-bullseye
+    expose:
+      - 5432
+    env_file:
+      - ../postgres.env
+    command: >
+      -c wal_level=logical
+      -c ssl=on
+      -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
+      -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+
+  target:
+    image: postgres:${PGVERSION:-16}
+    expose:
+      - 5432
+    env_file:
+      - ../postgres.env
+    command: >
+      -c ssl=on
+      -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
+      -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+
+  test:
+    image: cdc-origin-source
+    build: .
+    env_file:
+      - ../uris.env
+    environment:
+      PGCOPYDB_TABLE_JOBS: 2
+      PGCOPYDB_INDEX_JOBS: 2
+      PGCOPYDB_OUTPUT_PLUGIN: pgoutput
+    depends_on:
+      - source
+      - source13
+      - target

@@ -56,18 +56,23 @@ record follows.
 LSN values on the replication protocol wire
 --------------------------------------------
 
-When the logical decoding plugin callbacks fire, ``ctx->write_location`` is set
-to ``txn->first_lsn`` (the start of the BEGIN record) for BEGIN callbacks and
-to ``txn->end_lsn`` (the byte immediately past the end of the COMMIT record)
-for COMMIT callbacks.  ``WalSndPrepareWrite`` (``walsender.c``) embeds
-``ctx->write_location`` as the ``dataStart`` field of the XLogData protocol
-message, which the replication client reads as ``cur_record_lsn``.
+When a logical decoding plugin callback fires, ``ctx->write_location`` is set to ``txn->first_lsn`` (the start of the first record of the transaction) for the begin callback, to the LSN of the change for a change callback, and to ``txn->end_lsn`` (the byte immediately past the end of the COMMIT record) for the commit callback.
+``WalSndPrepareWrite`` (``walsender.c``) embeds ``ctx->write_location`` as the ``dataStart`` field of the XLogData protocol message, which the replication client reads as ``cur_record_lsn``.
+A message that a plugin prepares as not the last write of its callback gets ``dataStart`` 0/0 instead, as pgoutput does for RELATION and TYPE messages.
 
-pgcopydb does **not** pass ``include-lsn=true`` to wal2json, so wal2json does
-not embed an ``"lsn"`` field in its JSON output.  pgcopydb uses the raw
-protocol ``dataStart`` value as ``metadata->lsn`` for every message.
+So the BEGIN header of pgoutput is not a property of the transaction:
 
-For consecutive transactions N and N+1, COMMIT_N is therefore delivered with
+- PostgreSQL 13 and 14 send BEGIN from the begin callback, with ``txn->first_lsn``.
+- PostgreSQL 15 and later send BEGIN when the first change that passes the publication and its row filter arrives, with the LSN of that change.
+- On every version, when the commit of the transaction carries a replication origin, an ORIGIN message follows BEGIN and the BEGIN header is 0/0.
+
+pgcopydb does **not** pass ``include-lsn=true`` to wal2json, so wal2json does not embed an ``"lsn"`` field in its JSON output.
+pgcopydb uses the raw protocol ``dataStart`` value as ``metadata->lsn`` for every message except a BEGIN at 0/0.
+Receive holds a BEGIN back until the first change of its transaction arrives, and it stores a BEGIN at 0/0 at the LSN of that change.
+Otherwise every such BEGIN would get the same key in ``output.db`` and replace the one before it, and apply would read a BEGIN at LSN 0 as no row at all.
+
+For consecutive transactions N and N+1 when BEGIN carries ``txn->first_lsn``,
+as test_decoding and pgoutput on 13 and 14 send it, COMMIT_N is delivered with
 ``dataStart = txn_N->end_lsn`` and BEGIN_{N+1} with ``dataStart =
 txn_{N+1}->first_lsn``.  Because ``txn_N->end_lsn`` equals
 ``EndRecPtr(COMMIT_N)`` which equals ``ReadRecPtr`` of the next WAL record
