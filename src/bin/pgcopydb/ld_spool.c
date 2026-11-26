@@ -462,6 +462,8 @@ spool_append(SpoolSegment *segment, const char *message, uint32_t length)
 
 /*
  * spool_sync writes the write block to the segment file and syncs the file.
+ * It syncs with an empty block too, as spool_put writes a full block out
+ * without a sync.
  */
 bool
 spool_sync(SpoolSegment *segment)
@@ -476,6 +478,8 @@ spool_sync(SpoolSegment *segment)
 		spool_fail(segment);
 		return false;
 	}
+
+	segment->synced = segment->size;
 
 	return true;
 }
@@ -866,7 +870,9 @@ spool_writer_rewind(SpoolWriter *writer)
 		return false;
 	}
 
+	/* the bytes before completeSize may still wait for their sync */
 	segment->size = writer->completeSize;
+	segment->synced = Min(segment->synced, writer->completeSize);
 	segment->blockLength = 0;
 
 	return true;
@@ -902,8 +908,10 @@ spool_writer_rotate(SpoolWriter *writer)
 		return false;
 	}
 
+	/* an empty block is no proof of a sync: spool_put writes full blocks out */
 	if (!spool_writer_rotate_due(writer) ||
-		segment->blockLength > 0 || writer->pendingIndex.len > 0)
+		segment->size > segment->synced || segment->blockLength > 0 ||
+		writer->pendingIndex.len > 0)
 	{
 		log_error("BUG: spool file \"%s\" rotates only when due, and after "
 				  "the flush of its frames and index records",

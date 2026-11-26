@@ -74,6 +74,7 @@ typedef struct SpoolSegment
 	char filename[MAXPGPATH];
 	int fd;
 	uint64_t size;              /* bytes written to the file */
+	uint64_t synced;            /* bytes that the last fsync covered */
 	char *block;
 	size_t blockLength;
 } SpoolSegment;

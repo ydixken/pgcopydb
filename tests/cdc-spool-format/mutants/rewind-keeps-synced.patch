@@ -1,0 +1,13 @@
+Mutant: a rewind keeps the synced length of the bytes it cut off. Must fail: after a rewind cut synced frames off, rotation waits until the flush has synced the frames written since.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -872,7 +872,6 @@ spool_writer_rewind(SpoolWriter *writer)
+ 
+ 	/* the bytes before completeSize may still wait for their sync */
+ 	segment->size = writer->completeSize;
+-	segment->synced = Min(segment->synced, writer->completeSize);
+ 	segment->blockLength = 0;
+ 
+ 	return true;

@@ -40,6 +40,9 @@ static char keepalive[SPOOL_KEEPALIVE_SIZE] = { 'k' };
 
 static char unknownKind[SPOOL_KEEPALIVE_SIZE] = { 'x' };
 
+/* an XLogData message whose frame fills an empty write block */
+static char blockFill[SPOOL_BLOCK_SIZE - 8] = { 'w' };
+
 /* the log of the spool code, which the sync checks read */
 static FILE *logfile;
 
@@ -459,6 +462,28 @@ test_writer(const char *dir)
 							 &message, &length) == SPOOL_FRAME_OK &&
 		  length == sizeof(big) && memcmp(message, big, length) == 0,
 		  "a frame larger than the write block is written whole");
+
+	/* the frame ends at the block boundary, so spool_put writes it out */
+	struct stat st;
+
+	before = size;
+	mark = log_mark();
+	appended = spool_append(&segment, blockFill, sizeof(blockFill));
+
+	bool writtenOut = appended && segment.blockLength == 0 &&
+					  stat(path, &st) == 0 &&
+					  (uint64_t) st.st_size == before + SPOOL_BLOCK_SIZE;
+	int syncsBefore = count(logged_since(mark), "Synced spool ");
+
+	synced = spool_sync(&segment);
+	text = logged_since(mark);
+	sformat(fileLine, sizeof(fileLine),
+			"Synced spool file \"%s\" at %" PRIu64 " bytes",
+			path, before + SPOOL_BLOCK_SIZE);
+
+	check(writtenOut && syncsBefore == 0 && synced &&
+		  count(text, "Synced spool ") == 1 && strstr(text, fileLine) != NULL,
+		  "a frame that ends at the write block boundary is written out unsynced, and spool_sync syncs it");
 }
 
 
@@ -1266,6 +1291,34 @@ test_rotation(const char *dir)
 
 	check(refused && access(path, F_OK) != 0,
 		  "rotation waits until the flush has synced the frames");
+
+	/* after the flush, a frame that fills the block goes out unsynced */
+	refused = new_writer(&other, dir, &header, 50) &&
+			  feed(&other, msgs, lengthof(msgs)) && flush(&other) &&
+			  spool_append(&other.segment, blockFill, sizeof(blockFill)) &&
+			  other.segment.blockLength == 0 &&
+			  spool_writer_rotate_due(&other) && !spool_writer_rotate(&other);
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
+
+	bool missing = access(path, F_OK) != 0;
+
+	check(refused && missing && spool_sync(&other.segment) &&
+		  spool_writer_rotate(&other) && access(path, F_OK) == 0,
+		  "rotation waits until the flush has synced a frame that ends at the write block boundary");
+
+	/* a rewind cuts synced frames off, and a frame that fills the block follows */
+	refused = new_writer(&other, dir, &header, 50) &&
+			  feed(&other, msgs, lengthof(msgs)) && flush(&other) &&
+			  spool_append(&other.segment, blockFill, sizeof(blockFill)) &&
+			  spool_append(&other.segment, blockFill, sizeof(blockFill)) &&
+			  spool_sync(&other.segment) && spool_writer_rewind(&other) &&
+			  spool_append(&other.segment, blockFill, sizeof(blockFill)) &&
+			  other.segment.blockLength == 0 &&
+			  spool_writer_rotate_due(&other) && !spool_writer_rotate(&other);
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
+
+	check(refused && access(path, F_OK) != 0,
+		  "after a rewind cut synced frames off, rotation waits until the flush has synced the frames written since");
 
 	sformat(path, sizeof(path), "%s/0000000000000015.seg", writer.dirname);
 
