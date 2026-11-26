@@ -16,6 +16,8 @@
 #include "commandline.h"
 #include "env_utils.h"
 #include "filtering.h"
+#include "ld_spool.h"
+#include "ld_stream.h"
 #include "log.h"
 #include "parsing_utils.h"
 #include "pgcmd.h"
@@ -39,6 +41,8 @@ static void cli_list_indexes(int argc, char **argv);
 static void cli_list_depends(int argc, char **argv);
 static void cli_list_schema(int argc, char **argv);
 static void cli_list_progress(int argc, char **argv);
+static int cli_list_spool_getopts(int argc, char **argv);
+static void cli_list_spool(int argc, char **argv);
 
 static bool copydb_init_specs_from_listdboptions(CopyDataSpec *copySpecs,
 												 ListDBOptions *listDBoptions,
@@ -180,6 +184,16 @@ static CommandLine list_progress_command =
 		cli_list_db_getopts,
 		cli_list_progress);
 
+static CommandLine list_spool_command =
+	make_command(
+		"spool",
+		"List the transactions of the raw spool",
+		" [ --dir ] [ --json ] ",
+		"  --json    Format the output using JSON\n"
+		"  --dir     Work directory to use\n",
+		cli_list_spool_getopts,
+		cli_list_spool);
+
 
 static CommandLine *list_subcommands[] = {
 	&list_catalogs_command,
@@ -192,6 +206,7 @@ static CommandLine *list_subcommands[] = {
 	&list_depends_command,
 	&list_schema_command,
 	&list_progress_command,
+	&list_spool_command,
 	NULL
 };
 
@@ -2187,4 +2202,202 @@ copydb_init_specs_from_listdboptions(CopyDataSpec *copySpecs,
 	copySpecs->skipSnapshotCheck = true;
 
 	return true;
+}
+
+
+/*
+ * cli_list_spool_getopts parses the CLI options for the `list spool` command,
+ * which needs no connection string.
+ */
+static int
+cli_list_spool_getopts(int argc, char **argv)
+{
+	ListDBOptions options = { 0 };
+	int c, option_index = 0;
+	int errors = 0;
+
+	static struct option long_options[] = {
+		{ "dir", required_argument, NULL, 'D' },
+		{ "json", no_argument, NULL, 'J' },
+		{ "version", no_argument, NULL, 'V' },
+		{ "debug", no_argument, NULL, 'd' },
+		{ "trace", no_argument, NULL, 'z' },
+		{ "verbose", no_argument, NULL, 'v' },
+		{ "notice", no_argument, NULL, 'v' },
+		{ "quiet", no_argument, NULL, 'q' },
+		{ "help", no_argument, NULL, 'h' },
+		{ NULL, 0, NULL, 0 }
+	};
+
+	optind = 0;
+
+	while ((c = getopt_long(argc, argv, "D:JVdzvqh",
+							long_options, &option_index)) != -1)
+	{
+		switch (c)
+		{
+			case 'D':
+			{
+				strlcpy(options.dir, optarg, MAXPGPATH);
+				log_trace("--dir %s", options.dir);
+				break;
+			}
+
+			case 'J':
+			{
+				outputJSON = true;
+				log_trace("--json");
+				break;
+			}
+
+			case 'V':
+			{
+				/* keeper_cli_print_version prints version and exits. */
+				cli_print_version(argc, argv);
+				break;
+			}
+
+			case 'v':
+			{
+				log_set_level(LOG_NOTICE);
+				break;
+			}
+
+			case 'd':
+			{
+				log_set_level(LOG_DEBUG);
+				break;
+			}
+
+			case 'z':
+			{
+				log_set_level(LOG_TRACE);
+				break;
+			}
+
+			case 'q':
+			{
+				log_set_level(LOG_ERROR);
+				break;
+			}
+
+			case 'h':
+			{
+				commandline_help(stderr);
+				exit(EXIT_CODE_QUIT);
+				break;
+			}
+
+			case '?':
+			default:
+			{
+				++errors;
+			}
+		}
+	}
+
+	if (errors > 0)
+	{
+		exit(EXIT_CODE_BAD_ARGS);
+	}
+
+	/* publish our option parsing in the global variable */
+	listDBoptions = options;
+
+	return optind;
+}
+
+
+/*
+ * cli_list_spool implements the command: pgcopydb list spool. It prints the
+ * index records of the raw spool in the CDC directory, and never writes.
+ */
+static void
+cli_list_spool(int argc, char **argv)
+{
+	CopyFilePaths cfPaths = { 0 };
+	SpoolReader reader = { 0 };
+	char *dir = IS_EMPTY_STRING_BUFFER(listDBoptions.dir) ? NULL : listDBoptions.dir;
+	bool found = false;
+
+	if (!copydb_prepare_filepaths(&cfPaths, dir, NULL) ||
+		!spool_reader_open(&reader, cfPaths.cdc.dir, 0))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_INTERNAL_ERROR);
+	}
+
+	JSON_Value *js = json_value_init_array();
+	JSON_Array *jsArray = json_value_get_array(js);
+
+	if (!outputJSON)
+	{
+		fformat(stdout, "%16s | %8s | %10s | %8s | %12s | %12s | %14s | %14s | %s\n",
+				"Segment", "Seq", "Xid", "Changes", "Begin", "End",
+				"Final LSN", "End LSN", "Commit Time");
+	}
+
+	for (;;)
+	{
+		if (!spool_reader_next(&reader, &found))
+		{
+			/* errors have already been logged */
+			exit(EXIT_CODE_INTERNAL_ERROR);
+		}
+
+		if (!found)
+		{
+			break;
+		}
+
+		SpoolIndexRecord *record = &reader.record;
+		char segment[17] = { 0 };
+		char finalLSN[PG_LSN_MAXLENGTH] = { 0 };
+		char endLSN[PG_LSN_MAXLENGTH] = { 0 };
+		char commitTime[PG_MAX_TIMESTAMP] = { 0 };
+
+		sformat(segment, sizeof(segment), "%016" PRIX64, reader.segment);
+		sformat(finalLSN, sizeof(finalLSN), "%X/%X", LSN_FORMAT_ARGS(record->finalLSN));
+		sformat(endLSN, sizeof(endLSN), "%X/%X", LSN_FORMAT_ARGS(record->endLSN));
+		(void) pgsql_timestamptz_to_string((TimestampTz) record->commitTime,
+										   commitTime, sizeof(commitTime));
+
+		if (outputJSON)
+		{
+			JSON_Value *jsRecord = json_value_init_object();
+			JSON_Object *jsObj = json_value_get_object(jsRecord);
+
+			json_object_set_string(jsObj, "segment", segment);
+			json_object_set_number(jsObj, "seq", (double) record->seq);
+			json_object_set_number(jsObj, "xid", (double) record->xid);
+			json_object_set_number(jsObj, "changes", (double) record->changes);
+			json_object_set_number(jsObj, "begin_offset", (double) record->beginOffset);
+			json_object_set_number(jsObj, "end_offset", (double) record->endOffset);
+			json_object_set_string(jsObj, "final_lsn", finalLSN);
+			json_object_set_string(jsObj, "end_lsn", endLSN);
+			json_object_set_string(jsObj, "commit_time", commitTime);
+
+			json_array_append_value(jsArray, jsRecord);
+		}
+		else
+		{
+			fformat(stdout, "%16s | %8" PRIu64 " | %10u | %8" PRIu64 " | %12" PRIu64
+					" | %12" PRIu64 " | %14s | %14s | %s\n",
+					segment, record->seq, record->xid, record->changes,
+					record->beginOffset, record->endOffset,
+					finalLSN, endLSN, commitTime);
+		}
+	}
+
+	if (outputJSON)
+	{
+		char *serialized_string = json_serialize_to_string_pretty(js);
+
+		fformat(stdout, "%s\n", serialized_string);
+
+		json_free_serialized_string(serialized_string);
+	}
+
+	json_value_free(js);
+	spool_reader_close(&reader);
 }

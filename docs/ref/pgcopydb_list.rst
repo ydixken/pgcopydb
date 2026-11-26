@@ -157,10 +157,28 @@ list of all the tables and indexes that are currently being processed.
 
 .. include:: ../include/list-progress.rst
 
+.. _pgcopydb_list_spool:
+
+pgcopydb list spool
+-------------------
+
+pgcopydb list spool - List the transactions of the raw spool
+
+The command ``pgcopydb list spool`` reads the transaction index of the raw
+change spool in the CDC directory, and prints one line per transaction: its
+segment, sequence number, xid, number of changes, begin and end offset in the
+segment, ``final_lsn``, end LSN and commit time.
+
+The command only reads the spool. A record that receive is still writing is
+not listed, and a damaged index record or frame ends the command with an
+error.
+
+.. include:: ../include/list-spool.rst
+
 Options
 -------
 
-The following options are available to ``pgcopydb dump schema``:
+The following options are available to ``pgcopydb list``:
 
 --source
 
@@ -210,6 +228,12 @@ The following options are available to ``pgcopydb dump schema``:
 
   The output of the command is formatted in JSON, when supported. Ignored
   otherwise.
+
+--dir
+
+  The work directory of the command. ``pgcopydb list spool`` reads the spool
+  in its ``cdc`` sub-directory, and without this option in the ``pgcopydb``
+  directory under ``XDG_DATA_HOME``, which defaults to ``~/.local/share``.
 
 --verbose
 

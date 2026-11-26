@@ -33,14 +33,14 @@ done
 
 export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0}
 status=0
-/tmp/spool-format /spool-full || status=1
+/tmp/spool-format /spool-full "${PWD}/pgcopydb" || status=1
 
 # Again under strace: each "Synced spool" debug line must be one fsync that
 # returned 0, on a descriptor of the file it names, in the same order. This
 # runs after a failed check too, so that a mutant shows each check it fails.
 rc=0
 strace -f -y -o /tmp/strace.log -e trace=fsync,fdatasync,ftruncate \
-    /tmp/spool-format /spool-full > /tmp/traced.log 2>&1 || rc=$?
+    /tmp/spool-format /spool-full "${PWD}/pgcopydb" > /tmp/traced.log 2>&1 || rc=$?
 if test "${rc}" -ne 0; then
     test "${status}" -ne 0 || cat /tmp/traced.log
     status=1

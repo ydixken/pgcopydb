@@ -22,6 +22,7 @@
 #include "ld_spool.h"
 #include "ld_stream.h"
 #include "log.h"
+#include "parson.h"
 
 /* defaults.h maps realloc to the collector, and the checks replace realloc */
 #undef realloc
@@ -3867,14 +3868,110 @@ test_reader_failures(const char *dir)
 }
 
 
+/* runs pgcopydb with args, and returns its output and exit status */
+static char *
+run_pgcopydb(const char *binary, const char *args, int *status)
+{
+	static char output[64 * 1024];
+	char command[4 * MAXPGPATH];
+
+	sformat(command, sizeof(command), "%s %s 2>/dev/null", binary, args);
+
+	FILE *pipe = popen(command, "r");
+	size_t n = pipe == NULL ? 0 : fread(output, 1, sizeof(output) - 1, pipe);
+
+	output[n] = '\0';
+	*status = pipe == NULL ? -1 : pclose(pipe);
+
+	return output;
+}
+
+
+static void
+test_list_spool(const char *dir, const char *binary)
+{
+	SpoolWriter writer = { 0 };
+	char top[MAXPGPATH];
+	char cdc[MAXPGPATH];
+	char args[2 * MAXPGPATH];
+	int status = -1;
+	Msg low[] = {
+		begin_msg(0x110, 0x100, 994),
+		other_msg(0x110, 'I'),
+		other_msg(0x120, 'U'),
+		commit_msg(0x130, 0x100, 0x130, 94),
+		begin_msg(0x150, 0x200, 995),
+		other_msg(0x150, 'D'),
+		commit_msg(0x230, 0x200, 0x230, 95)
+	};
+
+	sformat(top, sizeof(top), "%s/listed", dir);
+	sformat(cdc, sizeof(cdc), "%s/cdc", top);
+
+	bool made = mkdir(top, 0700) == 0 && mkdir(cdc, 0700) == 0 &&
+				spool_writer_open(&writer, cdc, 7, 2, 0) &&
+				feed(&writer, low, lengthof(low)) && write_index(&writer);
+
+	kill_writer(&writer);
+	sformat(args, sizeof(args), "list spool --dir %s --json", top);
+
+	char *output = made ? run_pgcopydb(binary, args, &status) : "";
+	JSON_Value *js = json_parse_string(output);
+	JSON_Array *array = json_value_get_array(js);
+	JSON_Object *first = json_array_get_object(array, 0);
+	JSON_Object *second = json_array_get_object(array, 1);
+	uint64_t end = SPOOL_HEADER_SIZE + frames_size(low, 4);
+
+	check(made && status == 0 && json_array_get_count(array) == 2 &&
+		  strcmp(json_object_get_string(first, "segment"), "0000000000000001") == 0 &&
+		  json_object_get_number(first, "seq") == 1 &&
+		  json_object_get_number(first, "xid") == 994 &&
+		  json_object_get_number(first, "changes") == 2 &&
+		  json_object_get_number(first, "begin_offset") == SPOOL_HEADER_SIZE &&
+		  json_object_get_number(first, "end_offset") == end &&
+		  strcmp(json_object_get_string(first, "final_lsn"), "0/100") == 0 &&
+		  strcmp(json_object_get_string(first, "end_lsn"), "0/130") == 0 &&
+		  json_object_get_string(first, "commit_time") != NULL &&
+		  json_object_get_number(second, "seq") == 2 &&
+		  json_object_get_number(second, "begin_offset") == end &&
+		  strcmp(json_object_get_string(second, "end_lsn"), "0/230") == 0,
+		  "pgcopydb list spool --json prints each index record with its segment, sequence number, xid, changes, offsets, LSNs and commit time");
+	json_value_free(js);
+
+	sformat(args, sizeof(args), "list spool --dir %s", top);
+	output = made ? run_pgcopydb(binary, args, &status) : "";
+
+	check(made && status == 0 && count(output, "\n") == 3 &&
+		  count(output, "0000000000000001 |") == 2 && strstr(output, "0/230") != NULL,
+		  "pgcopydb list spool prints a header and one line per index record");
+
+	char idx[MAXPGPATH];
+
+	made = made && flip_byte(spool_file(idx, cdc, 1, ".idx"), 10);
+	output = made ? run_pgcopydb(binary, args, &status) : "";
+	check(made && status != 0, "pgcopydb list spool fails on a damaged index record");
+
+	sformat(args, sizeof(args), "list spool --dir %s --bogus", top);
+	output = made ? run_pgcopydb(binary, args, &status) : "";
+	check(made && status != 0 && strstr(output, "Segment") == NULL,
+		  "pgcopydb list spool refuses an unknown option");
+
+	sformat(top, sizeof(top), "%s/unspooled", dir);
+	sformat(args, sizeof(args), "list spool --dir %s", top);
+	output = mkdir(top, 0700) == 0 ? run_pgcopydb(binary, args, &status) : "";
+	check(status != 0 && strstr(output, "Segment") == NULL,
+		  "pgcopydb list spool fails on a work directory without a spool");
+}
+
+
 int
 main(int argc, char **argv)
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
-	if (argc != 2)
+	if (argc != 3)
 	{
-		printf("usage: spool-format <directory on a tmpfs of one page>\n");
+		printf("usage: spool-format <directory on a tmpfs of one page> <pgcopydb>\n");
 		return 2;
 	}
 
@@ -3918,6 +4015,7 @@ main(int argc, char **argv)
 	test_start_failures(dir);
 	test_reader(dir);
 	test_reader_failures(dir);
+	test_list_spool(dir, argv[2]);
 	test_disk_full(argv[1]);
 	test_relation_log_full(argv[1]);
 

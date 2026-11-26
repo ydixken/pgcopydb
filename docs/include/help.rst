@@ -53,6 +53,7 @@
        depends      List all the dependencies to filter-out
        schema       List the schema to migrate, formatted in JSON
        progress     List the progress
+       spool        List the transactions of the raw spool
    
      pgcopydb stream
        setup     Setup source and target systems for logical decoding
