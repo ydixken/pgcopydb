@@ -88,6 +88,11 @@ sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
   > /tmp/stmt-actual.sql
 diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
 
+# pin the statement text and transaction shape that the SQLite path applies
+. /var/lib/postgres/spool-probe.sh
+spool_apply_shape > /tmp/apply-actual.sql
+diff /usr/src/pgcopydb/apply.sql /tmp/apply-actual.sql
+
 sqlite3 ${REPLAYDB} "select count(*) as replay_rows from replay;"
 
 #

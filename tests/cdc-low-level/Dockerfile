@@ -6,6 +6,7 @@ COPY ./dml.sql dml.sql
 COPY ./ddl.sql ddl.sql
 COPY ./pipeline-deadlock.sql pipeline-deadlock.sql
 COPY ./stmt.sql stmt.sql
+COPY ./apply.sql apply.sql
 
 USER docker
 CMD ["/usr/src/pgcopydb/copydb.sh"]
