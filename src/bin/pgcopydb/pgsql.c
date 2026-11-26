@@ -5077,34 +5077,6 @@ pgsql_replication_origin_session_setup(PGSQL *pgsql, char *nodeName)
 
 
 /*
- * pgsql_replication_origin_xact_setup calls pg_replication_origin_xact_setup().
- */
-bool
-pgsql_replication_origin_xact_setup(PGSQL *pgsql,
-									char *origin_lsn,
-									char *origin_timestamp)
-{
-	const char *sql = "select pg_replication_origin_xact_setup($1, $2)";
-	int paramCount = 2;
-	Oid paramTypes[2] = { LSNOID, TIMESTAMPTZOID };
-	const char *paramValues[2] = { origin_lsn, origin_timestamp };
-
-	if (!pgsql_execute_with_params(pgsql, sql,
-								   paramCount, paramTypes, paramValues,
-								   NULL, NULL))
-	{
-		log_error("Failed to setup replication origin transaction at "
-				  "origin LSN %s and origin timestamp \"%s\"",
-				  origin_lsn,
-				  origin_timestamp);
-		return false;
-	}
-
-	return true;
-}
-
-
-/*
  * pgsql_replication_origin_xact_commit commits the open transaction with the
  * origin progress at origin_lsn. Since Postgres 16 an abort after the setup
  * advances the origin too, so the setup and the COMMIT go in one simple-query

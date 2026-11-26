@@ -2807,25 +2807,15 @@ stream_apply_sql(StreamApplyContext *context,
 				? context->previousLSN
 				: metadata->lsn;
 
-			char lsn[PG_LSN_MAXLENGTH] = { 0 };
-
-			sformat(lsn, sizeof(lsn), "%X/%X",
-					LSN_FORMAT_ARGS(originLSN));
-
 			/*
-			 * An abort after this setup moves the origin no further than the
-			 * COMMIT would, so the pipelined form is safe and stays cheap.
+			 * Commit through stream_apply_commit(), which drains the pipeline
+			 * first. A pipelined setup and COMMIT stay in libpq's output
+			 * buffer until something else syncs the pipeline, and a worker
+			 * that only sees keepalives never does: its target transaction
+			 * then stays open, and its xmin holds back vacuum for the whole
+			 * target database.
 			 */
-			if (!pgsql_replication_origin_xact_setup(applyPgConn,
-													 lsn,
-													 metadata->timestamp))
-			{
-				/* errors have already been logged */
-				return false;
-			}
-
-			/* calling pgsql_commit() would finish the connection, avoid */
-			if (!pgsql_execute(applyPgConn, "COMMIT"))
+			if (!stream_apply_commit(context, originLSN, metadata->timestamp))
 			{
 				/* errors have already been logged */
 				return false;

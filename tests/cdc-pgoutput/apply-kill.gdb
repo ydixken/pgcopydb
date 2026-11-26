@@ -1,8 +1,17 @@
 set pagination off
 set confirm off
 set may-call-functions off
-# a KEEPALIVE commits through pgsql_replication_origin_xact_setup instead
-break pgsql_replication_origin_xact_commit
+python
+class ExpectedCommit(gdb.Breakpoint):
+    """A KEEPALIVE commits here too, with the origin at the last commit."""
+
+    def stop(self):
+        return (gdb.parse_and_eval("origin_lsn").string()
+                == gdb.parse_and_eval("$expected_lsn").string())
+
+
+ExpectedCommit("pgsql_replication_origin_xact_commit")
+end
 run
 delete
 python

@@ -164,6 +164,7 @@ jobs:
           - cdc-wal-workers-fk
           - cdc-wal-workers-resume
           - cdc-wal-workers-idle
+          - cdc-wal-workers-keepalive
           - wal-workers-assign
         exclude:
           # timescaledb uses timescale/timescaledb:latest-pg13 for both source

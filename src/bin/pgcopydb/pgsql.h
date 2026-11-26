@@ -537,10 +537,6 @@ bool pgsql_replication_origin_create(PGSQL *pgsql, char *nodeName);
 bool pgsql_replication_origin_drop(PGSQL *pgsql, char *nodeName);
 bool pgsql_replication_origin_session_setup(PGSQL *pgsql, char *nodeName);
 
-bool pgsql_replication_origin_xact_setup(PGSQL *pgsql,
-										 char *origin_lsn,
-										 char *origin_timestamp);
-
 bool pgsql_replication_origin_xact_commit(PGSQL *pgsql,
 										  char *nodeName,
 										  char *origin_lsn,
