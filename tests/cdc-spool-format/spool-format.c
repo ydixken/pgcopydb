@@ -1472,6 +1472,25 @@ test_rotation(const char *dir)
 	check(refused && access(path, F_OK) != 0,
 		  "after a rewind cut synced frames off, rotation waits until the flush has synced the frames written since");
 
+	/* the full block took the frames before the cut to the file, unsynced */
+	refused = new_writer(&other, dir, &header, 50) &&
+			  feed(&other, msgs, lengthof(msgs)) &&
+			  spool_append(&other.segment, blockFill, sizeof(blockFill)) &&
+			  other.segment.size > other.completeSize &&
+			  spool_writer_rewind(&other);
+
+	if (refused)
+	{
+		resetPQExpBuffer(&other.pendingIndex);
+	}
+
+	refused = refused && other.segment.blockLength == 0 &&
+			  spool_writer_rotate_due(&other) && !spool_writer_rotate(&other);
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
+
+	check(refused && access(path, F_OK) != 0,
+		  "after a rewind cut unsynced frames off, rotation waits for a sync of the frames before the cut");
+
 	/* the create uses O_EXCL, so a file left over by an earlier run stops it */
 	struct stat st;
 	bool due = new_writer(&other, dir, &header, 50) &&
