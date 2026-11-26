@@ -2268,6 +2268,27 @@ spool_reader_closed(SpoolReader *reader, uint64_t seq)
 }
 
 
+/* spool_reader_last_segment lists the spool, for its highest segment or 0 */
+static bool
+spool_reader_last_segment(SpoolReader *reader, uint64_t *last)
+{
+	PQExpBufferData segments;
+	PQExpBufferData indexes;
+
+	initPQExpBuffer(&segments);
+	initPQExpBuffer(&indexes);
+
+	bool listed = spool_scan(reader->dirname, &segments, &indexes);
+
+	*last = spool_highest_below(&segments, UINT64_MAX);
+
+	termPQExpBuffer(&segments);
+	termPQExpBuffer(&indexes);
+
+	return listed;
+}
+
+
 /*
  * spool_reader_read reads the next index records of the segment. It stops at
  * an invalid record at the tail of the file, which receive is still writing,
@@ -2422,6 +2443,8 @@ spool_reader_open(SpoolReader *reader, const char *dirname, uint64_t after)
 bool
 spool_reader_next(SpoolReader *reader, bool *found)
 {
+	uint64_t later = 0;         /* the highest segment, at the last scan */
+
 	*found = false;
 
 	for (;;)
@@ -2461,7 +2484,28 @@ spool_reader_next(SpoolReader *reader, bool *found)
 		/* the next segment has its index file once this one is complete */
 		if (!spool_reader_closed(reader, reader->nextSeq))
 		{
-			return true;
+			/* receive creates a later segment only after it wrote the record */
+			if (later > reader->nextSeq)
+			{
+				log_error("Spool directory \"%s\" holds no index record of "
+						  "sequence number %" PRIu64 ", and segment %016" PRIX64
+						  " after it exists",
+						  reader->dirname, reader->nextSeq, later);
+				return false;
+			}
+
+			if (!spool_reader_last_segment(reader, &later))
+			{
+				return false;
+			}
+
+			/* with one, read again: receive may have written it since the read */
+			if (later <= reader->nextSeq)
+			{
+				return true;
+			}
+
+			continue;
 		}
 
 		if (!spool_reader_switch(reader, reader->nextSeq))

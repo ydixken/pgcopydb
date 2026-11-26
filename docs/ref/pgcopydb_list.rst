@@ -170,8 +170,8 @@ segment, sequence number, xid, number of changes, begin and end offset in the
 segment, ``final_lsn``, end LSN and commit time.
 
 The command only reads the spool. A record that receive is still writing is
-not listed, and a damaged index record or frame ends the command with an
-error.
+not listed. A damaged index record or frame ends the command with an error,
+and so does a segment without its index file that a later segment follows.
 
 .. include:: ../include/list-spool.rst
 

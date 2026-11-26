@@ -55,6 +55,9 @@ static int fopenFailures = 0;
 /* the same for readdir, which the scan of a spool directory calls */
 static int readdirFailures = 0;
 
+/* runs once, before the next readdir, as receive running between two calls */
+static void (*beforeReaddir)(void) = NULL;
+
 /* 'w', dataStart, walEnd, sendTime, then a pgoutput BEGIN */
 static char xlogdata[SPOOL_XLOGDATA_HEADER_SIZE + 21];
 
@@ -279,6 +282,15 @@ fopen(const char *path, const char *mode)
 static void *
 next_readdir(void *dir, const char *name)
 {
+	void (*hook)(void) = beforeReaddir;
+
+	beforeReaddir = NULL;
+
+	if (hook != NULL)
+	{
+		hook();
+	}
+
 	if (readdirFailures > 0)
 	{
 		readdirFailures--;
@@ -2676,6 +2688,17 @@ kill_writer(SpoolWriter *writer)
 }
 
 
+/* the writer of receive_overtakes */
+static SpoolWriter *racing = NULL;
+
+/* receive indexes its open segment and rotates, between two calls of a reader */
+static void
+receive_overtakes(void)
+{
+	(void) (write_index(racing) && spool_writer_rotate(racing));
+}
+
+
 /* the first two transactions in one indexed segment, as a kill leaves them */
 static bool
 make_spool(SpoolWriter *writer, const char *dir)
@@ -3735,6 +3758,51 @@ test_reader(const char *dir)
 	spool_reader_close(&reader);
 	kill_writer(&writer);
 
+	/* rotated twice, and the index file of the middle segment lost */
+	made = new_writer(&writer, dir, &spoolHeader, 50) &&
+		   feed(&writer, firstTxn, lengthof(firstTxn)) &&
+		   feed(&writer, secondTxn, lengthof(secondTxn)) &&
+		   write_index(&writer) && spool_writer_rotate(&writer) &&
+		   feed(&writer, thirdTxn, lengthof(thirdTxn)) && write_index(&writer) &&
+		   spool_writer_rotate(&writer);
+	kill_writer(&writer);
+	made = made && unlink(spool_file(idx, writer.dirname, 7, ".idx")) == 0 &&
+		   spool_reader_open(&reader, writer.dirname, 0) &&
+		   next_holds(&reader, &context, firstTxn, lengthof(firstTxn)) &&
+		   next_holds(&reader, &context, secondTxn, lengthof(secondTxn));
+	sformat(line, sizeof(line),
+			"Spool directory \"%s\" holds no index record of sequence number 7, "
+			"and segment 0000000000000008 after it exists", writer.dirname);
+	mark = log_mark();
+	check(made && !spool_reader_next(&reader, &found) &&
+		  one_line(logged_since(mark), " ERROR ", line),
+		  "a segment without its index file before a later segment fails the reader with an ERROR line, and the reader does not wait");
+	spool_reader_close(&reader);
+
+	/* receive indexes the next segment and rotates while the reader looks */
+	made = new_writer(&writer, dir, &spoolHeader, 50) &&
+		   feed(&writer, firstTxn, lengthof(firstTxn)) &&
+		   feed(&writer, secondTxn, lengthof(secondTxn)) &&
+		   write_index(&writer) && spool_writer_rotate(&writer) &&
+		   feed(&writer, thirdTxn, lengthof(thirdTxn)) &&
+		   spool_sync(&writer.segment) &&
+		   spool_reader_open(&reader, writer.dirname, 0) &&
+		   next_holds(&reader, &context, firstTxn, lengthof(firstTxn)) &&
+		   next_holds(&reader, &context, secondTxn, lengthof(secondTxn));
+	racing = &writer;
+	beforeReaddir = receive_overtakes;
+
+	bool overtaken = made && next_holds(&reader, &context, thirdTxn, lengthof(
+											thirdTxn)) &&
+					 beforeReaddir == NULL;
+
+	beforeReaddir = NULL;
+	check(overtaken &&
+		  file_size(spool_file(seg, writer.dirname, 8, ".seg")) == SPOOL_HEADER_SIZE,
+		  "a reader that finds a later segment while it waits reads the index again, which receive may have written since its read");
+	spool_reader_close(&reader);
+	kill_writer(&writer);
+
 	sformat(name, sizeof(name), "%s/early", dir);
 	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 0) &&
 		   spool_reader_open(&reader, name, 0);
@@ -3929,6 +3997,23 @@ test_reader_failures(const char *dir)
 
 	readdirFailures = 0;
 	check(made && injected && !opened, "a reader that cannot list its directory fails");
+	spool_reader_close(&reader);
+
+	/* the reader waits at a segment without its index file, and looks for later ones */
+	made = make_rotated(&writer, dir, false) &&
+		   spool_reader_open(&reader, writer.dirname, 0) &&
+		   next_holds(&reader, &context, firstTxn, lengthof(firstTxn)) &&
+		   next_holds(&reader, &context, secondTxn, lengthof(secondTxn));
+	sformat(line, sizeof(line), "Failed to read spool directory \"%s\"", writer.dirname);
+	mark = log_mark();
+	readdirFailures = 1;
+
+	bool waited = made && spool_reader_next(&reader, &found);
+
+	injected = readdirFailures == 0;
+	readdirFailures = 0;
+	check(made && injected && !waited && one_line(logged_since(mark), " ERROR ", line),
+		  "a reader that cannot list its directory while it waits fails with an ERROR line");
 	spool_reader_close(&reader);
 
 	made = make_spool(&writer, dir) && spool_reader_open(&reader, writer.dirname, 0);

@@ -1,0 +1,15 @@
+Mutant: a reader fails at once on a later segment, without the read again that receive may have overtaken. Must fail: a reader that finds a later segment while it waits reads the index again, which receive may have written since its read.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2505,7 +2505,8 @@
+ 				return true;
+ 			}
+ 
+-			continue;
++			log_error("Spool directory \"%s\" holds a later segment", reader->dirname);
++			return false;
+ 		}
+ 
+ 		if (!spool_reader_switch(reader, reader->nextSeq))
