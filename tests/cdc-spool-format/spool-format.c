@@ -3368,6 +3368,22 @@ test_start_failures(const char *dir)
 		  one_line(logged_since(mark), " ERROR ", "Failed to read spool file"),
 		  "a start that cannot read the last index record before a removed last segment fails with an ERROR line");
 
+	/* a header that could not be read would look torn, and a new spool restarts */
+	sformat(line, sizeof(line), "%s/unreadheader", dir);
+	spool_file(files[0], line, SPOOL_FIRST_SEQ, ".seg");
+	made = mkdir(line, 0700) == 0 && spool_writer_open(&opened, line, 7, 2, 0);
+	kill_writer(&opened);
+	mark = log_mark();
+	preadFailAt = 1;
+	started = made && spool_writer_open(&opened, line, 7, 2, 0);
+	injected = preadFailAt == 0;
+	preadFailAt = 0;
+
+	check(made && injected && !started &&
+		  one_line(logged_since(mark), " ERROR ", "Failed to read spool file") &&
+		  file_size(files[0]) == SPOOL_HEADER_SIZE,
+		  "a start that cannot read the header of the only segment of a new spool fails and keeps it");
+
 	/* with index records, and without one, which proves no length of the log synced */
 	ok = true;
 
