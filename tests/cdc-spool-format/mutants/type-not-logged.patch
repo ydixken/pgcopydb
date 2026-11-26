@@ -1,0 +1,14 @@
+Mutant: TYPE messages are not logged. Must fail: a TYPE and a RELATION with the same OID each keep their last message.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1317,7 +1317,7 @@
+ 		return false;
+ 	}
+ 
+-	if ((type == 'R' || type == 'Y') &&
++	if (type == 'R' &&
+ 		!spool_writer_log_relation(writer, message, length, type, lsn))
+ 	{
+ 		return false;

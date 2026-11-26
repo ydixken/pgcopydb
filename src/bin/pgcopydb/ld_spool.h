@@ -1,7 +1,7 @@
 /*
  * src/bin/pgcopydb/ld_spool.h
  *	 The raw spool of performance mode: segment files of checksummed frames,
- *	 and the index of the transactions they hold.
+ *	 the index of the transactions they hold, and the relation log.
  *	 Every integer of the format is big-endian.
  */
 
@@ -65,10 +65,11 @@ typedef enum
 #define SPOOL_BLOCK_SIZE (1024 * 1024)
 
 /*
- * A segment file open for appending. A failed create, write, sync, or truncate
- * in a rewind, is final: it closes the file and sets fd to -1, and later calls
- * refuse the segment, as they refuse one that no create opened. Only the
- * refusal of a message that the format does not hold leaves it open.
+ * A spool file open for appending: a segment, or the relation log. A failed
+ * create, write, sync, or truncate in a rewind, is final: it closes the file
+ * and sets fd to -1, and later calls refuse it, as they refuse one that was
+ * never opened. Only the refusal of a message that the format does not hold
+ * leaves it open.
  */
 typedef struct SpoolSegment
 {
@@ -98,6 +99,60 @@ typedef struct SpoolIndexRecord
 	uint64_t endLSN;            /* from COMMIT: c(T) */
 	uint64_t commitTime;        /* from COMMIT, a TimestampTz */
 } SpoolIndexRecord;
+
+/*
+ * A relation log record: the position seq (offset 0) and changes (8), the
+ * length of the message (16), the RELATION or TYPE message from its type byte,
+ * and the CRC-32C of all the bytes before it.
+ */
+#define SPOOL_RELATION_LOG "relation.log"
+#define SPOOL_RELATION_HEADER_SIZE 20
+#define SPOOL_RELATION_RECORD_SIZE(length) ((uint64_t) (length) + 24)
+
+typedef struct SpoolRelationRecord
+{
+	uint64_t seq;               /* that the open or next transaction gets */
+	uint64_t changes;           /* change frames before it in that transaction */
+	const char *message;        /* points into the decoded bytes */
+	uint32_t length;
+} SpoolRelationRecord;
+
+/* the last message logged for one relation or type */
+typedef struct SpoolRelationLast
+{
+	uint64_t key;               /* type byte and OID */
+	PQExpBufferData message;
+} SpoolRelationLast;
+
+typedef struct SpoolRelationEntry
+{
+	uint64_t seq;
+	uint64_t changes;
+	uint64_t offset;            /* of the message in the bytes of the cursor */
+	uint32_t length;
+	bool applied;
+} SpoolRelationEntry;
+
+/*
+ * A reader of the relation log. A record can follow one with a higher
+ * position, after a transaction was cut off and sent again, so the cursor
+ * applies records by position and keeps the last one in log order.
+ */
+typedef struct SpoolRelationCursor
+{
+	char filename[MAXPGPATH];
+	char *bytes;                /* the log as read */
+	uint64_t size;              /* up to the end of its last whole record */
+	uint64_t tail;              /* bytes read after that, of a record cut off */
+	PQExpBufferData entries;    /* SpoolRelationEntry, in log order */
+	int count;
+
+	/* the lowest position of a record not applied yet */
+	uint64_t pendingSeq;
+	uint64_t pendingChanges;
+} SpoolRelationCursor;
+
+struct StreamContext;
 
 typedef enum
 {
@@ -129,6 +184,9 @@ typedef struct SpoolWriter
 	SpoolIndexRecord txn;       /* of the open transaction */
 	PQExpBufferData held;       /* messages, each after its 4-byte length */
 	PQExpBufferData pendingIndex;   /* encoded records */
+
+	SpoolSegment relationLog;
+	PQExpBufferData lasts;      /* SpoolRelationLast, one per relation or type */
 } SpoolWriter;
 
 uint32_t spool_crc32c(const char *data, size_t length);
@@ -154,5 +212,15 @@ bool spool_writer_message(SpoolWriter *writer, const char *message,
 bool spool_writer_rewind(SpoolWriter *writer);
 bool spool_writer_rotate_due(const SpoolWriter *writer);
 bool spool_writer_rotate(SpoolWriter *writer);
+
+SpoolFrameStatus spool_relation_decode(const char *buf, uint64_t size,
+									   SpoolRelationRecord *record);
+
+bool spool_relation_cursor_open(SpoolRelationCursor *cursor, const char *dirname);
+bool spool_relation_cursor_read(SpoolRelationCursor *cursor);
+bool spool_relation_cursor_advance(SpoolRelationCursor *cursor,
+								   uint64_t seq, uint64_t changes,
+								   struct StreamContext *context);
+void spool_relation_cursor_close(SpoolRelationCursor *cursor);
 
 #endif /* LD_SPOOL_H */

@@ -1,0 +1,14 @@
+Mutant: A relation log message needs no room for its OID. Must fail: a relation log record too short for an OID is invalid; a RELATION too short for its OID is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -568,7 +568,7 @@
+ static bool
+ spool_relation_valid(const char *message, uint32_t length)
+ {
+-	return length >= 5 && (message[0] == 'R' || message[0] == 'Y');
++	return length >= 1 && (message[0] == 'R' || message[0] == 'Y');
+ }
+ 
+ 

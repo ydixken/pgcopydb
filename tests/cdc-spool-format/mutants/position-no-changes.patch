@@ -1,0 +1,14 @@
+Mutant: A record carries no change count. Must fail: a RELATION is logged unchanged, with the sequence number of its transaction and the count of changes before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1030,7 +1030,7 @@
+ 
+ 	/* in a transaction sent again, spool_writer_begin reset the count to 0 */
+ 	spool_put_u64(head, writer->nextSeq);
+-	spool_put_u64(head + 8, writer->txn.changes);
++	spool_put_u64(head + 8, 0);
+ 	spool_put_u32(head + 16, bodyLength);
+ 	spool_put_u32(crcBytes, spool_relation_crc(head, body, bodyLength));
+ 

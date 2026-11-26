@@ -1,0 +1,14 @@
+Mutant: A writer starts without the definitions it could not keep in memory. Must fail: a writer that cannot keep the definitions of its relation log in memory fails.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -980,7 +980,7 @@
+ 	{
+ 		SpoolRelationEntry *entry = spool_relation_entry(&cursor, i);
+ 
+-		opened = spool_relation_remember(writer, cursor.bytes + entry->offset,
++		(void) spool_relation_remember(writer, cursor.bytes + entry->offset,
+ 										 entry->length);
+ 	}
+ 

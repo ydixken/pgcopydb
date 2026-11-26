@@ -1,0 +1,14 @@
+Mutant: A writer starts without its relation log when the open fails. Must fail: a writer whose relation log cannot be opened fails and closes its segment.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -963,7 +963,7 @@
+ 
+ 	if (!spool_file_open(log, O_WRONLY | O_CREAT | O_APPEND))
+ 	{
+-		return false;
++		return true;
+ 	}
+ 
+ 	bool opened = spool_relation_cursor_open(&cursor, writer->dirname);

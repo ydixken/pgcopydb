@@ -106,6 +106,8 @@ bool parsePgoutputMessage(struct StreamContext *context,
 						  struct DatabaseCatalog *outputDB,
 						  int64_t outputId);
 void free_pgoutput_message(PgoutputMessage *msg);
+bool pgoutput_replace_relation(struct StreamContext *context,
+							   const char *buf, int bufLen);
 
 uint32_t pgout_u32(const char *buf, int *pos, int bufLen);
 uint64_t pgout_u64(const char *buf, int *pos, int bufLen);

@@ -1,0 +1,19 @@
+Mutant: A read stops at a damaged record as at a record still arriving. Must fail: a damaged record fails the cursor with an ERROR line that names the file and the offset.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -779,13 +779,6 @@
+ 	cursor->size = offset;
+ 	cursor->tail = (uint64_t) fileSize - offset;
+ 	spool_relation_pending(cursor);
+-
+-	if (status == SPOOL_FRAME_BAD)
+-	{
+-		log_error("Spool file \"%s\" holds no valid relation log record "
+-				  "at offset %" PRIu64, cursor->filename, offset);
+-		return false;
+-	}
+ 
+ 	return kept;
+ }

@@ -1,0 +1,14 @@
+Mutant: The cursor reads a relation log name cut to fit. Must fail: a cursor whose relation log name does not fit fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -696,7 +696,7 @@
+ 	initPQExpBuffer(&cursor->entries);
+ 
+ 	if (sformat(cursor->filename, sizeof(cursor->filename),
+-				"%s/" SPOOL_RELATION_LOG, dirname) >= (int) sizeof(cursor->filename))
++				"%s/" SPOOL_RELATION_LOG, dirname) < 0)
+ 	{
+ 		log_error("Spool file name \"%s/" SPOOL_RELATION_LOG "\" is too long",
+ 				  dirname);

@@ -1,0 +1,14 @@
+Mutant: A read does not report the bytes of a record cut off at the end. Must fail: a record cut off at the end of the log is not read; a writer refuses a relation log that ends inside a record, and closes its files.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -777,7 +777,7 @@
+ 	}
+ 
+ 	cursor->size = offset;
+-	cursor->tail = (uint64_t) fileSize - offset;
++	cursor->tail = 0;
+ 	spool_relation_pending(cursor);
+ 
+ 	if (status == SPOOL_FRAME_BAD)

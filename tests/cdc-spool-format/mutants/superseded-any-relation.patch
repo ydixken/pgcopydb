@@ -1,0 +1,16 @@
+Mutant: A later record of another relation hides a record. Must fail: a record of another relation logged after a record does not hide it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -803,9 +803,7 @@
+ 	{
+ 		SpoolRelationEntry *later = spool_relation_entry(cursor, j);
+ 
+-		if (later->applied &&
+-			spool_relation_key(cursor->bytes + later->offset,
+-							   later->length) == key)
++		if (later->applied)
+ 		{
+ 			return true;
+ 		}

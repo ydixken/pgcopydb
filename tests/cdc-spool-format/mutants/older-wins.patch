@@ -1,0 +1,14 @@
+Mutant: A record applied late replaces the record logged after it. Must fail: a record logged after one with a higher position stays the last one.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -845,7 +845,7 @@
+ 		entry->applied = true;
+ 
+ 		/* the decoder of 9d8b660 reads no TYPE message */
+-		if (message[0] == 'R' && !spool_relation_superseded(cursor, i) &&
++		if (message[0] == 'R' &&
+ 			!pgoutput_replace_relation(context, message, (int) entry->length))
+ 		{
+ 			/* errors have already been logged */

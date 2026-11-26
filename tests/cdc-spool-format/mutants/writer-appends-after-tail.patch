@@ -1,0 +1,13 @@
+Mutant: A writer appends to a relation log that ends inside a record. Must fail: a writer refuses a relation log that ends inside a record, and closes its files.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -973,7 +973,6 @@
+ 	{
+ 		log_error("Spool file \"%s\" ends inside a record at offset %" PRIu64,
+ 				  log->filename, cursor.size);
+-		opened = false;
+ 	}
+ 
+ 	for (int i = 0; opened && i < cursor.count; i++)

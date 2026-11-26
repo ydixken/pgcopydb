@@ -1,0 +1,22 @@
+Mutant: A read accepts a relation log shorter than what it read before. Must fail: a relation log shorter than what the cursor read is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -724,16 +724,6 @@
+ 	if (!read_file(cursor->filename, &bytes, &fileSize))
+ 	{
+ 		/* errors have already been logged */
+-		return false;
+-	}
+-
+-	/* the records read before point into the bytes up to cursor->size */
+-	if ((uint64_t) fileSize < cursor->size)
+-	{
+-		log_error("Spool file \"%s\" has %" PRIu64 " bytes, and %" PRIu64
+-				  " were read before", cursor->filename, (uint64_t) fileSize,
+-				  cursor->size);
+-		free(bytes);
+ 		return false;
+ 	}
+ 

@@ -1,6 +1,7 @@
 /*
  * The spool format of performance mode: the checksum, the segment header and
- * frame codecs, the writer with its sync order, and the transaction index.
+ * frame codecs, the writer with its sync order, the transaction index, and the
+ * relation log with its cursor.
  */
 #include <dlfcn.h>
 #include <errno.h>
@@ -19,7 +20,11 @@
 
 #include "file_utils.h"
 #include "ld_spool.h"
+#include "ld_stream.h"
 #include "log.h"
+
+/* defaults.h maps realloc to the collector, and the checks replace realloc */
+#undef realloc
 
 static bool failed = false;
 
@@ -34,6 +39,9 @@ static int ftruncateFailures = 0;
 
 /* the same for realloc, which a PQExpBuffer calls to grow */
 static int reallocFailures = 0;
+
+/* the same for fopen, which read_file calls */
+static int fopenFailures = 0;
 
 /* 'w', dataStart, walEnd, sendTime, then a pgoutput BEGIN */
 static char xlogdata[SPOOL_XLOGDATA_HEADER_SIZE + 21];
@@ -114,6 +122,27 @@ realloc(void *ptr, size_t size)
 	}
 
 	return next(ptr, size);
+}
+
+
+FILE *
+fopen(const char *path, const char *mode)
+{
+	static FILE *(*next)(const char *, const char *) = NULL;
+
+	if (fopenFailures > 0)
+	{
+		fopenFailures--;
+		errno = EIO;
+		return NULL;
+	}
+
+	if (next == NULL)
+	{
+		next = (FILE * (*)(const char *, const char *))dlsym(RTLD_NEXT, "fopen");
+	}
+
+	return next(path, mode);
 }
 
 
@@ -440,7 +469,7 @@ test_writer(const char *dir)
 
 	sformat(unopenedPath, sizeof(unopenedPath), "%s/unopened", dir);
 	sformat(refusal, sizeof(refusal),
-			"refusing spool file \"%s\", which spool_segment_create did not open",
+			"refusing spool file \"%s\", which was not opened",
 			unopenedPath);
 
 	SpoolSegment unopened = {
@@ -735,7 +764,7 @@ test_index_record(void)
 /* one spool message as receive hands it to the writer */
 typedef struct Msg
 {
-	char bytes[64];
+	char bytes[128];
 	uint32_t length;
 } Msg;
 
@@ -1602,6 +1631,744 @@ test_closed_segment(const char *dir)
 }
 
 
+/* a pgoutput RELATION of one key column, named by relname */
+static Msg
+relation_msg(uint32_t oid, const char *relname)
+{
+	char body[96] = { 'R' };
+	int n = 1;
+
+	be32(body + n, oid);
+	n += 4;
+	n += sformat(body + n, sizeof(body) - n, "public") + 1;
+	n += sformat(body + n, sizeof(body) - n, "%s", relname) + 1;
+	body[n++] = 'd';
+	body[n++] = 0;
+	body[n++] = 1;
+	body[n++] = 1;
+	n += sformat(body + n, sizeof(body) - n, "id") + 1;
+	be32(body + n, 23);
+	n += 4;
+	be32(body + n, 0xFFFFFFFF);
+	n += 4;
+
+	return xlog(0, body, n);
+}
+
+
+static Msg
+type_msg(uint32_t oid, const char *typname)
+{
+	char body[64] = { 'Y' };
+	int n = 1;
+
+	be32(body + n, oid);
+	n += 4;
+	n += sformat(body + n, sizeof(body) - n, "public") + 1;
+	n += sformat(body + n, sizeof(body) - n, "%s", typname) + 1;
+
+	return xlog(0, body, n);
+}
+
+
+/* a relation log record as the format defines it */
+static uint64_t
+relation_raw(char *buf, uint64_t seq, uint64_t changes, const char *message,
+			 uint32_t length)
+{
+	be64(buf, seq);
+	be64(buf + 8, changes);
+	be32(buf + 16, length);
+	memcpy(buf + 20, message, length);
+	be32(buf + 20 + length, spool_crc32c(buf, 20 + (size_t) length));
+
+	return SPOOL_RELATION_RECORD_SIZE(length);
+}
+
+
+/* the same, of the pgoutput part of msg */
+static uint64_t
+relation_record(char *buf, uint64_t seq, uint64_t changes, const Msg *msg)
+{
+	return relation_raw(buf, seq, changes,
+						msg->bytes + SPOOL_XLOGDATA_HEADER_SIZE,
+						msg->length - SPOOL_XLOGDATA_HEADER_SIZE);
+}
+
+
+typedef struct Logged
+{
+	uint64_t seq;
+	uint64_t changes;
+	Msg msg;
+} Logged;
+
+
+/* syncs the relation log, then compares it with the records of logged */
+static bool
+log_holds(SpoolWriter *writer, const Logged *logged, int n)
+{
+	static char want[16 * 1024];
+	uint64_t wantSize = 0;
+	uint64_t size = 0;
+
+	for (int i = 0; i < n; i++)
+	{
+		wantSize += relation_record(want + wantSize, logged[i].seq,
+									logged[i].changes, &logged[i].msg);
+	}
+
+	char *bytes = spool_sync(&writer->relationLog) ?
+				  slurp(writer->relationLog.filename, &size) : NULL;
+
+	return bytes != NULL && size == wantSize && memcmp(bytes, want, size) == 0;
+}
+
+
+static void
+test_relation_record(void)
+{
+	Msg rel = relation_msg(16384, "a");
+	char buf[256];
+	SpoolRelationRecord record = { 0 };
+	uint32_t length = rel.length - SPOOL_XLOGDATA_HEADER_SIZE;
+	uint64_t size = relation_record(buf, 0x0102030405060708,
+									0x1112131415161718, &rel);
+
+	check(spool_relation_decode(buf, size, &record) == SPOOL_FRAME_OK &&
+		  record.seq == 0x0102030405060708 &&
+		  record.changes == 0x1112131415161718 && record.length == length &&
+		  record.message == buf + SPOOL_RELATION_HEADER_SIZE &&
+		  memcmp(record.message, rel.bytes + SPOOL_XLOGDATA_HEADER_SIZE,
+				 length) == 0,
+		  "a relation log record decodes to its position and its message");
+
+	/* the bytes after the cut are 0xFF, so a read past it reads a bad length */
+	static char cutBuf[256];
+	bool ok = true;
+
+	for (uint64_t cut = 0; cut < size; cut++)
+	{
+		memset(cutBuf, 0xFF, sizeof(cutBuf));
+		memcpy(cutBuf, buf, cut);
+		ok = ok && spool_relation_decode(cutBuf, cut, &record) == SPOOL_FRAME_SHORT;
+	}
+	check(ok, "a relation log record cut at any byte is short");
+
+	ok = true;
+
+	for (uint64_t bit = 0; bit < size * 8; bit++)
+	{
+		buf[bit / 8] ^= (char) (1 << (bit % 8));
+		ok = ok && spool_relation_decode(buf, size, &record) != SPOOL_FRAME_OK;
+		buf[bit / 8] ^= (char) (1 << (bit % 8));
+	}
+	check(ok, "a relation log record with any one bit flipped is not valid");
+
+	be32(buf + 16, SPOOL_MESSAGE_MAX + 1);
+	check(spool_relation_decode(buf, size, &record) == SPOOL_FRAME_BAD,
+		  "a relation log record longer than any message is invalid, not short");
+
+	Msg other = rel;
+
+	other.bytes[SPOOL_XLOGDATA_HEADER_SIZE] = 'I';
+	size = relation_record(buf, 1, 0, &other);
+	check(spool_relation_decode(buf, size, &record) == SPOOL_FRAME_BAD,
+		  "a relation log record of another message type is invalid");
+
+	other = rel;
+	other.length = SPOOL_XLOGDATA_HEADER_SIZE + 4;
+	size = relation_record(buf, 1, 0, &other);
+	check(spool_relation_decode(buf, size, &record) == SPOOL_FRAME_BAD,
+		  "a relation log record too short for an OID is invalid");
+}
+
+
+static void
+test_relation_log(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0xB000, .lastEndLSN = 0xB030
+	};
+	SpoolWriter writer = { 0 };
+	SpoolWriter other = { 0 };
+	Msg relA = relation_msg(16384, "a");
+	Msg relB = relation_msg(16384, "b");
+	Msg relOther = relation_msg(16385, "a");
+	Msg typeA = type_msg(16384, "a");
+	Msg longer = relA;
+
+	longer.bytes[longer.length++] = 'x';
+
+	/* the records that the relation log holds once the checks below ran */
+	Logged logged[] = {
+		{ 5, 2, relA },
+		{ 7, 0, relB },
+		{ 8, 0, relA },
+		{ 8, 0, typeA },
+		{ 9, 0, relOther },
+		{ 10, 1, longer },
+		{ 11, 0, relB }
+	};
+
+	Msg first[] = {
+		begin_msg(0xB110, 0xB100, 950),
+		other_msg(0xB110, 'I'),
+		other_msg(0xB120, 'U'),
+		relA,
+		other_msg(0xB130, 'I'),
+		commit_msg(0xB150, 0xB100, 0xB150, 50)
+	};
+
+	bool fed = new_writer(&writer, dir, &header, 0) &&
+			   feed(&writer, first, lengthof(first));
+
+	check(fed && log_holds(&writer, logged, 1),
+		  "a RELATION is logged unchanged, with the sequence number of its transaction and the count of changes before it");
+
+	Msg same[] = {
+		begin_msg(0xB210, 0xB200, 951),
+		relA,
+		other_msg(0xB210, 'I'),
+		commit_msg(0xB250, 0xB200, 0xB250, 51)
+	};
+
+	fed = fed && feed(&writer, same, lengthof(same));
+	check(fed && records(&writer) == 2 && log_holds(&writer, logged, 1),
+		  "a RELATION byte-identical to the last one logged for its relation is not logged again");
+
+	Msg changed[] = {
+		begin_msg(0xB310, 0xB300, 952),
+		relB,
+		other_msg(0xB310, 'I'),
+		commit_msg(0xB350, 0xB300, 0xB350, 52)
+	};
+
+	fed = fed && feed(&writer, changed, lengthof(changed));
+	check(fed && records(&writer) == 3 && log_holds(&writer, logged, 2),
+		  "a changed definition of a relation is logged");
+
+	/* sent again after a reconnect, with the definition before the change */
+	uint64_t end = writer.segment.size + writer.segment.blockLength;
+
+	fed = fed && feed(&writer, same, lengthof(same));
+	check(fed && records(&writer) == 3 &&
+		  writer.segment.size + writer.segment.blockLength == end &&
+		  log_holds(&writer, logged, 3),
+		  "a RELATION inside a transaction sent again is logged at the position of the next transaction");
+
+	Msg kinds[] = {
+		begin_msg(0xB410, 0xB400, 953),
+		typeA,
+		relA,
+		other_msg(0xB410, 'I'),
+		commit_msg(0xB450, 0xB400, 0xB450, 53)
+	};
+
+	fed = fed && feed(&writer, kinds, lengthof(kinds));
+	check(fed && log_holds(&writer, logged, 4),
+		  "a TYPE and a RELATION with the same OID each keep their last message");
+
+	Msg oids[] = {
+		begin_msg(0xB510, 0xB500, 954),
+		relOther,
+		relA,
+		other_msg(0xB510, 'I'),
+		commit_msg(0xB550, 0xB500, 0xB550, 54)
+	};
+
+	fed = fed && feed(&writer, oids, lengthof(oids));
+	check(fed && log_holds(&writer, logged, 5),
+		  "two relations keep one last message each");
+
+	Msg extended[] = {
+		begin_msg(0xB610, 0xB600, 955),
+		other_msg(0xB610, 'I'),
+		longer,
+		commit_msg(0xB650, 0xB600, 0xB650, 55)
+	};
+
+	fed = fed && feed(&writer, extended, lengthof(extended));
+	check(fed && log_holds(&writer, logged, 6),
+		  "a RELATION that extends the last one logged for its relation is logged");
+
+	/* a start on the same log, as after a restart */
+	SpoolHeader later = {
+		.firstSeq = 11, .lastFinalLSN = 0xB600, .lastEndLSN = 0xB650
+	};
+	SpoolWriter restarted = { 0 };
+	Msg restart[] = {
+		begin_msg(0xB710, 0xB700, 956),
+		longer,
+		typeA,
+		relOther,
+		relB,
+		other_msg(0xB710, 'I'),
+		commit_msg(0xB750, 0xB700, 0xB750, 56)
+	};
+
+	fed = fed && spool_writer_create(&restarted, writer.dirname, &later, 0) &&
+		  feed(&restarted, restart, lengthof(restart));
+	check(fed && log_holds(&restarted, logged, 7),
+		  "a writer started on a relation log logs only the definitions that differ from the last ones in it");
+
+	struct stat st;
+
+	check(fed && stat(restarted.relationLog.filename, &st) == 0 &&
+		  restarted.relationLog.synced == (uint64_t) st.st_size,
+		  "a writer started on a relation log syncs it at its whole length");
+
+	Msg shortRel = relA;
+
+	shortRel.length = SPOOL_XLOGDATA_HEADER_SIZE + 4;
+	check(new_writer(&other, dir, &header, 0) && feed(&other, first, 1) &&
+		  !feed(&other, &shortRel, 1),
+		  "a RELATION too short for its OID is an error");
+
+	char path[MAXPGPATH];
+	long mark = log_mark();
+	bool created = new_writer(&other, dir, &header, 0);
+	char *text = logged_since(mark);
+
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, other.dirname);
+	check(created && count(text, "Synced spool directory") == 2 &&
+		  stat(path, &st) == 0 && st.st_size == 0,
+		  "a new writer creates an empty relation log and syncs the directory after it");
+
+	/* the closed log refuses the record */
+	fsyncFailures = 1;
+	bool closed = created && !spool_sync(&other.relationLog) &&
+				  other.relationLog.fd == -1;
+	fsyncFailures = 0;
+
+	check(closed && feed(&other, first, 1) && !feed(&other, &relA, 1),
+		  "a RELATION that the closed relation log refuses is an error");
+
+	/* the list of last messages grows past the 256 bytes it starts with */
+	fed = new_writer(&other, dir, &header, 0) && feed(&other, first, 1);
+	reallocFailures = 1;
+	bool kept = fed;
+
+	for (uint32_t oid = 20000; kept && oid < 20020; oid++)
+	{
+		Msg rel = relation_msg(oid, "a");
+
+		kept = feed(&other, &rel, 1);
+	}
+
+	bool injected = reallocFailures == 0;
+
+	reallocFailures = 0;
+
+	check(fed && injected && !kept,
+		  "a definition that cannot be kept in memory is an error");
+
+	/* above the 256 bytes that a new PQExpBuffer holds */
+	static char big[SPOOL_XLOGDATA_HEADER_SIZE + 400] = { 'w' };
+
+	big[SPOOL_XLOGDATA_HEADER_SIZE] = 'R';
+	be32(big + SPOOL_XLOGDATA_HEADER_SIZE + 1, 16384);
+
+	fed = new_writer(&other, dir, &header, 0) && feed(&other, first, 1) &&
+		  feed(&other, &relA, 1);
+	reallocFailures = 1;
+	kept = fed && spool_writer_message(&other, big, sizeof(big));
+	reallocFailures = 0;
+
+	check(fed && !kept,
+		  "a changed definition that cannot be kept in memory is an error");
+
+	/* a log that ends inside a record, which the start cut removes first */
+	char name[MAXPGPATH];
+	char line[2 * MAXPGPATH];
+	char bytes[256];
+	uint64_t size = relation_record(bytes, 5, 0, &relA);
+	SpoolWriter torn = { 0 };
+	int fd = -1;
+
+	sformat(name, sizeof(name), "%s/torn", dir);
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, name);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" ends inside a record at offset %" PRIu64,
+			path, size);
+
+	bool ready = mkdir(name, 0700) == 0 &&
+				 (fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) >= 0 &&
+				 write(fd, bytes, size + 3) == (ssize_t) (size + 3);
+
+	if (fd >= 0)
+	{
+		(void) close(fd);
+	}
+
+	mark = log_mark();
+	created = ready && spool_writer_create(&torn, name, &header, 0);
+
+	check(ready && !created && one_line(logged_since(mark), " ERROR ", line) &&
+		  torn.segment.fd == -1 && torn.relationLog.fd == -1,
+		  "a writer refuses a relation log that ends inside a record, and closes its files");
+
+	/* zeroes between two records, as a torn write leaves them */
+	SpoolWriter damaged = { 0 };
+
+	memset(bytes + size, 0, 24);
+	size += 24 + relation_record(bytes + size + 24, 7, 0, &relB);
+	sformat(name, sizeof(name), "%s/damaged", dir);
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, name);
+	fd = -1;
+	ready = mkdir(name, 0700) == 0 &&
+			(fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) >= 0 &&
+			write(fd, bytes, size) == (ssize_t) size;
+
+	if (fd >= 0)
+	{
+		(void) close(fd);
+	}
+
+	check(ready && !spool_writer_create(&damaged, name, &header, 0) &&
+		  damaged.segment.fd == -1,
+		  "a writer refuses a damaged relation log");
+
+	/* above the 256 bytes that a new PQExpBuffer holds */
+	static char wide[400];
+	static char wideBody[300] = { 'R' };
+	SpoolWriter oom = { 0 };
+
+	be32(wideBody + 1, 16384);
+	size = relation_raw(wide, 5, 0, wideBody, sizeof(wideBody));
+	sformat(name, sizeof(name), "%s/oom", dir);
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, name);
+	fd = -1;
+	ready = mkdir(name, 0700) == 0 &&
+			(fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) >= 0 &&
+			write(fd, wide, size) == (ssize_t) size;
+
+	if (fd >= 0)
+	{
+		(void) close(fd);
+	}
+
+	reallocFailures = 1;
+	created = ready && spool_writer_create(&oom, name, &header, 0);
+	injected = reallocFailures == 0;
+	reallocFailures = 0;
+
+	check(ready && injected && !created,
+		  "a writer that cannot keep the definitions of its relation log in memory fails");
+
+	SpoolWriter unread = { 0 };
+
+	fopenFailures = 1;
+	created = new_writer(&unread, dir, &header, 0);
+	injected = fopenFailures == 0;
+	fopenFailures = 0;
+
+	check(injected && !created && unread.segment.fd == -1,
+		  "a writer that cannot read its relation log fails");
+
+	SpoolWriter blocked = { 0 };
+
+	sformat(name, sizeof(name), "%s/blocked", dir);
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, name);
+	sformat(line, sizeof(line),
+			"Failed to open spool file \"%s\": Is a directory", path);
+
+	ready = mkdir(name, 0700) == 0 && mkdir(path, 0700) == 0;
+	mark = log_mark();
+	created = ready && spool_writer_create(&blocked, name, &header, 0);
+
+	check(ready && !created && one_line(logged_since(mark), " ERROR ", line) &&
+		  blocked.segment.fd == -1 && blocked.held.data == NULL,
+		  "a writer whose relation log cannot be opened fails and closes its segment");
+}
+
+
+/* a directory under dir that holds a relation log of the given bytes */
+static bool
+make_log(char *name, const char *dir, const char *bytes, uint64_t size)
+{
+	static int logs = 0;
+	char path[MAXPGPATH];
+
+	sformat(name, MAXPGPATH, "%s/cursor%d", dir, ++logs);
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, name);
+
+	int fd = mkdir(name, 0700) == 0 ?
+			 open(path, O_WRONLY | O_CREAT | O_EXCL, 0644) : -1;
+	bool written = fd >= 0 && write(fd, bytes, size) == (ssize_t) size;
+
+	if (fd >= 0)
+	{
+		(void) close(fd);
+	}
+
+	return written;
+}
+
+
+/* the name that the relation cache holds for oid, "" when none */
+static const char *
+cached(StreamContext *context, uint32_t oid)
+{
+	PgoutputRelationCache *rel = NULL;
+
+	HASH_FIND_INT(context->pgoutputRelationCache, &oid, rel);
+
+	return rel != NULL ? rel->relname : "";
+}
+
+
+static bool
+advanced_to(SpoolRelationCursor *cursor, uint64_t seq, uint64_t changes,
+			StreamContext *context, const char *relname)
+{
+	return spool_relation_cursor_advance(cursor, seq, changes, context) &&
+		   strcmp(cached(context, 16384), relname) == 0;
+}
+
+
+static void
+test_relation_cursor(const char *dir)
+{
+	static char log[4096];
+	char name[MAXPGPATH];
+	char path[MAXPGPATH];
+	Msg a = relation_msg(16384, "a");
+	Msg b = relation_msg(16384, "b");
+	Msg c = relation_msg(16384, "c");
+	StreamContext context = { 0 };
+	SpoolRelationCursor cursor = { 0 };
+	uint64_t size = relation_record(log, 5, 0, &a);
+
+	size += relation_record(log + size, 7, 2, &b);
+	size += relation_record(log + size, 9, 0, &c);
+
+	bool opened = make_log(name, dir, log, size) &&
+				  spool_relation_cursor_open(&cursor, name) && cursor.count == 3;
+
+	check(opened && advanced_to(&cursor, 5, 0, &context, "a") &&
+		  cursor.pendingSeq == 7 && cursor.pendingChanges == 2 &&
+		  advanced_to(&cursor, 7, 1, &context, "a"),
+		  "a record is applied at its own position, and not before it");
+	check(opened && advanced_to(&cursor, 7, 2, &context, "b"),
+		  "a changed definition replaces the cached one at its position");
+	check(opened && advanced_to(&cursor, 8, 100, &context, "b") &&
+		  advanced_to(&cursor, 9, 0, &context, "c") &&
+		  advanced_to(&cursor, 12, 0, &context, "c"),
+		  "a lookup at a position returns the last record at or below it");
+	spool_relation_cursor_close(&cursor);
+
+	/* as after a transaction cut off and sent again */
+	StreamContext resent = { 0 };
+	Msg x = relation_msg(16384, "x");
+	Msg y = relation_msg(16384, "y");
+
+	size = relation_record(log, 5, 3, &x);
+	size += relation_record(log + size, 5, 1, &y);
+	opened = make_log(name, dir, log, size) &&
+			 spool_relation_cursor_open(&cursor, name);
+
+	check(opened && advanced_to(&cursor, 5, 1, &resent, "y"),
+		  "a record logged after one with a higher position is applied at its own position");
+	check(opened && advanced_to(&cursor, 5, 3, &resent, "y"),
+		  "a record logged after one with a higher position stays the last one");
+	spool_relation_cursor_close(&cursor);
+
+	StreamContext typed = { 0 };
+	Msg t = type_msg(16384, "t");
+
+	size = relation_record(log, 5, 0, &a);
+	size += relation_record(log + size, 5, 1, &t);
+	opened = make_log(name, dir, log, size) &&
+			 spool_relation_cursor_open(&cursor, name);
+
+	check(opened && advanced_to(&cursor, 5, 1, &typed, "a"),
+		  "a TYPE record leaves the relation cache as it is");
+	spool_relation_cursor_close(&cursor);
+
+	StreamContext two = { 0 };
+	Msg z = relation_msg(16385, "z");
+
+	size = relation_record(log, 5, 3, &a);
+	size += relation_record(log + size, 5, 1, &z);
+	opened = make_log(name, dir, log, size) &&
+			 spool_relation_cursor_open(&cursor, name);
+
+	check(opened && advanced_to(&cursor, 5, 1, &two, "") &&
+		  advanced_to(&cursor, 5, 3, &two, "a"),
+		  "a record of another relation logged after a record does not hide it");
+	spool_relation_cursor_close(&cursor);
+
+	/* a mark in the cached entry shows whether a later scan replaced it */
+	StreamContext marked = { 0 };
+	PgoutputRelationCache *rel = NULL;
+	uint32_t markOid = 16384;
+
+	size = relation_record(log, 5, 0, &a);
+	size += relation_record(log + size, 6, 0, &z);
+	opened = make_log(name, dir, log, size) &&
+			 spool_relation_cursor_open(&cursor, name) &&
+			 advanced_to(&cursor, 5, 0, &marked, "a");
+
+	HASH_FIND_INT(marked.pgoutputRelationCache, &markOid, rel);
+
+	if (rel != NULL)
+	{
+		sformat(rel->relname, sizeof(rel->relname), "mark");
+	}
+
+	check(opened && rel != NULL && advanced_to(&cursor, 6, 0, &marked, "mark"),
+		  "a record already applied is not applied again");
+	spool_relation_cursor_close(&cursor);
+
+	StreamContext broken = { 0 };
+	Msg unparsed = a;
+
+	unparsed.length = SPOOL_XLOGDATA_HEADER_SIZE + 5;
+	size = relation_record(log, 5, 0, &unparsed);
+	opened = make_log(name, dir, log, size) &&
+			 spool_relation_cursor_open(&cursor, name);
+
+	check(opened && !spool_relation_cursor_advance(&cursor, 5, 0, &broken),
+		  "a RELATION record that does not parse fails the cursor");
+	spool_relation_cursor_close(&cursor);
+
+	/* the log ends inside the second record, which arrives later */
+	StreamContext growing = { 0 };
+	uint64_t whole = relation_record(log, 5, 0, &a);
+
+	size = whole + relation_record(log + whole, 7, 0, &b);
+	opened = make_log(name, dir, log, whole + 10) &&
+			 spool_relation_cursor_open(&cursor, name);
+
+	check(opened && cursor.count == 1 && cursor.size == whole &&
+		  cursor.tail == 10 && advanced_to(&cursor, 7, 0, &growing, "a"),
+		  "a record cut off at the end of the log is not read");
+
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, name);
+
+	int fd = open(path, O_WRONLY | O_APPEND);
+	ssize_t rest = (ssize_t) (size - whole - 10);
+	bool appended = fd >= 0 && write(fd, log + whole + 10, rest) == rest;
+
+	if (fd >= 0)
+	{
+		(void) close(fd);
+	}
+
+	check(opened && appended && spool_relation_cursor_read(&cursor) &&
+		  cursor.count == 2 && cursor.tail == 0 &&
+		  advanced_to(&cursor, 7, 0, &growing, "b"),
+		  "a record cut off at the end of the log is read once it is whole");
+
+	char line[2 * MAXPGPATH];
+	long mark = log_mark();
+
+	sformat(line, sizeof(line), "Spool file \"%s\" has %" PRIu64 " bytes", path,
+			whole);
+	check(opened && truncate(path, (off_t) whole) == 0 &&
+		  !spool_relation_cursor_read(&cursor) &&
+		  one_line(logged_since(mark), " ERROR ", line),
+		  "a relation log shorter than what the cursor read is an error");
+	spool_relation_cursor_close(&cursor);
+
+	/* zeroes between two records, as a torn write leaves them */
+	size = relation_record(log, 5, 0, &a);
+	memset(log + size, 0, 24);
+	size += 24;
+	size += relation_record(log + size, 7, 0, &b);
+	opened = make_log(name, dir, log, size);
+	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, name);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds no valid relation log record at offset %" PRIu64,
+			path, whole);
+	mark = log_mark();
+
+	check(opened && !spool_relation_cursor_open(&cursor, name) &&
+		  one_line(logged_since(mark), " ERROR ", line),
+		  "a damaged record fails the cursor with an ERROR line that names the file and the offset");
+	spool_relation_cursor_close(&cursor);
+
+	sformat(name, sizeof(name), "%s/nolog", dir);
+	check(mkdir(name, 0700) == 0 && !spool_relation_cursor_open(&cursor, name),
+		  "a cursor on a directory without a relation log fails");
+	spool_relation_cursor_close(&cursor);
+
+	char longDir[MAXPGPATH];
+
+	memset(longDir, 'd', sizeof(longDir));
+	longDir[0] = '/';
+	longDir[MAXPGPATH - 10] = '\0';
+	sformat(line, sizeof(line), "Spool file name \"%s/" SPOOL_RELATION_LOG
+			"\" is too long", longDir);
+	mark = log_mark();
+
+	check(!spool_relation_cursor_open(&cursor, longDir) &&
+		  one_line(logged_since(mark), " ERROR ", line),
+		  "a cursor whose relation log name does not fit fails with an ERROR line");
+	spool_relation_cursor_close(&cursor);
+
+	/* the list of records grows past the 256 bytes it starts with */
+	size = 0;
+
+	for (uint32_t oid = 20000; oid < 20020; oid++)
+	{
+		Msg rel = relation_msg(oid, "a");
+
+		size += relation_record(log + size, 5, 0, &rel);
+	}
+
+	opened = make_log(name, dir, log, size);
+	reallocFailures = 1;
+	bool loaded = opened && spool_relation_cursor_open(&cursor, name);
+	bool injected = reallocFailures == 0;
+
+	reallocFailures = 0;
+
+	check(opened && injected && !loaded,
+		  "a record that cannot be kept in memory fails the cursor");
+	spool_relation_cursor_close(&cursor);
+}
+
+
+/* on the one-page volume, once test_disk_full removed its segment */
+static void
+test_relation_log_full(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0xC000, .lastEndLSN = 0xC030
+	};
+	SpoolWriter writer = { 0 };
+	Msg begin = begin_msg(0xC110, 0xC100, 960);
+	char line[2 * MAXPGPATH];
+
+	/* a RELATION whose record does not fit in the write block */
+	static char huge[SPOOL_XLOGDATA_HEADER_SIZE + SPOOL_BLOCK_SIZE] = { 'w' };
+
+	huge[SPOOL_XLOGDATA_HEADER_SIZE] = 'R';
+	be32(huge + SPOOL_XLOGDATA_HEADER_SIZE + 1, 16384);
+
+	bool fed = new_writer(&writer, dir, &header, 0) && feed(&writer, &begin, 1);
+
+	sformat(line, sizeof(line),
+			"Failed to write to spool file \"%s\": No space left on device",
+			writer.relationLog.filename);
+
+	long mark = log_mark();
+	bool logged = fed && spool_writer_message(&writer, huge, sizeof(huge));
+
+	/* the frame of the RELATION would fill the segment too, so it must not follow */
+	check(fed && !logged && one_line(logged_since(mark), " ERROR ", line) &&
+		  writer.segment.fd >= 0,
+		  "a RELATION that the full volume refuses is an error that names the relation log, and its frame is not appended");
+
+	/* the strace run of run.sh uses the volume again */
+	(void) unlink(writer.segment.filename);
+	(void) unlink(writer.relationLog.filename);
+	(void) rmdir(writer.dirname);
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -1644,7 +2411,11 @@ main(int argc, char **argv)
 	test_out_of_memory(dir);
 	test_rotation(dir);
 	test_closed_segment(dir);
+	test_relation_record();
+	test_relation_log(dir);
+	test_relation_cursor(dir);
 	test_disk_full(argv[1]);
+	test_relation_log_full(argv[1]);
 
 	if (failed)
 	{

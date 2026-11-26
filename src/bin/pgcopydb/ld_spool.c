@@ -1,7 +1,7 @@
 /*
  * src/bin/pgcopydb/ld_spool.c
  *	 The raw spool of performance mode: segment files of checksummed frames,
- *	 and the index of the transactions they hold.
+ *	 the index of the transactions they hold, and the relation log.
  */
 
 #include <errno.h>
@@ -265,8 +265,8 @@ spool_usable(const SpoolSegment *segment)
 {
 	if (segment->fd < 0 || segment->block == NULL)
 	{
-		log_error("BUG: refusing spool file \"%s\", which spool_segment_create "
-				  "did not open, or a failed write, sync or truncate closed",
+		log_error("BUG: refusing spool file \"%s\", which was not opened, "
+				  "or which a failed write, sync or truncate closed",
 				  segment->filename);
 		return false;
 	}
@@ -375,6 +375,31 @@ spool_sync_directory(const char *dirname)
 }
 
 
+/* spool_file_open opens segment->filename with flags, and its write block */
+static bool
+spool_file_open(SpoolSegment *segment, int flags)
+{
+	segment->block = (char *) malloc(SPOOL_BLOCK_SIZE);
+
+	if (segment->block == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	segment->fd = open(segment->filename, flags, 0644);
+
+	if (segment->fd < 0)
+	{
+		log_error("Failed to open spool file \"%s\": %m", segment->filename);
+		spool_fail(segment);
+		return false;
+	}
+
+	return true;
+}
+
+
 /*
  * spool_segment_create creates the segment file of header->firstSeq in
  * dirname, then syncs the header and the directory entry, in that order.
@@ -398,22 +423,9 @@ spool_segment_create(SpoolSegment *segment, const char *dirname,
 		return false;
 	}
 
-	segment->block = (char *) malloc(SPOOL_BLOCK_SIZE);
-
-	if (segment->block == NULL)
-	{
-		log_error(ALLOCATION_FAILED_ERROR);
-		return false;
-	}
-
 	/* a segment that exists may hold acknowledged transactions */
-	segment->fd = open(segment->filename,
-					   O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0644);
-
-	if (segment->fd < 0)
+	if (!spool_file_open(segment, O_WRONLY | O_CREAT | O_EXCL | O_APPEND))
 	{
-		log_error("Failed to create spool file \"%s\": %m", segment->filename);
-		spool_fail(segment);
 		return false;
 	}
 
@@ -550,6 +562,486 @@ spool_end(const SpoolSegment *segment)
 
 
 /*
+ * spool_relation_valid is the rule for a message of the relation log: a
+ * RELATION or TYPE message from its type byte, long enough for its OID.
+ */
+static bool
+spool_relation_valid(const char *message, uint32_t length)
+{
+	return length >= 5 && (message[0] == 'R' || message[0] == 'Y');
+}
+
+
+static uint32_t
+spool_relation_crc(const char *head, const char *message, uint32_t length)
+{
+	pg_crc32c crc;
+
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, head, SPOOL_RELATION_HEADER_SIZE);
+	COMP_CRC32C(crc, message, length);
+	FIN_CRC32C(crc);
+
+	return crc;
+}
+
+
+/* the type byte goes above the OID, so that a TYPE and a RELATION differ */
+static uint64_t
+spool_relation_key(const char *message, uint32_t length)
+{
+	int pos = 1;
+
+	return ((uint64_t) (unsigned char) message[0] << 32) |
+		   pgout_u32(message, &pos, length);
+}
+
+
+/*
+ * spool_relation_decode reads the relation log record at the start of buf.
+ * On SPOOL_FRAME_OK, record->message points into buf.
+ */
+SpoolFrameStatus
+spool_relation_decode(const char *buf, uint64_t size, SpoolRelationRecord *record)
+{
+	int pos = 16;
+
+	if (size < SPOOL_RELATION_HEADER_SIZE)
+	{
+		return SPOOL_FRAME_SHORT;
+	}
+
+	uint32_t length = pgout_u32(buf, &pos, SPOOL_RELATION_HEADER_SIZE);
+
+	/* a length that no message has is damage, not a record still arriving */
+	if (length > SPOOL_MESSAGE_MAX)
+	{
+		return SPOOL_FRAME_BAD;
+	}
+
+	if (size < SPOOL_RELATION_RECORD_SIZE(length))
+	{
+		return SPOOL_FRAME_SHORT;
+	}
+
+	const char *message = buf + SPOOL_RELATION_HEADER_SIZE;
+
+	pos = 0;
+	uint32_t crc = pgout_u32(message + length, &pos, 4);
+
+	if (crc != spool_relation_crc(buf, message, length) ||
+		!spool_relation_valid(message, length))
+	{
+		return SPOOL_FRAME_BAD;
+	}
+
+	pos = 0;
+	record->seq = pgout_u64(buf, &pos, SPOOL_RELATION_HEADER_SIZE);
+	record->changes = pgout_u64(buf, &pos, SPOOL_RELATION_HEADER_SIZE);
+	record->message = message;
+	record->length = length;
+
+	return SPOOL_FRAME_OK;
+}
+
+
+static bool
+spool_position_before(uint64_t seq, uint64_t changes,
+					  uint64_t otherSeq, uint64_t otherChanges)
+{
+	return seq < otherSeq || (seq == otherSeq && changes < otherChanges);
+}
+
+
+static SpoolRelationEntry *
+spool_relation_entry(const SpoolRelationCursor *cursor, int i)
+{
+	return (SpoolRelationEntry *) cursor->entries.data + i;
+}
+
+
+/* the lowest position of a record not applied yet, or the highest of all */
+static void
+spool_relation_pending(SpoolRelationCursor *cursor)
+{
+	cursor->pendingSeq = UINT64_MAX;
+	cursor->pendingChanges = UINT64_MAX;
+
+	for (int i = 0; i < cursor->count; i++)
+	{
+		SpoolRelationEntry *entry = spool_relation_entry(cursor, i);
+
+		if (!entry->applied &&
+			spool_position_before(entry->seq, entry->changes,
+								  cursor->pendingSeq, cursor->pendingChanges))
+		{
+			cursor->pendingSeq = entry->seq;
+			cursor->pendingChanges = entry->changes;
+		}
+	}
+}
+
+
+/*
+ * spool_relation_cursor_open reads the relation log of dirname from its
+ * beginning, as the log is not trimmed.
+ */
+bool
+spool_relation_cursor_open(SpoolRelationCursor *cursor, const char *dirname)
+{
+	*cursor = (SpoolRelationCursor) {
+		0
+	};
+
+	initPQExpBuffer(&cursor->entries);
+
+	if (sformat(cursor->filename, sizeof(cursor->filename),
+				"%s/" SPOOL_RELATION_LOG, dirname) >= (int) sizeof(cursor->filename))
+	{
+		log_error("Spool file name \"%s/" SPOOL_RELATION_LOG "\" is too long",
+				  dirname);
+		return false;
+	}
+
+	return spool_relation_cursor_read(cursor);
+}
+
+
+/*
+ * spool_relation_cursor_read reads the records that receive logged since the
+ * last read. A record cut off at the end is read once it is whole.
+ */
+bool
+spool_relation_cursor_read(SpoolRelationCursor *cursor)
+{
+	char *bytes = NULL;
+	long fileSize = 0;
+
+	/*
+	 * shortcut: reads the whole log each time; read from cursor->size once a
+	 * worker reads the log often.
+	 */
+	if (!read_file(cursor->filename, &bytes, &fileSize))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/* the records read before point into the bytes up to cursor->size */
+	if ((uint64_t) fileSize < cursor->size)
+	{
+		log_error("Spool file \"%s\" has %" PRIu64 " bytes, and %" PRIu64
+				  " were read before", cursor->filename, (uint64_t) fileSize,
+				  cursor->size);
+		free(bytes);
+		return false;
+	}
+
+	free(cursor->bytes);
+	cursor->bytes = bytes;
+
+	uint64_t offset = cursor->size;
+	SpoolFrameStatus status = SPOOL_FRAME_OK;
+	bool kept = true;
+
+	while (offset < (uint64_t) fileSize)
+	{
+		SpoolRelationRecord record = { 0 };
+
+		status = spool_relation_decode(bytes + offset,
+									   (uint64_t) fileSize - offset, &record);
+
+		if (status != SPOOL_FRAME_OK)
+		{
+			break;
+		}
+
+		SpoolRelationEntry entry = {
+			.seq = record.seq,
+			.changes = record.changes,
+			.offset = offset + SPOOL_RELATION_HEADER_SIZE,
+			.length = record.length
+		};
+
+		appendBinaryPQExpBuffer(&cursor->entries, (char *) &entry, sizeof(entry));
+
+		if (PQExpBufferBroken(&cursor->entries))
+		{
+			log_error(ALLOCATION_FAILED_ERROR);
+			kept = false;
+			break;
+		}
+
+		cursor->count++;
+		offset += SPOOL_RELATION_RECORD_SIZE(record.length);
+	}
+
+	cursor->size = offset;
+	cursor->tail = (uint64_t) fileSize - offset;
+	spool_relation_pending(cursor);
+
+	if (status == SPOOL_FRAME_BAD)
+	{
+		log_error("Spool file \"%s\" holds no valid relation log record "
+				  "at offset %" PRIu64, cursor->filename, offset);
+		return false;
+	}
+
+	return kept;
+}
+
+
+/* true when a record after entry i in log order, of its relation, is applied */
+static bool
+spool_relation_superseded(const SpoolRelationCursor *cursor, int i)
+{
+	SpoolRelationEntry *entry = spool_relation_entry(cursor, i);
+	uint64_t key = spool_relation_key(cursor->bytes + entry->offset,
+									  entry->length);
+
+	for (int j = i + 1; j < cursor->count; j++)
+	{
+		SpoolRelationEntry *later = spool_relation_entry(cursor, j);
+
+		if (later->applied &&
+			spool_relation_key(cursor->bytes + later->offset,
+							   later->length) == key)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+/*
+ * spool_relation_cursor_advance applies, before change number changes of
+ * transaction seq, every record at or below that position, so that the
+ * relation cache of context holds the last such record of each relation.
+ */
+bool
+spool_relation_cursor_advance(SpoolRelationCursor *cursor,
+							  uint64_t seq, uint64_t changes,
+							  struct StreamContext *context)
+{
+	if (spool_position_before(seq, changes,
+							  cursor->pendingSeq, cursor->pendingChanges))
+	{
+		return true;
+	}
+
+	for (int i = 0; i < cursor->count; i++)
+	{
+		SpoolRelationEntry *entry = spool_relation_entry(cursor, i);
+		const char *message = cursor->bytes + entry->offset;
+
+		if (entry->applied ||
+			spool_position_before(seq, changes, entry->seq, entry->changes))
+		{
+			continue;
+		}
+
+		entry->applied = true;
+
+		/* the decoder of 9d8b660 reads no TYPE message */
+		if (message[0] == 'R' && !spool_relation_superseded(cursor, i) &&
+			!pgoutput_replace_relation(context, message, (int) entry->length))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+	}
+
+	spool_relation_pending(cursor);
+
+	return true;
+}
+
+
+void
+spool_relation_cursor_close(SpoolRelationCursor *cursor)
+{
+	free(cursor->bytes);
+	termPQExpBuffer(&cursor->entries);
+
+	*cursor = (SpoolRelationCursor) {
+		0
+	};
+}
+
+
+/*
+ * spool_relation_last returns the last message logged for key, or NULL.
+ * shortcut: a linear search, as RELATION messages come at a reconnect or a
+ * definition change; hash the keys if a source with many tables shows it.
+ */
+static SpoolRelationLast *
+spool_relation_last(const SpoolWriter *writer, uint64_t key)
+{
+	SpoolRelationLast *lasts = (SpoolRelationLast *) writer->lasts.data;
+	int count = (int) (writer->lasts.len / sizeof(SpoolRelationLast));
+
+	for (int i = 0; i < count; i++)
+	{
+		if (lasts[i].key == key)
+		{
+			return &lasts[i];
+		}
+	}
+
+	return NULL;
+}
+
+
+/* spool_relation_remember keeps message as the last one of its relation */
+static bool
+spool_relation_remember(SpoolWriter *writer, const char *message, uint32_t length)
+{
+	uint64_t key = spool_relation_key(message, length);
+	SpoolRelationLast *last = spool_relation_last(writer, key);
+
+	if (last == NULL)
+	{
+		SpoolRelationLast added = { .key = key };
+
+		appendBinaryPQExpBuffer(&writer->lasts, (char *) &added, sizeof(added));
+
+		if (PQExpBufferBroken(&writer->lasts))
+		{
+			log_error(ALLOCATION_FAILED_ERROR);
+			return false;
+		}
+
+		last = (SpoolRelationLast *) (writer->lasts.data + writer->lasts.len) - 1;
+		initPQExpBuffer(&last->message);
+	}
+
+	resetPQExpBuffer(&last->message);
+	appendBinaryPQExpBuffer(&last->message, message, length);
+
+	if (PQExpBufferBroken(&last->message))
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	return true;
+}
+
+
+static void
+spool_writer_free_relations(SpoolWriter *writer)
+{
+	SpoolRelationLast *lasts = (SpoolRelationLast *) writer->lasts.data;
+	int count = (int) (writer->lasts.len / sizeof(SpoolRelationLast));
+
+	for (int i = 0; i < count; i++)
+	{
+		termPQExpBuffer(&lasts[i].message);
+	}
+
+	termPQExpBuffer(&writer->lasts);
+	spool_fail(&writer->relationLog);
+}
+
+
+/*
+ * spool_writer_open_relations opens the relation log for appending, keeps the
+ * last message of each relation and type in it, and syncs the directory, so
+ * that the entry of a new log is durable.
+ */
+static bool
+spool_writer_open_relations(SpoolWriter *writer)
+{
+	SpoolSegment *log = &writer->relationLog;
+	SpoolRelationCursor cursor = { 0 };
+
+	/* it fits, as the name of the segment file is longer */
+	sformat(log->filename, sizeof(log->filename), "%s/" SPOOL_RELATION_LOG,
+			writer->dirname);
+
+	if (!spool_file_open(log, O_WRONLY | O_CREAT | O_APPEND))
+	{
+		return false;
+	}
+
+	bool opened = spool_relation_cursor_open(&cursor, writer->dirname);
+
+	/* a record appended after a cut one would never be read */
+	if (opened && cursor.tail > 0)
+	{
+		log_error("Spool file \"%s\" ends inside a record at offset %" PRIu64,
+				  log->filename, cursor.size);
+		opened = false;
+	}
+
+	for (int i = 0; opened && i < cursor.count; i++)
+	{
+		SpoolRelationEntry *entry = spool_relation_entry(&cursor, i);
+
+		opened = spool_relation_remember(writer, cursor.bytes + entry->offset,
+										 entry->length);
+	}
+
+	log->size = cursor.size;
+	spool_relation_cursor_close(&cursor);
+
+	return opened && spool_sync_directory(writer->dirname);
+}
+
+
+/*
+ * spool_writer_log_relation logs a RELATION or TYPE message at the position
+ * of the next change, also inside a transaction sent again, which can carry
+ * the definition that a later one needs. A reconnect sends every definition
+ * again, so a message equal to the last one of its relation is not logged.
+ */
+static bool
+spool_writer_log_relation(SpoolWriter *writer, const char *message,
+						  uint32_t length, char type, uint64_t lsn)
+{
+	SpoolSegment *log = &writer->relationLog;
+	const char *body = message + SPOOL_XLOGDATA_HEADER_SIZE;
+	uint32_t bodyLength = length - SPOOL_XLOGDATA_HEADER_SIZE;
+	char head[SPOOL_RELATION_HEADER_SIZE];
+	char crcBytes[4];
+
+	if (!spool_relation_valid(body, bodyLength))
+	{
+		log_error("Received a pgoutput message type %c of %u bytes at %X/%X, "
+				  "too short for an OID", type, bodyLength, LSN_FORMAT_ARGS(lsn));
+		return false;
+	}
+
+	SpoolRelationLast *last =
+		spool_relation_last(writer, spool_relation_key(body, bodyLength));
+
+	if (last != NULL && last->message.len == bodyLength &&
+		memcmp(last->message.data, body, bodyLength) == 0)
+	{
+		return true;
+	}
+
+	if (!spool_usable(log))
+	{
+		return false;
+	}
+
+	/* in a transaction sent again, spool_writer_begin reset the count to 0 */
+	spool_put_u64(head, writer->nextSeq);
+	spool_put_u64(head + 8, writer->txn.changes);
+	spool_put_u32(head + 16, bodyLength);
+	spool_put_u32(crcBytes, spool_relation_crc(head, body, bodyLength));
+
+	return spool_put(log, head, sizeof(head)) &&
+		   spool_put(log, body, bodyLength) &&
+		   spool_put(log, crcBytes, sizeof(crcBytes)) &&
+		   spool_relation_remember(writer, body, bodyLength);
+}
+
+
+/*
  * spool_writer_create creates the segment of header->firstSeq. The header also
  * gives the last complete transaction, so the rule for transactions sent again
  * holds after cleanup deleted the segments before it.
@@ -562,6 +1054,7 @@ spool_writer_create(SpoolWriter *writer, const char *dirname,
 		.maxSegmentSize = maxSegmentSize,
 		.header = *header,
 		.segment = { .fd = -1 },
+		.relationLog = { .fd = -1 },
 		.nextSeq = header->firstSeq,
 		.lastFinalLSN = header->lastFinalLSN,
 		.lastEndLSN = header->lastEndLSN,
@@ -575,6 +1068,15 @@ spool_writer_create(SpoolWriter *writer, const char *dirname,
 
 	/* it fits, as the name of the segment file starts with it */
 	sformat(writer->dirname, sizeof(writer->dirname), "%s", dirname);
+
+	initPQExpBuffer(&writer->lasts);
+
+	if (!spool_writer_open_relations(writer))
+	{
+		spool_writer_free_relations(writer);
+		spool_fail(&writer->segment);
+		return false;
+	}
 
 	/* after the create, so that a failed one leaves no buffer to free */
 	initPQExpBuffer(&writer->held);
@@ -815,6 +1317,12 @@ spool_writer_message(SpoolWriter *writer, const char *message, uint32_t length)
 		return false;
 	}
 
+	if ((type == 'R' || type == 'Y') &&
+		!spool_writer_log_relation(writer, message, length, type, lsn))
+	{
+		return false;
+	}
+
 	if (writer->state == SPOOL_TXN_SKIP)
 	{
 		if (type == 'C')
@@ -855,7 +1363,8 @@ spool_writer_message(SpoolWriter *writer, const char *message, uint32_t length)
 /*
  * spool_writer_rewind is the raw form of the rollback after a lost connection:
  * the segment goes back to the end of the last complete transaction, because
- * the source sends a transaction without COMMIT again in full.
+ * the source sends a transaction without COMMIT again in full. The relation
+ * log keeps its records, which the cursor orders by position.
  */
 bool
 spool_writer_rewind(SpoolWriter *writer)

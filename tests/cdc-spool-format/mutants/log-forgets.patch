@@ -1,0 +1,15 @@
+Mutant: The writer does not keep the message it logged as the last one. Must fail: a RELATION byte-identical to the last one logged for its relation is not logged again.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1036,8 +1036,7 @@
+ 
+ 	return spool_put(log, head, sizeof(head)) &&
+ 		   spool_put(log, body, bodyLength) &&
+-		   spool_put(log, crcBytes, sizeof(crcBytes)) &&
+-		   spool_relation_remember(writer, body, bodyLength);
++		   spool_put(log, crcBytes, sizeof(crcBytes));
+ }
+ 
+ 

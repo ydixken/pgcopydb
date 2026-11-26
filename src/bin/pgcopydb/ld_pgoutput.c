@@ -356,6 +356,40 @@ pgoutput_cache_relation(StreamContext *privateContext,
 }
 
 
+/*
+ * pgoutput_replace_relation caches the RELATION message at buf, from its type
+ * byte, in place of the cached definition of its relation, as the raw spool
+ * logs a changed definition and pgoutput_cache_relation keeps the first one.
+ */
+bool
+pgoutput_replace_relation(StreamContext *privateContext,
+						  const char *buf, int bufLen)
+{
+	int pos = 1;
+	uint32_t relOid = pgout_u32(buf, &pos, bufLen);
+	PgoutputRelationCache *rel = NULL;
+
+	HASH_FIND_INT(privateContext->pgoutputRelationCache, &relOid, rel);
+
+	if (rel != NULL)
+	{
+		PgoutputAttrCache *attr = NULL;
+		PgoutputAttrCache *next = NULL;
+
+		HASH_ITER(hh, rel->attrs, attr, next)
+		{
+			HASH_DEL(rel->attrs, attr);
+			free(attr);
+		}
+
+		HASH_DEL(privateContext->pgoutputRelationCache, rel);
+		free(rel);
+	}
+
+	return pgoutput_cache_relation(privateContext, buf, bufLen, 1);
+}
+
+
 /* ----------
  * Tuple decoder.
  * ----------

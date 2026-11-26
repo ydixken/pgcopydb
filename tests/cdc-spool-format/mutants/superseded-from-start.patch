@@ -1,0 +1,14 @@
+Mutant: The records before a record in log order, and the record itself, hide it. Must fail: a record is applied at its own position, and not before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -799,7 +799,7 @@
+ 	uint64_t key = spool_relation_key(cursor->bytes + entry->offset,
+ 									  entry->length);
+ 
+-	for (int j = i + 1; j < cursor->count; j++)
++	for (int j = 0; j < cursor->count; j++)
+ 	{
+ 		SpoolRelationEntry *later = spool_relation_entry(cursor, j);
+ 

@@ -1,0 +1,14 @@
+Mutant: spool_writer_message reports success when the relation log refuses a message. Must fail: a RELATION too short for its OID is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1320,7 +1320,7 @@
+ 	if ((type == 'R' || type == 'Y') &&
+ 		!spool_writer_log_relation(writer, message, length, type, lsn))
+ 	{
+-		return false;
++		return true;
+ 	}
+ 
+ 	if (writer->state == SPOOL_TXN_SKIP)

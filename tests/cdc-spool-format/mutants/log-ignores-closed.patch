@@ -1,0 +1,14 @@
+Mutant: A RELATION that the closed relation log refuses is reported as logged. Must fail: a RELATION that the closed relation log refuses is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1025,7 +1025,7 @@
+ 
+ 	if (!spool_usable(log))
+ 	{
+-		return false;
++		return true;
+ 	}
+ 
+ 	/* in a transaction sent again, spool_writer_begin reset the count to 0 */

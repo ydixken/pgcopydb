@@ -1,0 +1,14 @@
+Mutant: An advance reports success for a RELATION that does not parse. Must fail: a RELATION record that does not parse fails the cursor.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -849,7 +849,7 @@
+ 			!pgoutput_replace_relation(context, message, (int) entry->length))
+ 		{
+ 			/* errors have already been logged */
+-			return false;
++			return true;
+ 		}
+ 	}
+ 

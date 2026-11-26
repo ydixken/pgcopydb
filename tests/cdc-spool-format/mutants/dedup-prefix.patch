@@ -1,0 +1,16 @@
+Mutant: A message that starts with the last one of its relation counts as a repeat. Must fail: a RELATION that extends the last one logged for its relation is logged.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1017,8 +1017,8 @@
+ 	SpoolRelationLast *last =
+ 		spool_relation_last(writer, spool_relation_key(body, bodyLength));
+ 
+-	if (last != NULL && last->message.len == bodyLength &&
+-		memcmp(last->message.data, body, bodyLength) == 0)
++	if (last != NULL &&
++		memcmp(last->message.data, body, last->message.len) == 0)
+ 	{
+ 		return true;
+ 	}

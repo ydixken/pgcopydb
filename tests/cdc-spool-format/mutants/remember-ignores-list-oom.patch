@@ -1,0 +1,14 @@
+Mutant: A relation that the list of last messages cannot take is reported as kept. Must fail: a definition that cannot be kept in memory is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -910,7 +910,7 @@
+ 		if (PQExpBufferBroken(&writer->lasts))
+ 		{
+ 			log_error(ALLOCATION_FAILED_ERROR);
+-			return false;
++			return true;
+ 		}
+ 
+ 		last = (SpoolRelationLast *) (writer->lasts.data + writer->lasts.len) - 1;

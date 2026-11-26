@@ -1,0 +1,14 @@
+Mutant: A read reports success for a record it could not keep in memory. Must fail: a record that cannot be kept in memory fails the cursor.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -768,7 +768,7 @@
+ 		if (PQExpBufferBroken(&cursor->entries))
+ 		{
+ 			log_error(ALLOCATION_FAILED_ERROR);
+-			kept = false;
++			kept = true;
+ 			break;
+ 		}
+ 

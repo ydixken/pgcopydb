@@ -1,0 +1,17 @@
+Mutant: The decoder reads the checksum of a record cut before it. Must fail: a relation log record cut at any byte is short.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -617,11 +617,6 @@
+ 	if (length > SPOOL_MESSAGE_MAX)
+ 	{
+ 		return SPOOL_FRAME_BAD;
+-	}
+-
+-	if (size < SPOOL_RELATION_RECORD_SIZE(length))
+-	{
+-		return SPOOL_FRAME_SHORT;
+ 	}
+ 
+ 	const char *message = buf + SPOOL_RELATION_HEADER_SIZE;

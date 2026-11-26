@@ -1,0 +1,15 @@
+Mutant: An advance applies the records above its position too. Must fail: a record is applied at its own position, and not before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -836,8 +836,7 @@
+ 		SpoolRelationEntry *entry = spool_relation_entry(cursor, i);
+ 		const char *message = cursor->bytes + entry->offset;
+ 
+-		if (entry->applied ||
+-			spool_position_before(seq, changes, entry->seq, entry->changes))
++		if (entry->applied)
+ 		{
+ 			continue;
+ 		}
