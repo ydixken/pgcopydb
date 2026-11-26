@@ -961,6 +961,22 @@ test_empty_transactions(const char *dir)
 
 	check(fed && segment_holds(&writer, kept, lengthof(kept)),
 		  "the transaction after empty ones holds no frame of theirs");
+
+	/* the spool keeps schema frames as sent, so they are not held like ORIGIN */
+	Msg schema[] = {
+		begin_msg(0x2610, 0x2600, 905),
+		other_msg(0, 'R'),
+		other_msg(0, 'Y'),
+		commit_msg(0x2630, 0x2600, 0x2630, 5)
+	};
+
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, schema, lengthof(schema));
+
+	check(fed && records(&writer) == 1 && record_at(&writer, 0, &record) &&
+		  record.changes == 0 && record.endLSN == 0x2630 &&
+		  segment_holds(&writer, schema, lengthof(schema)),
+		  "a transaction of RELATION and TYPE frames only gets a record with change count 0, and the segment holds its frames");
 }
 
 

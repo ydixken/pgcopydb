@@ -1,0 +1,14 @@
+Mutant: RELATION and TYPE frames wait in memory like ORIGIN, so a transaction of schema frames only is dropped as empty. Must fail: a transaction of RELATION and TYPE frames only gets a record with change count 0, and the segment holds its frames.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -836,7 +836,7 @@ spool_writer_message(SpoolWriter *writer, const char *
+ 
+ 	if (writer->state == SPOOL_TXN_HELD)
+ 	{
+-		if (type == 'O')
++		if (type == 'O' || type == 'R' || type == 'Y')
+ 		{
+ 			return spool_hold(writer, message, length);
+ 		}
