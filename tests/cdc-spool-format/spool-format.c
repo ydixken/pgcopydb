@@ -1,6 +1,6 @@
 /*
  * The spool format of performance mode: the checksum, the segment header and
- * frame codecs, and the writer with its sync order.
+ * frame codecs, the writer with its sync order, and the transaction index.
  */
 #include <errno.h>
 #include <inttypes.h>
@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -562,6 +563,543 @@ test_disk_full(const char *dir)
 }
 
 
+static void
+test_index_record(void)
+{
+	SpoolIndexRecord record = {
+		.seq = 0x0102030405060708,
+		.xid = 0x11121314,
+		.changes = 0x2122232425262728,
+		.beginOffset = 0x3132333435363738,
+		.endOffset = 0x4142434445464748,
+		.finalLSN = 0x5152535455565758,
+		.endLSN = 0x6162636465666768,
+		.commitTime = 0x7172737475767778
+	};
+	char want[SPOOL_INDEX_RECORD_SIZE] = { 0 };
+	char buf[SPOOL_INDEX_RECORD_SIZE];
+	SpoolIndexRecord read = { 0 };
+
+	be64(want, record.seq);
+	be32(want + 8, record.xid);
+	be64(want + 12, record.changes);
+	be64(want + 20, record.beginOffset);
+	be64(want + 28, record.endOffset);
+	be64(want + 36, record.finalLSN);
+	be64(want + 44, record.endLSN);
+	be64(want + 52, record.commitTime);
+	be32(want + 60, spool_crc32c(want, 60));
+
+	spool_index_encode(&record, buf);
+	check(memcmp(buf, want, SPOOL_INDEX_RECORD_SIZE) == 0,
+		  "an index record holds its fields big-endian at fixed offsets");
+	check(spool_index_decode(buf, SPOOL_INDEX_RECORD_SIZE, &read) &&
+		  read.seq == record.seq && read.xid == record.xid &&
+		  read.changes == record.changes &&
+		  read.beginOffset == record.beginOffset &&
+		  read.endOffset == record.endOffset &&
+		  read.finalLSN == record.finalLSN && read.endLSN == record.endLSN &&
+		  read.commitTime == record.commitTime,
+		  "an index record decodes to its fields");
+	check(!spool_index_decode(buf, SPOOL_INDEX_RECORD_SIZE - 1, &read),
+		  "an index record cut short is invalid");
+
+	bool ok = true;
+
+	for (int bit = 0; bit < SPOOL_INDEX_RECORD_SIZE * 8; bit++)
+	{
+		buf[bit / 8] ^= (char) (1 << (bit % 8));
+		ok = ok && !spool_index_decode(buf, SPOOL_INDEX_RECORD_SIZE, &read);
+		buf[bit / 8] ^= (char) (1 << (bit % 8));
+	}
+	check(ok, "an index record with any one bit flipped is invalid");
+}
+
+
+/* one spool message as receive hands it to the writer */
+typedef struct Msg
+{
+	char bytes[64];
+	uint32_t length;
+} Msg;
+
+
+/* an XLogData message with header LSN lsn around a pgoutput message */
+static Msg
+xlog(uint64_t lsn, const char *pgoutput, uint32_t length)
+{
+	Msg msg = { .length = SPOOL_XLOGDATA_HEADER_SIZE + length };
+
+	msg.bytes[0] = 'w';
+	be64(msg.bytes + 1, lsn);
+	be64(msg.bytes + 9, lsn);
+	be64(msg.bytes + 17, 0x2E3B4C5D6E7F);
+
+	if (length > 0)
+	{
+		memcpy(msg.bytes + SPOOL_XLOGDATA_HEADER_SIZE, pgoutput, length);
+	}
+
+	return msg;
+}
+
+
+static Msg
+begin_msg(uint64_t lsn, uint64_t finalLSN, uint32_t xid)
+{
+	char body[21] = { 'B' };
+
+	be64(body + 1, finalLSN);
+	be64(body + 9, 0x2E3B4C5D6E00);
+	be32(body + 17, xid);
+
+	return xlog(lsn, body, sizeof(body));
+}
+
+
+static Msg
+commit_msg(uint64_t lsn, uint64_t finalLSN, uint64_t endLSN, uint64_t time)
+{
+	char body[26] = { 'C' };
+
+	be64(body + 2, finalLSN);
+	be64(body + 10, endLSN);
+	be64(body + 18, time);
+
+	return xlog(lsn, body, sizeof(body));
+}
+
+
+/* a message of the given type, whose body the writer does not read */
+static Msg
+other_msg(uint64_t lsn, char type)
+{
+	char body[9] = { type, 0, 0, 0x40, 0x01, 'N', 0, 2, 0 };
+
+	return xlog(lsn, body, sizeof(body));
+}
+
+
+static Msg
+keepalive_msg(void)
+{
+	Msg msg = { .length = SPOOL_KEEPALIVE_SIZE };
+
+	memcpy(msg.bytes, keepalive, SPOOL_KEEPALIVE_SIZE);
+
+	return msg;
+}
+
+
+static bool
+feed(SpoolWriter *writer, const Msg *msgs, int n)
+{
+	for (int i = 0; i < n; i++)
+	{
+		if (!spool_writer_message(writer, msgs[i].bytes, msgs[i].length))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
+/* a writer in a directory of its own under dir */
+static bool
+new_writer(SpoolWriter *writer, const char *dir, const SpoolHeader *header,
+		   uint64_t maxSegmentSize)
+{
+	static int count = 0;
+	char path[MAXPGPATH];
+
+	sformat(path, sizeof(path), "%s/writer%d", dir, ++count);
+
+	return mkdir(path, 0700) == 0 &&
+		   spool_writer_create(writer, path, header, maxSegmentSize);
+}
+
+
+static int
+records(const SpoolWriter *writer)
+{
+	return (int) (writer->pendingIndex.len / SPOOL_INDEX_RECORD_SIZE);
+}
+
+
+static bool
+record_at(const SpoolWriter *writer, int i, SpoolIndexRecord *record)
+{
+	return i < records(writer) &&
+		   spool_index_decode(writer->pendingIndex.data +
+							  (size_t) i * SPOOL_INDEX_RECORD_SIZE,
+							  SPOOL_INDEX_RECORD_SIZE, record);
+}
+
+
+static uint64_t
+frames_size(const Msg *msgs, int n)
+{
+	uint64_t size = 0;
+
+	for (int i = 0; i < n; i++)
+	{
+		size += SPOOL_FRAME_SIZE(msgs[i].length);
+	}
+
+	return size;
+}
+
+
+/* syncs the segment, then compares it with its header and the frames of msgs */
+static bool
+segment_holds(SpoolWriter *writer, const Msg *msgs, int n)
+{
+	static char want[16 * 1024];
+	uint64_t wantSize = SPOOL_HEADER_SIZE;
+	uint64_t size = 0;
+
+	spool_header_encode(&writer->header, want);
+
+	for (int i = 0; i < n; i++)
+	{
+		wantSize += frame(want + wantSize, msgs[i].bytes, msgs[i].length);
+	}
+
+	char *bytes = spool_sync(&writer->segment) ?
+				  slurp(writer->segment.filename, &size) : NULL;
+
+	return bytes != NULL && size == wantSize && memcmp(bytes, want, size) == 0;
+}
+
+
+static void
+test_transaction(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .systemId = 7, .timeline = 1,
+		.lastFinalLSN = 0x2000, .lastEndLSN = 0x2030
+	};
+	SpoolWriter writer = { 0 };
+	SpoolIndexRecord record = { 0 };
+	Msg msgs[] = {
+		begin_msg(0x3010, 0x3100, 900),
+		other_msg(0, 'R'),
+		other_msg(0x3010, 'I'),
+		other_msg(0x3040, 'U'),
+		other_msg(0x3070, 'D'),
+		other_msg(0x30A0, 'T'),
+		commit_msg(0x3130, 0x3100, 0x3130, 0x2E3B4C5D6E7F)
+	};
+	int n = lengthof(msgs);
+
+	bool fed = new_writer(&writer, dir, &header, 0) && feed(&writer, msgs, n);
+
+	check(fed && records(&writer) == 1 && record_at(&writer, 0, &record) &&
+		  record.seq == 5 && record.xid == 900 && record.changes == 4 &&
+		  record.beginOffset == SPOOL_HEADER_SIZE &&
+		  record.endOffset == SPOOL_HEADER_SIZE + frames_size(msgs, n) &&
+		  record.finalLSN == 0x3100 && record.endLSN == 0x3130 &&
+		  record.commitTime == 0x2E3B4C5D6E7F && writer.nextSeq == 6,
+		  "a transaction gives one index record with its sequence number, xid, change count, offsets, final_lsn, end LSN and commit time");
+	check(fed && segment_holds(&writer, msgs, n),
+		  "the segment holds the frames of the transaction as they arrived");
+}
+
+
+static void
+test_empty_transactions(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0x2000, .lastEndLSN = 0x2030
+	};
+	SpoolWriter writer = { 0 };
+	SpoolIndexRecord record = { 0 };
+	Msg empty[] = {
+		begin_msg(0x2130, 0x2100, 901),
+		commit_msg(0x2130, 0x2100, 0x2130, 1),
+		begin_msg(0, 0x2200, 902),
+		other_msg(0x2210, 'O'),
+		commit_msg(0x2230, 0x2200, 0x2230, 2)
+	};
+	Msg withKeepalive[] = {
+		begin_msg(0x2330, 0x2300, 903),
+		keepalive_msg(),
+		commit_msg(0x2330, 0x2300, 0x2330, 3)
+	};
+	Msg next[] = {
+		begin_msg(0x2410, 0x2500, 904),
+		other_msg(0x2410, 'I'),
+		commit_msg(0x2530, 0x2500, 0x2530, 4)
+	};
+
+	bool fed = new_writer(&writer, dir, &header, 0) &&
+			   feed(&writer, empty, lengthof(empty));
+
+	check(fed && records(&writer) == 0 && segment_holds(&writer, NULL, 0),
+		  "BEGIN and COMMIT, and BEGIN, ORIGIN and COMMIT, leave no byte and no record");
+
+	fed = fed && feed(&writer, withKeepalive, lengthof(withKeepalive));
+
+	check(fed && records(&writer) == 0 &&
+		  segment_holds(&writer, withKeepalive + 1, 1),
+		  "a keepalive marker inside an empty transaction is kept, and the transaction leaves no byte");
+
+	fed = fed && feed(&writer, next, lengthof(next));
+
+	check(fed && records(&writer) == 1 && record_at(&writer, 0, &record) &&
+		  record.seq == 5 &&
+		  record.beginOffset == SPOOL_HEADER_SIZE +
+		  SPOOL_FRAME_SIZE(SPOOL_KEEPALIVE_SIZE),
+		  "the transaction after empty ones takes the next sequence number");
+}
+
+
+static void
+test_begin_without_lsn(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0x4000, .lastEndLSN = 0x4030
+	};
+	SpoolWriter writer = { 0 };
+	SpoolIndexRecord first = { 0 };
+	SpoolIndexRecord second = { 0 };
+	Msg msgs[] = {
+		begin_msg(0, 0x4100, 905),
+		xlog(0x4010, NULL, 0),
+		other_msg(0x4010, 'I'),
+		commit_msg(0x4130, 0x4100, 0x4130, 5),
+		begin_msg(0, 0x4200, 906),
+		other_msg(0x4150, 'O'),
+		other_msg(0, 'Y'),
+		other_msg(0, 'R'),
+		other_msg(0x4150, 'U'),
+		commit_msg(0x4230, 0x4200, 0x4230, 6)
+	};
+
+	bool fed = new_writer(&writer, dir, &header, 0) &&
+			   feed(&writer, msgs, lengthof(msgs));
+
+	check(fed && records(&writer) == 2 &&
+		  record_at(&writer, 0, &first) && record_at(&writer, 1, &second) &&
+		  first.finalLSN == 0x4100 && first.changes == 1 &&
+		  first.endOffset == SPOOL_HEADER_SIZE + frames_size(msgs, 4) &&
+		  second.finalLSN == 0x4200 && second.changes == 1 &&
+		  second.beginOffset == first.endOffset &&
+		  segment_holds(&writer, msgs, lengthof(msgs)),
+		  "a BEGIN with header LSN 0/0 and an empty XLogData message are accepted");
+}
+
+
+static void
+test_cut_off(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0x5000, .lastEndLSN = 0x5030
+	};
+	SpoolWriter writer = { 0 };
+	SpoolIndexRecord first = { 0 };
+	SpoolIndexRecord second = { 0 };
+
+	/* the first transaction, then all of the second */
+	Msg msgs[] = {
+		begin_msg(0x5010, 0x5100, 907),
+		other_msg(0x5010, 'I'),
+		commit_msg(0x5130, 0x5100, 0x5130, 7),
+		begin_msg(0x5150, 0x5200, 908),
+		other_msg(0x5150, 'I'),
+		other_msg(0x5180, 'U'),
+		commit_msg(0x5230, 0x5200, 0x5230, 8)
+	};
+	Msg held[] = { msgs[3], other_msg(0x5150, 'O') };
+
+	bool fed = new_writer(&writer, dir, &header, 0) &&
+			   feed(&writer, msgs, 6) &&
+			   spool_sync(&writer.segment) &&
+			   spool_writer_rewind(&writer) &&
+			   feed(&writer, msgs + 3, 4);
+
+	check(fed && records(&writer) == 2 &&
+		  record_at(&writer, 0, &first) && record_at(&writer, 1, &second) &&
+		  second.seq == first.seq + 1 && second.beginOffset == first.endOffset &&
+		  segment_holds(&writer, msgs, lengthof(msgs)),
+		  "a transaction cut off after a sync, then sent in full, gives one record, and the segment holds no byte of the first attempt");
+
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, msgs, 3) &&
+		  feed(&writer, held, lengthof(held)) &&
+		  spool_writer_rewind(&writer) &&
+		  feed(&writer, msgs + 3, 3) &&
+		  spool_writer_rewind(&writer) &&
+		  feed(&writer, msgs + 3, 4);
+
+	check(fed && records(&writer) == 2 &&
+		  record_at(&writer, 1, &second) && second.changes == 2 &&
+		  segment_holds(&writer, msgs, lengthof(msgs)),
+		  "a transaction cut off before COMMIT, then sent in full, gives one record, and the segment holds no byte of the first attempt");
+}
+
+
+static void
+test_sent_again(const char *dir)
+{
+	/* as after a rotation, or once cleanup deleted the segment of 0x6100 */
+	SpoolHeader header = {
+		.firstSeq = 9, .lastFinalLSN = 0x6100, .lastEndLSN = 0x6130
+	};
+	SpoolWriter writer = { 0 };
+	SpoolIndexRecord record = { 0 };
+	Msg again[] = {
+		begin_msg(0x6010, 0x6100, 909),
+		other_msg(0, 'R'),
+		other_msg(0x6010, 'I'),
+		commit_msg(0x6130, 0x6100, 0x6130, 9),
+		begin_msg(0x5F10, 0x5F00, 910),
+		other_msg(0x5F10, 'D'),
+		commit_msg(0x5F30, 0x5F00, 0x5F30, 10)
+	};
+
+	/* its first change comes before the COMMIT of 0x6100 */
+	Msg interleaved[] = {
+		begin_msg(0x6050, 0x6200, 911),
+		other_msg(0x6050, 'I'),
+		commit_msg(0x6230, 0x6200, 0x6230, 11)
+	};
+
+	bool fed = new_writer(&writer, dir, &header, 0) &&
+			   feed(&writer, again, lengthof(again));
+
+	check(fed && records(&writer) == 0 && segment_holds(&writer, NULL, 0),
+		  "a BEGIN whose final_lsn is at or below that of the last complete transaction is skipped up to its COMMIT");
+
+	fed = fed && feed(&writer, interleaved, lengthof(interleaved));
+
+	check(fed && records(&writer) == 1 && record_at(&writer, 0, &record) &&
+		  record.seq == 9 && record.finalLSN == 0x6200 &&
+		  segment_holds(&writer, interleaved, lengthof(interleaved)),
+		  "a BEGIN whose header LSN is below the last final_lsn is kept by its own final_lsn");
+
+	fed = fed && feed(&writer, interleaved, lengthof(interleaved));
+
+	check(fed && records(&writer) == 1 &&
+		  segment_holds(&writer, interleaved, lengthof(interleaved)),
+		  "a transaction sent again while its record waits in memory is skipped");
+}
+
+
+static void
+test_stream_errors(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0x7100, .lastEndLSN = 0x7130
+	};
+	SpoolWriter writer = { 0 };
+	Msg open[] = {
+		begin_msg(0x7210, 0x7300, 912),
+		other_msg(0x7210, 'I')
+	};
+	Msg logical = other_msg(0x7220, 'M');
+	Msg otherEnd = commit_msg(0x7340, 0x7300, 0x7330, 12);
+
+	/* above the last final_lsn, and at or below the last end LSN */
+	Msg early[] = {
+		begin_msg(0x7110, 0x7120, 913),
+		other_msg(0x7110, 'I'),
+		commit_msg(0x7128, 0x7120, 0x7128, 13)
+	};
+
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, open, 2) &&
+		  !feed(&writer, &logical, 1),
+		  "an unknown message type is an error");
+	check(new_writer(&writer, dir, &header, 0) && !feed(&writer, open + 1, 1),
+		  "a change outside a transaction is an error");
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, open, 2) &&
+		  !feed(&writer, open, 1),
+		  "a BEGIN inside a transaction is an error");
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, open, 2) &&
+		  !feed(&writer, &otherEnd, 1),
+		  "a COMMIT whose end LSN is not its header LSN is an error");
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, early, 2) &&
+		  !feed(&writer, early + 2, 1),
+		  "a COMMIT at or below the end LSN of the last complete transaction is an error");
+}
+
+
+static void
+test_rotation(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 20, .systemId = 7, .timeline = 2,
+		.lastFinalLSN = 0x8000, .lastEndLSN = 0x8030
+	};
+	SpoolWriter writer = { 0 };
+	SpoolWriter restarted = { 0 };
+	SpoolHeader read = { 0 };
+	SpoolIndexRecord record = { 0 };
+	char path[MAXPGPATH];
+	uint64_t size = 0;
+	Msg msgs[] = {
+		begin_msg(0x8010, 0x8100, 920),
+		other_msg(0x8010, 'I'),
+		commit_msg(0x8130, 0x8100, 0x8130, 20)
+	};
+	Msg next[] = {
+		begin_msg(0x8150, 0x8200, 921),
+		other_msg(0x8150, 'I'),
+		commit_msg(0x8230, 0x8200, 0x8230, 21)
+	};
+
+	/* below the header size, so only the rules of rotation hold it back */
+	bool fed = new_writer(&writer, dir, &header, 50);
+	bool dueAtStart = spool_writer_rotate_due(&writer);
+
+	fed = fed && feed(&writer, msgs, 2);
+
+	bool dueInside = spool_writer_rotate_due(&writer);
+
+	fed = fed && feed(&writer, msgs + 2, 1);
+
+	check(fed && !dueAtStart && !dueInside && spool_writer_rotate_due(&writer),
+		  "rotation is due only after a COMMIT that takes the segment past the limit");
+
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", writer.dirname);
+
+	check(fed && !spool_writer_rotate(&writer) && access(path, F_OK) != 0,
+		  "rotation waits until the flush has synced the frames and written the index records");
+
+	/* the flush of receive: sync the frames, then write the records */
+	bool rotated = fed && spool_sync(&writer.segment);
+
+	if (rotated)
+	{
+		resetPQExpBuffer(&writer.pendingIndex);
+		rotated = spool_writer_rotate(&writer);
+	}
+
+	char *bytes = slurp(path, &size);
+
+	check(rotated && bytes != NULL &&
+		  spool_header_decode(bytes, size, &read) &&
+		  read.firstSeq == 21 && read.systemId == 7 && read.timeline == 2 &&
+		  read.lastFinalLSN == 0x8100 && read.lastEndLSN == 0x8130 &&
+		  strcmp(writer.segment.filename, path) == 0,
+		  "a new segment is named by the next sequence number and carries final_lsn and end LSN of the last complete transaction");
+
+	check(rotated && feed(&writer, next, lengthof(next)) &&
+		  records(&writer) == 1 && record_at(&writer, 0, &record) &&
+		  record.seq == 21 && record.beginOffset == SPOOL_HEADER_SIZE &&
+		  segment_holds(&writer, next, lengthof(next)),
+		  "the next transaction starts the new segment");
+
+	/* a start that finds only the new segment, as after cleanup */
+	check(rotated && new_writer(&restarted, dir, &read, 0) &&
+		  feed(&restarted, msgs, lengthof(msgs)) && records(&restarted) == 0 &&
+		  segment_holds(&restarted, NULL, 0),
+		  "a writer started from that header skips the last transaction of the old segment sent again");
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -594,6 +1132,14 @@ main(int argc, char **argv)
 	test_writer(dir);
 	test_write_failure_is_final(dir);
 	test_sync_failure_is_final(dir);
+	test_index_record();
+	test_transaction(dir);
+	test_empty_transactions(dir);
+	test_begin_without_lsn(dir);
+	test_cut_off(dir);
+	test_sent_again(dir);
+	test_stream_errors(dir);
+	test_rotation(dir);
 	test_disk_full(argv[1]);
 
 	if (failed)

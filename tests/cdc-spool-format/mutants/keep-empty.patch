@@ -1,0 +1,19 @@
+Mutant: an empty transaction gets an index record. Must fail: BEGIN and COMMIT, and BEGIN, ORIGIN and COMMIT, leave no byte and no record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -701,9 +701,10 @@ spool_writer_commit(SpoolWriter *writer, const char *m
+ 	/* an empty transaction leaves no byte and does not count as a commit */
+ 	if (writer->state == SPOOL_TXN_HELD)
+ 	{
+-		resetPQExpBuffer(&writer->held);
+-		writer->state = SPOOL_TXN_NONE;
+-		return true;
++		if (!spool_release(writer))
++		{
++			return false;
++		}
+ 	}
+ 
+ 	if (!spool_append(&writer->segment, message, length))

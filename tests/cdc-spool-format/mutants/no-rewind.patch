@@ -1,0 +1,14 @@
+Mutant: no ftruncate after a lost connection. Must fail: a transaction cut off after a sync, then sent in full, gives one record, and the segment holds no byte of the first attempt.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -858,7 +858,7 @@ spool_writer_rewind(SpoolWriter *writer)
+ 		return true;
+ 	}
+ 
+-	if (ftruncate(segment->fd, writer->completeSize) != 0)
++	if (false)
+ 	{
+ 		log_error("Failed to truncate spool file \"%s\" to %" PRIu64 " bytes: %m",
+ 				  segment->filename, writer->completeSize);

@@ -1,6 +1,7 @@
 /*
  * src/bin/pgcopydb/ld_spool.c
- *	 The raw spool of performance mode: segment files of checksummed frames.
+ *	 The raw spool of performance mode: segment files of checksummed frames,
+ *	 and the index of the transactions they hold.
  */
 
 #include <errno.h>
@@ -17,6 +18,7 @@
 #include "ld_pgoutput.h"
 #include "ld_spool.h"
 #include "log.h"
+#include "pg_utils.h"
 
 
 /*
@@ -474,6 +476,458 @@ spool_sync(SpoolSegment *segment)
 		spool_fail(segment);
 		return false;
 	}
+
+	return true;
+}
+
+
+/*
+ * spool_index_encode writes the 64 bytes of a transaction index record to buf.
+ */
+void
+spool_index_encode(const SpoolIndexRecord *record, char *buf)
+{
+	spool_put_u64(buf, record->seq);
+	spool_put_u32(buf + 8, record->xid);
+	spool_put_u64(buf + 12, record->changes);
+	spool_put_u64(buf + 20, record->beginOffset);
+	spool_put_u64(buf + 28, record->endOffset);
+	spool_put_u64(buf + 36, record->finalLSN);
+	spool_put_u64(buf + 44, record->endLSN);
+	spool_put_u64(buf + 52, record->commitTime);
+	spool_put_u32(buf + 60, spool_crc32c(buf, 60));
+}
+
+
+/*
+ * spool_index_decode reads a transaction index record, and returns false when
+ * the bytes are short or fail the checksum.
+ */
+bool
+spool_index_decode(const char *buf, uint64_t size, SpoolIndexRecord *record)
+{
+	SpoolIndexRecord read = { 0 };
+	int pos = 0;
+
+	if (size < SPOOL_INDEX_RECORD_SIZE)
+	{
+		return false;
+	}
+
+	read.seq = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.xid = pgout_u32(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.changes = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.beginOffset = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.endOffset = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.finalLSN = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.endLSN = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+	read.commitTime = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
+
+	if (pgout_u32(buf, &pos, SPOOL_INDEX_RECORD_SIZE) != spool_crc32c(buf, 60))
+	{
+		return false;
+	}
+
+	*record = read;
+
+	return true;
+}
+
+
+/* the length of a segment, with the bytes that wait in its write block */
+static uint64_t
+spool_end(const SpoolSegment *segment)
+{
+	return segment->size + segment->blockLength;
+}
+
+
+/*
+ * spool_writer_create creates the segment of header->firstSeq. The header also
+ * gives the last complete transaction, so the rule for transactions sent again
+ * holds after cleanup deleted the segments before it.
+ */
+bool
+spool_writer_create(SpoolWriter *writer, const char *dirname,
+					const SpoolHeader *header, uint64_t maxSegmentSize)
+{
+	*writer = (SpoolWriter) {
+		.maxSegmentSize = maxSegmentSize,
+		.header = *header,
+		.segment = { .fd = -1 },
+		.nextSeq = header->firstSeq,
+		.lastFinalLSN = header->lastFinalLSN,
+		.lastEndLSN = header->lastEndLSN,
+		.completeSize = SPOOL_HEADER_SIZE
+	};
+
+	initPQExpBuffer(&writer->held);
+	initPQExpBuffer(&writer->pendingIndex);
+
+	if (sformat(writer->dirname, sizeof(writer->dirname), "%s",
+				dirname) >= (int) sizeof(writer->dirname))
+	{
+		log_error("Spool directory name \"%s\" is too long", dirname);
+		return false;
+	}
+
+	return spool_segment_create(&writer->segment, dirname, header);
+}
+
+
+static bool
+spool_hold(SpoolWriter *writer, const char *message, uint32_t length)
+{
+	char lengthBytes[4];
+
+	spool_put_u32(lengthBytes, length);
+	appendBinaryPQExpBuffer(&writer->held, lengthBytes, sizeof(lengthBytes));
+	appendBinaryPQExpBuffer(&writer->held, message, length);
+
+	if (PQExpBufferBroken(&writer->held))
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	return true;
+}
+
+
+/* spool_release appends the held messages, which start the transaction */
+static bool
+spool_release(SpoolWriter *writer)
+{
+	PQExpBuffer held = &writer->held;
+
+	writer->txn.beginOffset = spool_end(&writer->segment);
+	writer->state = SPOOL_TXN_OPEN;
+
+	for (size_t offset = 0; offset < held->len;)
+	{
+		int pos = 0;
+		uint32_t length = pgout_u32(held->data + offset, &pos, 4);
+
+		if (!spool_append(&writer->segment, held->data + offset + 4, length))
+		{
+			return false;
+		}
+
+		offset += 4 + (size_t) length;
+	}
+
+	resetPQExpBuffer(held);
+
+	return true;
+}
+
+
+static bool
+spool_writer_begin(SpoolWriter *writer, const char *message, uint32_t length,
+				   uint64_t lsn)
+{
+	if (writer->state != SPOOL_TXN_NONE)
+	{
+		log_error("Received a BEGIN at %X/%X inside the transaction of xid %u",
+				  LSN_FORMAT_ARGS(lsn), writer->txn.xid);
+		return false;
+	}
+
+	if (length < SPOOL_XLOGDATA_HEADER_SIZE + 21)
+	{
+		log_error("Received a pgoutput BEGIN of %u bytes at %X/%X",
+				  length - SPOOL_XLOGDATA_HEADER_SIZE, LSN_FORMAT_ARGS(lsn));
+		return false;
+	}
+
+	int pos = SPOOL_XLOGDATA_HEADER_SIZE + 1;
+	uint64_t finalLSN = pgout_u64(message, &pos, length);
+
+	pos += 8;                   /* the commit time, which COMMIT carries too */
+
+	writer->txn = (SpoolIndexRecord) {
+		.xid = pgout_u32(message, &pos, length),
+		.finalLSN = finalLSN
+	};
+
+	/* the header LSN of a BEGIN is 0/0 when it has an origin */
+	if (finalLSN <= writer->lastFinalLSN)
+	{
+		writer->state = SPOOL_TXN_SKIP;
+		return true;
+	}
+
+	writer->state = SPOOL_TXN_HELD;
+
+	return spool_hold(writer, message, length);
+}
+
+
+static bool
+spool_writer_commit(SpoolWriter *writer, const char *message, uint32_t length,
+					uint64_t lsn)
+{
+	char record[SPOOL_INDEX_RECORD_SIZE];
+
+	if (length < SPOOL_XLOGDATA_HEADER_SIZE + 26)
+	{
+		log_error("Received a pgoutput COMMIT of %u bytes at %X/%X",
+				  length - SPOOL_XLOGDATA_HEADER_SIZE, LSN_FORMAT_ARGS(lsn));
+		return false;
+	}
+
+	/* after the type, the flags and the commit LSN, which is final_lsn */
+	int pos = SPOOL_XLOGDATA_HEADER_SIZE + 10;
+	uint64_t endLSN = pgout_u64(message, &pos, length);
+	uint64_t commitTime = pgout_u64(message, &pos, length);
+
+	if (endLSN != lsn)
+	{
+		log_error("Received a COMMIT of xid %u with end LSN %X/%X "
+				  "in a message at %X/%X",
+				  writer->txn.xid, LSN_FORMAT_ARGS(endLSN), LSN_FORMAT_ARGS(lsn));
+		return false;
+	}
+
+	if (endLSN <= writer->lastEndLSN)
+	{
+		log_error("Received a COMMIT of xid %u at %X/%X, which is not after "
+				  "the last complete transaction at %X/%X",
+				  writer->txn.xid, LSN_FORMAT_ARGS(endLSN),
+				  LSN_FORMAT_ARGS(writer->lastEndLSN));
+		return false;
+	}
+
+	/* an empty transaction leaves no byte and does not count as a commit */
+	if (writer->state == SPOOL_TXN_HELD)
+	{
+		resetPQExpBuffer(&writer->held);
+		writer->state = SPOOL_TXN_NONE;
+		return true;
+	}
+
+	if (!spool_append(&writer->segment, message, length))
+	{
+		return false;
+	}
+
+	writer->txn.seq = writer->nextSeq;
+	writer->txn.endOffset = spool_end(&writer->segment);
+	writer->txn.endLSN = endLSN;
+	writer->txn.commitTime = commitTime;
+
+	spool_index_encode(&writer->txn, record);
+	appendBinaryPQExpBuffer(&writer->pendingIndex, record, sizeof(record));
+
+	if (PQExpBufferBroken(&writer->pendingIndex))
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	writer->nextSeq++;
+	writer->lastFinalLSN = writer->txn.finalLSN;
+	writer->lastEndLSN = endLSN;
+	writer->completeSize = writer->txn.endOffset;
+	writer->state = SPOOL_TXN_NONE;
+
+	return true;
+}
+
+
+/*
+ * spool_writer_message takes one message of receive: an XLogData message as
+ * received, or a keepalive marker. Only the frames of a complete, non-empty
+ * transaction that the spool does not hold yet stay in the segment.
+ */
+bool
+spool_writer_message(SpoolWriter *writer, const char *message, uint32_t length)
+{
+	if (!spool_message_valid(message, length))
+	{
+		log_error("BUG: spool_writer_message got a message of %u bytes and "
+				  "kind %d, which the spool format does not hold",
+				  length, length > 0 ? message[0] : 0);
+		return false;
+	}
+
+	if (message[0] == SPOOL_KIND_KEEPALIVE)
+	{
+		return spool_append(&writer->segment, message, length);
+	}
+
+	int pos = 1;
+	uint64_t lsn = pgout_u64(message, &pos, length);
+
+	/* PostgreSQL 13 sends an empty message for an origin it cannot name */
+	char type = length > SPOOL_XLOGDATA_HEADER_SIZE ?
+				message[SPOOL_XLOGDATA_HEADER_SIZE] : 'O';
+
+	switch (type)
+	{
+		case 'B':
+		{
+			return spool_writer_begin(writer, message, length, lsn);
+		}
+
+		case 'C':
+		case 'I':
+		case 'U':
+		case 'D':
+		case 'T':
+		case 'O':
+		case 'R':
+		case 'Y':
+		{
+			break;
+		}
+
+		default:
+		{
+			log_error("Received an unknown pgoutput message type 0x%02x "
+					  "at %X/%X", (unsigned char) type, LSN_FORMAT_ARGS(lsn));
+			return false;
+		}
+	}
+
+	if (writer->state == SPOOL_TXN_NONE)
+	{
+		log_error("Received pgoutput message type %c at %X/%X "
+				  "outside a transaction", type, LSN_FORMAT_ARGS(lsn));
+		return false;
+	}
+
+	if (writer->state == SPOOL_TXN_SKIP)
+	{
+		if (type == 'C')
+		{
+			writer->state = SPOOL_TXN_NONE;
+		}
+
+		return true;
+	}
+
+	if (type == 'C')
+	{
+		return spool_writer_commit(writer, message, length, lsn);
+	}
+
+	if (writer->state == SPOOL_TXN_HELD)
+	{
+		if (type == 'O')
+		{
+			return spool_hold(writer, message, length);
+		}
+
+		if (!spool_release(writer))
+		{
+			return false;
+		}
+	}
+
+	if (type == 'I' || type == 'U' || type == 'D' || type == 'T')
+	{
+		writer->txn.changes++;
+	}
+
+	return spool_append(&writer->segment, message, length);
+}
+
+
+/*
+ * spool_writer_rewind is the raw form of the rollback after a lost connection:
+ * the segment goes back to the end of the last complete transaction, because
+ * the source sends a transaction without COMMIT again in full.
+ */
+bool
+spool_writer_rewind(SpoolWriter *writer)
+{
+	SpoolSegment *segment = &writer->segment;
+
+	resetPQExpBuffer(&writer->held);
+	writer->state = SPOOL_TXN_NONE;
+
+	if (!spool_usable(segment))
+	{
+		return false;
+	}
+
+	if (writer->completeSize >= segment->size)
+	{
+		segment->blockLength = writer->completeSize - segment->size;
+		return true;
+	}
+
+	if (ftruncate(segment->fd, writer->completeSize) != 0)
+	{
+		log_error("Failed to truncate spool file \"%s\" to %" PRIu64 " bytes: %m",
+				  segment->filename, writer->completeSize);
+		spool_fail(segment);
+		return false;
+	}
+
+	segment->size = writer->completeSize;
+	segment->blockLength = 0;
+
+	return true;
+}
+
+
+/*
+ * spool_writer_rotate_due is true after a COMMIT that took the segment past
+ * the limit. A segment is named by its first transaction, so it must hold one.
+ */
+bool
+spool_writer_rotate_due(const SpoolWriter *writer)
+{
+	return writer->maxSegmentSize > 0 &&
+		   writer->state == SPOOL_TXN_NONE &&
+		   writer->nextSeq > writer->header.firstSeq &&
+		   spool_end(&writer->segment) >= writer->maxSegmentSize;
+}
+
+
+/*
+ * spool_writer_rotate creates the next segment, once the flush has synced the
+ * frames of the open one and written their index records. The new header
+ * carries the last complete transaction for the rule for resends.
+ */
+bool
+spool_writer_rotate(SpoolWriter *writer)
+{
+	SpoolSegment *segment = &writer->segment;
+
+	if (!spool_usable(segment))
+	{
+		return false;
+	}
+
+	if (!spool_writer_rotate_due(writer) ||
+		segment->blockLength > 0 || writer->pendingIndex.len > 0)
+	{
+		log_error("BUG: spool file \"%s\" rotates only when due, and after "
+				  "the flush of its frames and index records",
+				  segment->filename);
+		return false;
+	}
+
+	SpoolHeader header = writer->header;
+
+	header.firstSeq = writer->nextSeq;
+	header.lastFinalLSN = writer->lastFinalLSN;
+	header.lastEndLSN = writer->lastEndLSN;
+
+	/* the flush synced the old segment, so only its descriptor is left */
+	(void) close(segment->fd);
+	free(segment->block);
+
+	if (!spool_segment_create(segment, writer->dirname, &header))
+	{
+		return false;
+	}
+
+	writer->header = header;
+	writer->completeSize = SPOOL_HEADER_SIZE;
 
 	return true;
 }
