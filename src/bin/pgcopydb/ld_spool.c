@@ -2124,6 +2124,16 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 			return false;
 		}
 
+		/* frames of another source would be applied as if the slot sent them */
+		if (tail.headed && tail.header.systemId != fresh->systemId)
+		{
+			log_error("Spool file \"%s\" holds the changes of source system %" PRIu64
+					  ", and the source is system %" PRIu64,
+					  tail.segment.filename, tail.header.systemId, fresh->systemId);
+			spool_tail_close(&tail);
+			return false;
+		}
+
 		if (tail.keep > 0)
 		{
 			bool resumed =

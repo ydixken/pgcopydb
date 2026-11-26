@@ -1,0 +1,22 @@
+Mutant: the start continues a spool of another source system. Must fail: a spool of another source system ends the start with an error that names both, and nothing is cut.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2124,16 +2124,6 @@
+ 			return false;
+ 		}
+ 
+-		/* frames of another source would be applied as if the slot sent them */
+-		if (tail.headed && tail.header.systemId != fresh->systemId)
+-		{
+-			log_error("Spool file \"%s\" holds the changes of source system %" PRIu64
+-					  ", and the source is system %" PRIu64,
+-					  tail.segment.filename, tail.header.systemId, fresh->systemId);
+-			spool_tail_close(&tail);
+-			return false;
+-		}
+-
+ 		if (tail.keep > 0)
+ 		{
+ 			bool resumed =

@@ -3233,6 +3233,25 @@ test_start_cut(const char *dir)
 	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
 		  access(log, F_OK) != 0,
 		  "a missing relation log of a spool whose index records hold a synced length ends the start with an error");
+
+	/* the spool of another source, with a torn tail in the segment and in the log */
+	made = make_spool(&writer, dir);
+	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, writer.dirname);
+	logSize = file_size(log);
+	made = made && logSize > 0 &&
+		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), -1, junk,
+					 sizeof(junk)) &&
+		   put_bytes(log, -1, junk, 10);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds the changes of source system 7, and the source is system 8",
+			seg);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 8, 2, 0);
+
+	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  file_size(seg) == (int64_t) (SECOND_END + sizeof(junk)) &&
+		  file_size(log) == logSize + 10,
+		  "a spool of another source system ends the start with an error that names both, and nothing is cut");
 }
 
 
