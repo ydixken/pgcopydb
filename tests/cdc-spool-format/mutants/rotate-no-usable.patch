@@ -1,0 +1,17 @@
+Mutant: rotation does not refuse a closed segment, and goes on in a new one. Must fail: rotation refuses a segment that a failed fsync closed.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -921,11 +921,6 @@ spool_writer_rotate(SpoolWriter *writer)
+ {
+ 	SpoolSegment *segment = &writer->segment;
+ 
+-	if (!spool_usable(segment))
+-	{
+-		return false;
+-	}
+-
+ 	/* an empty block is no proof of a sync: spool_put writes full blocks out */
+ 	if (!spool_writer_rotate_due(writer) ||
+ 		segment->size > segment->synced || segment->blockLength > 0 ||

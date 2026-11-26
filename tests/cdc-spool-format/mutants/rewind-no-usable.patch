@@ -1,0 +1,17 @@
+Mutant: a rewind does not refuse a closed segment. Must fail: a rewind refuses a segment that a failed fsync closed.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -869,11 +869,6 @@ spool_writer_rewind(SpoolWriter *writer)
+ 	resetPQExpBuffer(&writer->held);
+ 	writer->state = SPOOL_TXN_NONE;
+ 
+-	if (!spool_usable(segment))
+-	{
+-		return false;
+-	}
+-
+ 	if (writer->completeSize >= segment->size)
+ 	{
+ 		segment->blockLength = writer->completeSize - segment->size;

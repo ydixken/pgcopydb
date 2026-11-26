@@ -1466,6 +1466,26 @@ test_rotation(const char *dir)
 	check(refused && access(path, F_OK) != 0,
 		  "after a rewind cut synced frames off, rotation waits until the flush has synced the frames written since");
 
+	/* the create uses O_EXCL, so a file left over by an earlier run stops it */
+	struct stat st;
+	bool due = new_writer(&other, dir, &header, 50) &&
+			   feed(&other, msgs, lengthof(msgs)) && flush(&other) &&
+			   spool_writer_rotate_due(&other);
+
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
+
+	int fd = due ? open(path, O_WRONLY | O_CREAT | O_EXCL, 0644) : -1;
+
+	check(fd >= 0 && !spool_writer_rotate(&other) &&
+		  other.header.firstSeq == 20 &&
+		  stat(path, &st) == 0 && st.st_size == 0,
+		  "rotation onto a segment file that exists fails and leaves the file as it was");
+
+	if (fd >= 0)
+	{
+		(void) close(fd);
+	}
+
 	sformat(path, sizeof(path), "%s/0000000000000015.seg", writer.dirname);
 
 	bool rotated = fed && flush(&writer) && spool_writer_rotate(&writer);
@@ -1501,6 +1521,59 @@ test_rotation(const char *dir)
 		  feed(&restarted, msgs, lengthof(msgs)) && records(&restarted) == 0 &&
 		  segment_holds(&restarted, NULL, 0),
 		  "a writer started from that header skips the last transaction of the old segment sent again");
+}
+
+
+/* a spool_sync whose fsync fails, which closes the segment */
+static bool
+fail_sync(SpoolWriter *writer)
+{
+	fsyncFailures = 1;
+	bool synced = spool_sync(&writer->segment);
+	fsyncFailures = 0;
+
+	return !synced && writer->segment.fd == -1;
+}
+
+
+/* a failed fsync is final for the writer too, also with nothing left to sync */
+static void
+test_closed_segment(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 20, .lastFinalLSN = 0xA000, .lastEndLSN = 0xA030
+	};
+	SpoolWriter writer = { 0 };
+	char path[MAXPGPATH];
+	Msg txn[] = {
+		begin_msg(0xA110, 0xA100, 940),
+		other_msg(0xA110, 'I'),
+		commit_msg(0xA130, 0xA100, 0xA130, 40)
+	};
+
+	bool closed = new_writer(&writer, dir, &header, 0) &&
+				  feed(&writer, txn, 2) && fail_sync(&writer);
+
+	check(closed && !feed(&writer, txn + 2, 1) && records(&writer) == 0,
+		  "a COMMIT that the closed segment refuses is an error and gets no record");
+
+	closed = new_writer(&writer, dir, &header, 0) &&
+			 feed(&writer, txn, lengthof(txn)) && flush(&writer) &&
+			 fail_sync(&writer);
+
+	check(closed && writer.completeSize == writer.segment.size &&
+		  !spool_writer_rewind(&writer),
+		  "a rewind refuses a segment that a failed fsync closed");
+
+	closed = new_writer(&writer, dir, &header, 50) &&
+			 feed(&writer, txn, lengthof(txn)) && flush(&writer) &&
+			 fail_sync(&writer);
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", writer.dirname);
+
+	check(closed && writer.segment.size == writer.segment.synced &&
+		  spool_writer_rotate_due(&writer) && !spool_writer_rotate(&writer) &&
+		  access(path, F_OK) != 0,
+		  "rotation refuses a segment that a failed fsync closed");
 }
 
 
@@ -1545,6 +1618,7 @@ main(int argc, char **argv)
 	test_stream_errors(dir);
 	test_out_of_memory(dir);
 	test_rotation(dir);
+	test_closed_segment(dir);
 	test_disk_full(argv[1]);
 
 	if (failed)
