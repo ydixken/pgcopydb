@@ -3,6 +3,7 @@
  * frame codecs, the writer with its sync order, and the transaction index.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
@@ -404,6 +405,35 @@ test_writer(const char *dir)
 		  slurp(path, &size) != NULL && size == SPOOL_HEADER_SIZE,
 		  "a segment that exists is not created again");
 
+	/* a descriptor without a write block, as in a segment never created */
+	char unopenedPath[MAXPGPATH];
+	char refusal[2 * MAXPGPATH];
+	struct stat st;
+
+	sformat(unopenedPath, sizeof(unopenedPath), "%s/unopened", dir);
+	sformat(refusal, sizeof(refusal),
+			"refusing spool file \"%s\", which spool_segment_create did not open",
+			unopenedPath);
+
+	SpoolSegment unopened = {
+		.fd = open(unopenedPath, O_WRONLY | O_CREAT | O_EXCL, 0644)
+	};
+
+	sformat(unopened.filename, sizeof(unopened.filename), "%s", unopenedPath);
+
+	mark = log_mark();
+	bool refused = unopened.fd >= 0 && !spool_sync(&unopened) &&
+				   !spool_append(&unopened, keepalive, sizeof(keepalive));
+
+	text = logged_since(mark);
+
+	check(refused && count(text, refusal) == 2 &&
+		  count(text, "Synced spool ") == 0 &&
+		  stat(unopenedPath, &st) == 0 && st.st_size == 0,
+		  "a segment without a write block is refused");
+
+	(void) close(unopened.fd);
+
 	char want[256];
 	uint64_t wantSize = frame(want, xlogdata, sizeof(xlogdata));
 
@@ -464,8 +494,6 @@ test_writer(const char *dir)
 		  "a frame larger than the write block is written whole");
 
 	/* the frame ends at the block boundary, so spool_put writes it out */
-	struct stat st;
-
 	before = size;
 	mark = log_mark();
 	appended = spool_append(&segment, blockFill, sizeof(blockFill));

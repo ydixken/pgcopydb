@@ -240,9 +240,9 @@ spool_fsync(int fd, const char *path, bool directory, uint64_t length)
 
 
 /*
- * spool_fail closes a segment after a failed write or sync. The file may end
- * inside a frame, and Linux reports a failed writeback to one fsync only, so a
- * second sync could log a synced length for bytes that are not on disk.
+ * spool_fail closes a segment after a failed create, write, sync or truncate.
+ * The file may end inside a frame, and Linux reports a failed writeback to one
+ * fsync only, so a second sync could log a synced length for lost bytes.
  */
 static void
 spool_fail(SpoolSegment *segment)
@@ -263,9 +263,10 @@ spool_fail(SpoolSegment *segment)
 static bool
 spool_usable(const SpoolSegment *segment)
 {
-	if (segment->fd < 0)
+	if (segment->fd < 0 || segment->block == NULL)
 	{
-		log_error("BUG: refusing spool file \"%s\" after a failed write or sync",
+		log_error("BUG: refusing spool file \"%s\", which spool_segment_create "
+				  "did not open, or a failed write, sync or truncate closed",
 				  segment->filename);
 		return false;
 	}

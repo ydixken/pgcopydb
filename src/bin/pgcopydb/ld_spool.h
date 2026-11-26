@@ -65,9 +65,10 @@ typedef enum
 #define SPOOL_BLOCK_SIZE (1024 * 1024)
 
 /*
- * A segment file open for appending. A failed create, write or sync is final:
- * it closes the file and sets fd to -1, and later calls refuse the segment.
- * Only the refusal of a message that the format does not hold leaves it open.
+ * A segment file open for appending. A failed create, write, sync, or truncate
+ * in a rewind, is final: it closes the file and sets fd to -1, and later calls
+ * refuse the segment, as they refuse one that no create opened. Only the
+ * refusal of a message that the format does not hold leaves it open.
  */
 typedef struct SpoolSegment
 {
