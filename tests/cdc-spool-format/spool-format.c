@@ -2,10 +2,14 @@
  * The spool format of performance mode: the checksum, the segment header and
  * frame codecs, and the writer with its sync order.
  */
+#include <errno.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "postgres_fe.h"
@@ -15,6 +19,12 @@
 #include "log.h"
 
 static bool failed = false;
+
+/* an XLogData message larger than the log files and than the one-page tmpfs */
+static char filler[256 * 1024] = { 'w' };
+
+/* how many of the next fsync calls fail with EIO, without a system call */
+static int fsyncFailures = 0;
 
 /* 'w', dataStart, walEnd, sendTime, then a pgoutput BEGIN */
 static char xlogdata[SPOOL_XLOGDATA_HEADER_SIZE + 21];
@@ -35,6 +45,24 @@ check(bool ok, const char *what)
 {
 	printf("%s: %s\n", ok ? "ok" : "FAIL", what);
 	failed = failed || !ok;
+}
+
+
+/*
+ * The spool code links to this fsync ahead of the one of libc. Linux reports
+ * a failed writeback to one fsync only, so the call after a failure is real.
+ */
+int
+fsync(int fd)
+{
+	if (fsyncFailures > 0)
+	{
+		fsyncFailures--;
+		errno = EIO;
+		return -1;
+	}
+
+	return (int) syscall(SYS_fsync, fd);
 }
 
 
@@ -415,12 +443,105 @@ test_writer(const char *dir)
 }
 
 
+/*
+ * A file size limit cuts the write of the block short and then fails it. The
+ * file now ends inside a frame, so the segment must refuse every later call,
+ * also once the limit is raised again.
+ */
+static void
+test_write_failure_is_final(const char *dir)
+{
+	SpoolHeader header = { .firstSeq = 43 };
+	SpoolSegment segment = { 0 };
+	struct rlimit saved = { 0 };
+	char path[MAXPGPATH];
+	char failure[2 * MAXPGPATH];
+	char refusal[2 * MAXPGPATH];
+	uint64_t size = 0;
+
+	sformat(path, sizeof(path), "%s/000000000000002B.seg", dir);
+	sformat(failure, sizeof(failure),
+			"Failed to write to spool file \"%s\": File too large", path);
+	sformat(refusal, sizeof(refusal), "refusing spool file \"%s\"", path);
+
+	/* with the filler, the limit is above the size of the log files */
+	uint64_t limit = SPOOL_HEADER_SIZE + SPOOL_FRAME_SIZE(sizeof(filler)) + 10;
+	bool ready = spool_segment_create(&segment, dir, &header) &&
+				 spool_append(&segment, filler, sizeof(filler)) &&
+				 spool_sync(&segment) &&
+				 spool_append(&segment, xlogdata, sizeof(xlogdata)) &&
+				 signal(SIGXFSZ, SIG_IGN) != SIG_ERR &&
+				 getrlimit(RLIMIT_FSIZE, &saved) == 0;
+	struct rlimit cut = { .rlim_cur = limit, .rlim_max = saved.rlim_max };
+
+	long mark = log_mark();
+	bool cutShort = ready && setrlimit(RLIMIT_FSIZE, &cut) == 0 &&
+					!spool_sync(&segment);
+	bool raised = setrlimit(RLIMIT_FSIZE, &saved) == 0;
+
+	check(cutShort && raised && slurp(path, &size) != NULL && size == limit &&
+		  one_line(logged_since(mark), " ERROR ", failure),
+		  "a write cut short by the file size limit fails spool_sync");
+
+	mark = log_mark();
+	bool refused = !spool_sync(&segment) &&
+				   !spool_append(&segment, keepalive, sizeof(keepalive));
+	char *text = logged_since(mark);
+
+	check(refused && count(text, "Synced spool ") == 0 &&
+		  count(text, refusal) == 2 && one_line(text, " ERROR ", refusal) &&
+		  slurp(path, &size) != NULL && size == limit,
+		  "after a failed write, spool_sync and spool_append refuse the segment and write nothing");
+
+	(void) unlink(path);
+}
+
+
+/*
+ * After a failed fsync, the next fsync of the file returns 0 for the pages
+ * that were lost. The segment must refuse to sync again, or it would log a
+ * synced length for bytes that are not on disk.
+ */
+static void
+test_sync_failure_is_final(const char *dir)
+{
+	SpoolHeader header = { .firstSeq = 44 };
+	SpoolSegment segment = { 0 };
+	char path[MAXPGPATH];
+	char failure[2 * MAXPGPATH];
+	char refusal[2 * MAXPGPATH];
+
+	sformat(path, sizeof(path), "%s/000000000000002C.seg", dir);
+	sformat(failure, sizeof(failure),
+			"Failed to sync spool file \"%s\": Input/output error", path);
+	sformat(refusal, sizeof(refusal), "refusing spool file \"%s\"", path);
+
+	bool appended = spool_segment_create(&segment, dir, &header) &&
+					spool_append(&segment, keepalive, sizeof(keepalive));
+
+	long mark = log_mark();
+
+	fsyncFailures = 1;
+	bool syncFailed = appended && !spool_sync(&segment);
+	fsyncFailures = 0;
+
+	bool refused = !spool_sync(&segment);
+	char *text = logged_since(mark);
+
+	check(syncFailed && refused && one_line(text, " ERROR ", failure) &&
+		  one_line(text, " ERROR ", refusal) &&
+		  count(text, "Synced spool ") == 0,
+		  "after a failed fsync, spool_sync refuses the segment, though a second fsync returns 0");
+
+	(void) unlink(path);
+}
+
+
 static void
 test_disk_full(const char *dir)
 {
 	SpoolHeader header = { .firstSeq = 1 };
 	SpoolSegment segment = { 0 };
-	static char message[256 * 1024] = { 'w' };
 	char path[MAXPGPATH];
 	char line[2 * MAXPGPATH];
 
@@ -431,7 +552,7 @@ test_disk_full(const char *dir)
 
 	long mark = log_mark();
 	bool appended = spool_segment_create(&segment, dir, &header) &&
-					spool_append(&segment, message, sizeof(message));
+					spool_append(&segment, filler, sizeof(filler));
 	bool synced = appended && spool_sync(&segment);
 
 	check(appended && !synced && one_line(logged_since(mark), " ERROR ", line),
@@ -471,6 +592,8 @@ main(int argc, char **argv)
 	test_header();
 	test_frame();
 	test_writer(dir);
+	test_write_failure_is_final(dir);
+	test_sync_failure_is_final(dir);
 	test_disk_full(argv[1]);
 
 	if (failed)

@@ -32,16 +32,18 @@ done
 "${cc[@]}" /tmp/spool-format.o /tmp/main.o "${objs[@]}" "${libs[@]}" -o /tmp/spool-format
 
 export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0}
-/tmp/spool-format /spool-full
+status=0
+/tmp/spool-format /spool-full || status=1
 
 # Again under strace: each "Synced spool" debug line must be one fsync that
-# returned 0, on a descriptor of the file it names, in the same order.
+# returned 0, on a descriptor of the file it names, in the same order. This
+# runs after a failed check too, so that a mutant shows each check it fails.
 rc=0
 strace -f -y -o /tmp/strace.log -e trace=fsync,fdatasync,ftruncate \
     /tmp/spool-format /spool-full > /tmp/traced.log 2>&1 || rc=$?
 if test "${rc}" -ne 0; then
-    cat /tmp/traced.log /tmp/strace.log
-    exit 1
+    test "${status}" -ne 0 || cat /tmp/traced.log
+    status=1
 fi
 
 sed -nE 's/.*Synced spool (file|directory) "([^"]*)".*/\2/p' /tmp/traced.log > /tmp/logged.txt
@@ -56,3 +58,4 @@ if test "$(wc -l < /tmp/calls.txt)" -ne "$(wc -l < /tmp/synced.txt)" ||
     exit 1
 fi
 echo "PASS: $(wc -l < /tmp/logged.txt) sync debug lines, each one fsync of the file it names"
+exit "${status}"

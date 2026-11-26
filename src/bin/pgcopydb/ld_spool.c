@@ -238,6 +238,41 @@ spool_fsync(int fd, const char *path, bool directory, uint64_t length)
 
 
 /*
+ * spool_fail closes a segment after a failed write or sync. The file may end
+ * inside a frame, and Linux reports a failed writeback to one fsync only, so a
+ * second sync could log a synced length for bytes that are not on disk.
+ */
+static void
+spool_fail(SpoolSegment *segment)
+{
+	if (segment->fd >= 0)
+	{
+		(void) close(segment->fd);
+	}
+
+	free(segment->block);
+
+	segment->fd = -1;
+	segment->block = NULL;
+	segment->blockLength = 0;
+}
+
+
+static bool
+spool_usable(const SpoolSegment *segment)
+{
+	if (segment->fd < 0)
+	{
+		log_error("BUG: refusing spool file \"%s\" after a failed write or sync",
+				  segment->filename);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
  * spool_write writes all of buf to the segment file, as write(2) may write
  * less than it was given.
  */
@@ -281,6 +316,7 @@ spool_write_block(SpoolSegment *segment)
 {
 	if (!spool_write(segment, segment->block, segment->blockLength))
 	{
+		spool_fail(segment);
 		return false;
 	}
 
@@ -372,14 +408,21 @@ spool_segment_create(SpoolSegment *segment, const char *dirname,
 	if (segment->fd < 0)
 	{
 		log_error("Failed to create spool file \"%s\": %m", segment->filename);
+		spool_fail(segment);
 		return false;
 	}
 
 	spool_header_encode(header, buf);
 
-	return spool_put(segment, buf, SPOOL_HEADER_SIZE) &&
-		   spool_sync(segment) &&
-		   spool_sync_directory(dirname);
+	if (!spool_put(segment, buf, SPOOL_HEADER_SIZE) ||
+		!spool_sync(segment) ||
+		!spool_sync_directory(dirname))
+	{
+		spool_fail(segment);
+		return false;
+	}
+
+	return true;
 }
 
 
@@ -392,6 +435,11 @@ spool_append(SpoolSegment *segment, const char *message, uint32_t length)
 {
 	char lengthBytes[4];
 	char crcBytes[4];
+
+	if (!spool_usable(segment))
+	{
+		return false;
+	}
 
 	if (!spool_message_valid(message, length))
 	{
@@ -416,6 +464,16 @@ spool_append(SpoolSegment *segment, const char *message, uint32_t length)
 bool
 spool_sync(SpoolSegment *segment)
 {
-	return spool_write_block(segment) &&
-		   spool_fsync(segment->fd, segment->filename, false, segment->size);
+	if (!spool_usable(segment) || !spool_write_block(segment))
+	{
+		return false;
+	}
+
+	if (!spool_fsync(segment->fd, segment->filename, false, segment->size))
+	{
+		spool_fail(segment);
+		return false;
+	}
+
+	return true;
 }
