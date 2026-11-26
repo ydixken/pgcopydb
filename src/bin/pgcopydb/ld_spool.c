@@ -805,8 +805,17 @@ spool_writer_message(SpoolWriter *writer, const char *message, uint32_t length)
 
 	if (writer->state == SPOOL_TXN_NONE)
 	{
-		log_error("Received pgoutput message type %c at %X/%X "
-				  "outside a transaction", type, LSN_FORMAT_ARGS(lsn));
+		if (length == SPOOL_XLOGDATA_HEADER_SIZE)
+		{
+			log_error("Received an empty XLogData message at %X/%X "
+					  "outside a transaction", LSN_FORMAT_ARGS(lsn));
+		}
+		else
+		{
+			log_error("Received pgoutput message type %c at %X/%X "
+					  "outside a transaction", type, LSN_FORMAT_ARGS(lsn));
+		}
+
 		return false;
 	}
 

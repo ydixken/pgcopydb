@@ -1235,6 +1235,15 @@ test_stream_errors(const char *dir)
 	check(new_writer(&writer, dir, &header, 0) && feed(&writer, open, 1) &&
 		  !feed(&writer, &shortXlogdata, 1),
 		  "an XLogData message shorter than its header is an error while a BEGIN is held");
+
+	Msg emptyOutside = xlog(0x7210, NULL, 0);
+	long mark = log_mark();
+
+	check(new_writer(&writer, dir, &header, 0) &&
+		  !feed(&writer, &emptyOutside, 1) &&
+		  one_line(logged_since(mark), " ERROR ",
+				   "Received an empty XLogData message at 0/7210 outside a transaction"),
+		  "an empty XLogData message outside a transaction is an error that names it");
 }
 
 
