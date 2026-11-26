@@ -1,0 +1,14 @@
+Mutant: spool_writer_message does not check the kind and size of a message. Must fail: an XLogData message shorter than its header is an error while a BEGIN is held.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -743,7 +743,7 @@ spool_writer_message(SpoolWriter *writer, const char *
+ bool
+ spool_writer_message(SpoolWriter *writer, const char *message, uint32_t length)
+ {
+-	if (!spool_message_valid(message, length))
++	if (false)
+ 	{
+ 		log_error("BUG: spool_writer_message got a message of %u bytes and "
+ 				  "kind %d, which the spool format does not hold",

@@ -1,0 +1,13 @@
+Mutant: a rewind that cuts the file keeps the frames of the write block. Must fail: a transaction cut off after a sync and more frames, then sent in full, leaves no byte of the first attempt.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -867,7 +867,6 @@ spool_writer_rewind(SpoolWriter *writer)
+ 	}
+ 
+ 	segment->size = writer->completeSize;
+-	segment->blockLength = 0;
+ 
+ 	return true;
+ }

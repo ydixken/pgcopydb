@@ -1,0 +1,13 @@
+Mutant: rotation is due whatever the state of the transaction. Must fail: after a flushed COMMIT past the limit, rotation is not due inside the next transaction.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -881,7 +881,6 @@ spool_writer_rotate_due(const SpoolWriter *writer)
+ spool_writer_rotate_due(const SpoolWriter *writer)
+ {
+ 	return writer->maxSegmentSize > 0 &&
+-		   writer->state == SPOOL_TXN_NONE &&
+ 		   writer->nextSeq > writer->header.firstSeq &&
+ 		   spool_end(&writer->segment) >= writer->maxSegmentSize;
+ }

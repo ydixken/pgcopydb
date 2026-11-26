@@ -1,0 +1,14 @@
+Mutant: a BEGIN is taken while a BEGIN is held. Must fail: a BEGIN while a BEGIN is held is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -626,7 +626,7 @@ spool_writer_begin(SpoolWriter *writer, const char *me
+ spool_writer_begin(SpoolWriter *writer, const char *message, uint32_t length,
+ 				   uint64_t lsn)
+ {
+-	if (writer->state != SPOOL_TXN_NONE)
++	if (writer->state != SPOOL_TXN_NONE && writer->state != SPOOL_TXN_HELD)
+ 	{
+ 		log_error("Received a BEGIN at %X/%X inside the transaction of xid %u",
+ 				  LSN_FORMAT_ARGS(lsn), writer->txn.xid);

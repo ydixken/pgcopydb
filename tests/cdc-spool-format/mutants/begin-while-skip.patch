@@ -1,0 +1,14 @@
+Mutant: a BEGIN is taken inside a transaction sent again. Must fail: a BEGIN inside a transaction sent again is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -626,7 +626,7 @@ spool_writer_begin(SpoolWriter *writer, const char *me
+ spool_writer_begin(SpoolWriter *writer, const char *message, uint32_t length,
+ 				   uint64_t lsn)
+ {
+-	if (writer->state != SPOOL_TXN_NONE)
++	if (writer->state != SPOOL_TXN_NONE && writer->state != SPOOL_TXN_SKIP)
+ 	{
+ 		log_error("Received a BEGIN at %X/%X inside the transaction of xid %u",
+ 				  LSN_FORMAT_ARGS(lsn), writer->txn.xid);

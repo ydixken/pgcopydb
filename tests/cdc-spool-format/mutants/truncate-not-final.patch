@@ -1,0 +1,13 @@
+Mutant: a failed ftruncate leaves the segment open. Must fail: a failed ftruncate fails the rewind with an ERROR line and closes the segment, which refuses the next sync.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -862,7 +862,6 @@ spool_writer_rewind(SpoolWriter *writer)
+ 	{
+ 		log_error("Failed to truncate spool file \"%s\" to %" PRIu64 " bytes: %m",
+ 				  segment->filename, writer->completeSize);
+-		spool_fail(segment);
+ 		return false;
+ 	}
+ 

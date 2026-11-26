@@ -1,0 +1,13 @@
+Mutant: an empty transaction keeps its held BEGIN and ORIGIN messages. Must fail: the transaction after empty ones holds no frame of theirs.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -701,7 +701,6 @@ spool_writer_commit(SpoolWriter *writer, const char *m
+ 	/* an empty transaction leaves no byte and does not count as a commit */
+ 	if (writer->state == SPOOL_TXN_HELD)
+ 	{
+-		resetPQExpBuffer(&writer->held);
+ 		writer->state = SPOOL_TXN_NONE;
+ 		return true;
+ 	}

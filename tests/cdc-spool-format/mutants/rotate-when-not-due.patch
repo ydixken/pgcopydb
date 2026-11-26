@@ -1,0 +1,15 @@
+Mutant: spool_writer_rotate does not ask whether rotation is due. Must fail: rotation refuses while it is not due.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -902,8 +902,7 @@ spool_writer_rotate(SpoolWriter *writer)
+ 		return false;
+ 	}
+ 
+-	if (!spool_writer_rotate_due(writer) ||
+-		segment->blockLength > 0 || writer->pendingIndex.len > 0)
++	if (segment->blockLength > 0 || writer->pendingIndex.len > 0)
+ 	{
+ 		log_error("BUG: spool file \"%s\" rotates only when due, and after "
+ 				  "the flush of its frames and index records",

@@ -27,6 +27,9 @@ static char filler[256 * 1024] = { 'w' };
 /* how many of the next fsync calls fail with EIO, without a system call */
 static int fsyncFailures = 0;
 
+/* the same for ftruncate */
+static int ftruncateFailures = 0;
+
 /* 'w', dataStart, walEnd, sendTime, then a pgoutput BEGIN */
 static char xlogdata[SPOOL_XLOGDATA_HEADER_SIZE + 21];
 
@@ -64,6 +67,21 @@ fsync(int fd)
 	}
 
 	return (int) syscall(SYS_fsync, fd);
+}
+
+
+/* the same for the ftruncate of a rewind */
+int
+ftruncate(int fd, off_t length)
+{
+	if (ftruncateFailures > 0)
+	{
+		ftruncateFailures--;
+		errno = EIO;
+		return -1;
+	}
+
+	return (int) syscall(SYS_ftruncate, fd, length);
 }
 
 
@@ -711,10 +729,10 @@ static bool
 new_writer(SpoolWriter *writer, const char *dir, const SpoolHeader *header,
 		   uint64_t maxSegmentSize)
 {
-	static int count = 0;
+	static int writers = 0;
 	char path[MAXPGPATH];
 
-	sformat(path, sizeof(path), "%s/writer%d", dir, ++count);
+	sformat(path, sizeof(path), "%s/writer%d", dir, ++writers);
 
 	return mkdir(path, 0700) == 0 &&
 		   spool_writer_create(writer, path, header, maxSegmentSize);
@@ -771,6 +789,21 @@ segment_holds(SpoolWriter *writer, const Msg *msgs, int n)
 				  slurp(writer->segment.filename, &size) : NULL;
 
 	return bytes != NULL && size == wantSize && memcmp(bytes, want, size) == 0;
+}
+
+
+/* the flush of receive: sync the frames, then write the index records */
+static bool
+flush(SpoolWriter *writer)
+{
+	if (!spool_sync(&writer->segment))
+	{
+		return false;
+	}
+
+	resetPQExpBuffer(&writer->pendingIndex);
+
+	return true;
 }
 
 
@@ -853,6 +886,11 @@ test_empty_transactions(const char *dir)
 		  record.beginOffset == SPOOL_HEADER_SIZE +
 		  SPOOL_FRAME_SIZE(SPOOL_KEEPALIVE_SIZE),
 		  "the transaction after empty ones takes the next sequence number");
+
+	Msg kept[] = { withKeepalive[1], next[0], next[1], next[2] };
+
+	check(fed && segment_holds(&writer, kept, lengthof(kept)),
+		  "the transaction after empty ones holds no frame of theirs");
 }
 
 
@@ -963,6 +1001,58 @@ test_cut_off(const char *dir)
 		  record_at(&writer, 1, &second) && second.changes == 2 &&
 		  segment_holds(&writer, msgs, lengthof(msgs)),
 		  "a transaction cut off while its BEGIN and ORIGIN wait in memory, then sent in full, leaves no byte of the first attempt");
+
+	/* the frames that wait in the write block after the sync go too */
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, msgs, 5) &&
+		  spool_sync(&writer.segment) &&
+		  feed(&writer, msgs + 5, 1) &&
+		  spool_writer_rewind(&writer) &&
+		  feed(&writer, msgs + 3, 4);
+
+	check(fed && records(&writer) == 2 &&
+		  segment_holds(&writer, msgs, lengthof(msgs)),
+		  "a transaction cut off after a sync and more frames, then sent in full, leaves no byte of the first attempt");
+
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, msgs, 2) &&
+		  spool_sync(&writer.segment) &&
+		  spool_writer_rewind(&writer) &&
+		  feed(&writer, msgs, lengthof(msgs));
+
+	check(fed && records(&writer) == 2 &&
+		  segment_holds(&writer, msgs, lengthof(msgs)),
+		  "a transaction cut off before the first COMMIT of a writer, then sent in full, keeps the segment header");
+
+	/* the partial bytes reached the file, so the rewind needs ftruncate */
+	char failure[2 * MAXPGPATH];
+	struct stat st;
+
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, msgs, 5) &&
+		  spool_sync(&writer.segment);
+	sformat(failure, sizeof(failure),
+			"Failed to truncate spool file \"%s\" to %" PRIu64
+			" bytes: Input/output error",
+			writer.segment.filename, SPOOL_HEADER_SIZE + frames_size(msgs, 3));
+
+	uint64_t written = writer.segment.size;
+	long mark = log_mark();
+
+	ftruncateFailures = 1;
+	bool rewound = fed && spool_writer_rewind(&writer);
+	ftruncateFailures = 0;
+
+	bool refused = !spool_sync(&writer.segment);
+	char *text = logged_since(mark);
+
+	check(fed && !rewound && writer.segment.fd == -1 && refused &&
+		  one_line(text, " ERROR ", failure) &&
+		  one_line(text, " ERROR ", "refusing spool file") &&
+		  count(text, "Synced spool ") == 0 &&
+		  stat(writer.segment.filename, &st) == 0 &&
+		  (uint64_t) st.st_size == written,
+		  "a failed ftruncate fails the rewind with an ERROR line and closes the segment, which refuses the next sync");
 }
 
 
@@ -1048,6 +1138,33 @@ test_stream_errors(const char *dir)
 	check(new_writer(&writer, dir, &header, 0) && feed(&writer, early, 2) &&
 		  !feed(&writer, early + 2, 1),
 		  "a COMMIT at or below the end LSN of the last complete transaction is an error");
+
+	Msg secondBegin = begin_msg(0x7250, 0x7400, 915);
+	Msg resent = begin_msg(0x7010, 0x7100, 916);
+
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, open, 1) &&
+		  !feed(&writer, &secondBegin, 1),
+		  "a BEGIN while a BEGIN is held is an error");
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, &resent, 1) &&
+		  writer.state == SPOOL_TXN_SKIP && !feed(&writer, &secondBegin, 1),
+		  "a BEGIN inside a transaction sent again is an error");
+
+	Msg shortBegin = open[0];
+	Msg shortCommit = commit_msg(0x7330, 0x7300, 0x7330, 12);
+	Msg shortXlogdata = xlog(0x7220, NULL, 0);
+
+	shortBegin.length--;
+	shortCommit.length--;
+	shortXlogdata.length = SPOOL_XLOGDATA_HEADER_SIZE - 1;
+
+	check(new_writer(&writer, dir, &header, 0) && !feed(&writer, &shortBegin, 1),
+		  "a BEGIN one byte short is an error");
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, open, 2) &&
+		  !feed(&writer, &shortCommit, 1),
+		  "a COMMIT one byte short is an error");
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, open, 1) &&
+		  !feed(&writer, &shortXlogdata, 1),
+		  "an XLogData message shorter than its header is an error while a BEGIN is held");
 }
 
 
@@ -1099,11 +1216,35 @@ test_rotation(const char *dir)
 		  spool_writer_rotate_due(&other),
 		  "rotation is not due while the segment is below the limit");
 
+	check(new_writer(&other, dir, &header, 0) &&
+		  feed(&other, msgs, lengthof(msgs)) &&
+		  !spool_writer_rotate_due(&other),
+		  "with the limit 0, rotation is never due");
+
+	bool inside = new_writer(&other, dir, &header, 50) &&
+				  feed(&other, msgs, lengthof(msgs)) && flush(&other) &&
+				  feed(&other, next, 1);
+	bool dueHeld = spool_writer_rotate_due(&other);
+
+	inside = inside && feed(&other, next + 1, 1);
+
+	check(inside && !dueHeld && !spool_writer_rotate_due(&other),
+		  "after a flushed COMMIT past the limit, rotation is not due inside the next transaction");
+
+	bool refused = new_writer(&other, dir, &header, limit) &&
+				   feed(&other, msgs, lengthof(msgs)) && flush(&other) &&
+				   !spool_writer_rotate_due(&other) &&
+				   !spool_writer_rotate(&other);
+	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
+
+	check(refused && access(path, F_OK) != 0,
+		  "rotation refuses while it is not due");
+
 	/* the frames are synced and their record waits in memory */
-	bool refused = new_writer(&other, dir, &header, 50) &&
-				   feed(&other, msgs, lengthof(msgs)) &&
-				   spool_sync(&other.segment) && records(&other) == 1 &&
-				   spool_writer_rotate_due(&other) && !spool_writer_rotate(&other);
+	refused = new_writer(&other, dir, &header, 50) &&
+			  feed(&other, msgs, lengthof(msgs)) &&
+			  spool_sync(&other.segment) && records(&other) == 1 &&
+			  spool_writer_rotate_due(&other) && !spool_writer_rotate(&other);
 
 	sformat(path, sizeof(path), "%s/0000000000000015.seg", other.dirname);
 
@@ -1128,15 +1269,7 @@ test_rotation(const char *dir)
 
 	sformat(path, sizeof(path), "%s/0000000000000015.seg", writer.dirname);
 
-	/* the flush of receive: sync the frames, then write the records */
-	bool rotated = fed && spool_sync(&writer.segment);
-
-	if (rotated)
-	{
-		resetPQExpBuffer(&writer.pendingIndex);
-		rotated = spool_writer_rotate(&writer);
-	}
-
+	bool rotated = fed && flush(&writer) && spool_writer_rotate(&writer);
 	char *bytes = slurp(path, &size);
 
 	check(rotated && bytes != NULL &&
@@ -1151,6 +1284,18 @@ test_rotation(const char *dir)
 		  record.seq == 21 && record.beginOffset == SPOOL_HEADER_SIZE &&
 		  segment_holds(&writer, next, lengthof(next)),
 		  "the next transaction starts the new segment");
+
+	bool cut = new_writer(&other, dir, &header, 50) &&
+			   feed(&other, msgs, lengthof(msgs)) && flush(&other) &&
+			   spool_writer_rotate(&other) &&
+			   feed(&other, next, 2) &&
+			   spool_writer_rewind(&other) &&
+			   feed(&other, next, lengthof(next));
+
+	check(cut && records(&other) == 1 && record_at(&other, 0, &record) &&
+		  record.beginOffset == SPOOL_HEADER_SIZE &&
+		  segment_holds(&other, next, lengthof(next)),
+		  "a transaction cut off before the first COMMIT of a new segment, then sent in full, leaves the header and the transaction");
 
 	/* a start that finds only the new segment, as after cleanup */
 	check(rotated && new_writer(&restarted, dir, &read, 0) &&
