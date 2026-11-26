@@ -1812,9 +1812,10 @@ spool_read_header(int fd, const char *path, SpoolHeader *header, bool *headed)
 /*
  * spool_cut_relations cuts the relation log after its last valid record, as
  * receive may have appended a record and not synced it, and syncs the log.
+ * The flush synced it up to synced, so damage before that ends the start.
  */
 static bool
-spool_cut_relations(const char *dirname)
+spool_cut_relations(const char *dirname, uint64_t synced)
 {
 	char path[MAXPGPATH];
 	char *bytes = NULL;
@@ -1826,7 +1827,7 @@ spool_cut_relations(const char *dirname)
 
 	int fd = open(path, O_WRONLY);
 
-	if (fd < 0 && errno == ENOENT)
+	if (fd < 0 && errno == ENOENT && synced == 0)
 	{
 		/* a new spool, whose writer creates the log */
 		return true;
@@ -1845,6 +1846,15 @@ spool_cut_relations(const char *dirname)
 								 &record) == SPOOL_FRAME_OK)
 	{
 		end += SPOOL_RELATION_RECORD_SIZE(record.length);
+	}
+
+	/* a cut there would decode later rows with an older definition */
+	if (cut && end < synced)
+	{
+		log_error("Spool file \"%s\" ends its valid records at offset %" PRIu64
+				  ", before the %" PRIu64 " bytes that its index proves synced",
+				  path, end, synced);
+		cut = false;
 	}
 
 	cut = cut && spool_cut_file(fd, path, end);
@@ -2032,6 +2042,33 @@ spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
 
 
 /*
+ * spool_synced_before reads the relation log length that the last index
+ * record before segment seq holds, or 0 when no segment comes before it.
+ */
+static bool
+spool_synced_before(const char *dirname, PQExpBuffer indexes, uint64_t seq,
+					uint64_t *synced)
+{
+	uint64_t before = spool_highest_below(indexes, seq);
+	SpoolTail tail = { 0 };
+
+	*synced = 0;
+
+	if (before == 0)
+	{
+		return true;
+	}
+
+	bool read = spool_tail_read(&tail, dirname, before, true);
+
+	*synced = tail.last.relationLogEnd;
+	spool_tail_close(&tail);
+
+	return read;
+}
+
+
+/*
  * spool_writer_resume continues the spool from its last segment. A last
  * segment without an indexed transaction is removed, and its header, or the
  * segment before it, gives where the spool continues.
@@ -2089,8 +2126,10 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 
 		if (tail.keep > 0)
 		{
-			bool resumed = spool_tail_cut(&tail, dirname, removed) &&
-						   spool_tail_append(&tail, writer, dirname, maxSegmentSize);
+			bool resumed =
+				spool_cut_relations(dirname, tail.last.relationLogEnd) &&
+				spool_tail_cut(&tail, dirname, removed) &&
+				spool_tail_append(&tail, writer, dirname, maxSegmentSize);
 
 			spool_tail_close(&tail);
 
@@ -2127,7 +2166,11 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 		/* the header gives the last transaction before it, also after cleanup */
 		if (tail.headed)
 		{
+			uint64_t synced = 0;
+
 			return spool_sync_directory(dirname) &&
+				   spool_synced_before(dirname, indexes, seq, &synced) &&
+				   spool_cut_relations(dirname, synced) &&
 				   spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
 		}
 
@@ -2135,6 +2178,7 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 	}
 
 	return (!removed || spool_sync_directory(dirname)) &&
+		   spool_cut_relations(dirname, 0) &&
 		   spool_writer_create(writer, dirname, fresh, maxSegmentSize);
 }
 
@@ -2169,7 +2213,6 @@ spool_writer_open(SpoolWriter *writer, const char *dirname,
 	initPQExpBuffer(&indexes);
 
 	bool opened = spool_dirname_fits(dirname) &&
-				  spool_cut_relations(dirname) &&
 				  spool_scan(dirname, &segments, &indexes) &&
 				  spool_writer_resume(writer, dirname, &segments, &indexes,
 									  &fresh, maxSegmentSize);

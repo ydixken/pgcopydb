@@ -1,0 +1,14 @@
+Mutant: a relation log that could not be read is reported as damage below its synced length too. Must fail: a relation log that cannot be read fails the start.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1849,7 +1849,7 @@
+ 	}
+ 
+ 	/* a cut there would decode later rows with an older definition */
+-	if (cut && end < synced)
++	if (end < synced)
+ 	{
+ 		log_error("Spool file \"%s\" ends its valid records at offset %" PRIu64
+ 				  ", before the %" PRIu64 " bytes that its index proves synced",

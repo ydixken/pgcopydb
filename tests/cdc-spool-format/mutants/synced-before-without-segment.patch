@@ -1,0 +1,17 @@
+Mutant: the start reads the segment before a removed last segment also when there is none. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header; a last segment whose index file holds no valid record is removed with it, and created again from its header.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2054,11 +2054,6 @@
+ 
+ 	*synced = 0;
+ 
+-	if (before == 0)
+-	{
+-		return true;
+-	}
+-
+ 	bool read = spool_tail_read(&tail, dirname, before, true);
+ 
+ 	*synced = tail.last.relationLogEnd;

@@ -3,8 +3,8 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1845,7 +1845,7 @@
- 		end += SPOOL_RELATION_RECORD_SIZE(record.length);
+@@ -1857,7 +1857,7 @@
+ 		cut = false;
  	}
  
 -	cut = cut && spool_cut_file(fd, path, end);

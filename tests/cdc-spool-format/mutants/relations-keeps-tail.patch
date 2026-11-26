@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1838,12 +1838,8 @@
+@@ -1841,12 +1841,8 @@
  
  	bool cut = read_file(path, &bytes, &size);
  
@@ -16,5 +16,5 @@ Apply from the repository root with git apply, and never commit it applied.
 +	(void) record;
 +	end = (uint64_t) size;
  
- 	cut = cut && spool_cut_file(fd, path, end);
- 
+ 	/* a cut there would decode later rows with an older definition */
+ 	if (cut && end < synced)

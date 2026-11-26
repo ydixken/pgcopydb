@@ -3096,6 +3096,17 @@ test_start_cut(const char *dir)
 		  "a first segment with a torn header is removed, the directory synced, and the spool starts again");
 	kill_writer(&opened);
 
+	sformat(line, sizeof(line), "%s/tornlog", dir);
+	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, line);
+	made = mkdir(line, 0700) == 0 &&
+		   put_bytes(spool_file(seg, line, SPOOL_FIRST_SEQ, ".seg"), -1, junk, 10) &&
+		   put_bytes(log, -1, junk, 10);
+	started = made && spool_writer_open(&opened, line, 7, 2, 0);
+
+	check(started && file_size(log) == 0 && opened.nextSeq == SPOOL_FIRST_SEQ,
+		  "a start that begins a new spool cuts the torn tail of the relation log");
+	kill_writer(&opened);
+
 	/* cleanup removed the segment before a last one whose create was cut short */
 	char first[MAXPGPATH];
 
@@ -3156,6 +3167,49 @@ test_start_cut(const char *dir)
 		  strstr(text, sync_line(log, (uint64_t) logSize)) != NULL,
 		  "the start cuts the relation log after its last valid record, and syncs it");
 	kill_writer(&opened);
+
+	/* a bit of the definition that the flush of the index records synced */
+	made = make_spool(&writer, dir) &&
+		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), -1, junk, sizeof(junk));
+	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, writer.dirname);
+	logSize = file_size(log);
+	made = made && logSize > 0 && flip_byte(log, SPOOL_RELATION_HEADER_SIZE + 2);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" ends its valid records at offset 0, before the %" PRId64
+			" bytes that its index proves synced", log, logSize);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+
+	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  file_size(log) == logSize &&
+		  file_size(seg) == (int64_t) (SECOND_END + sizeof(junk)),
+		  "a relation log whose valid records end before the length that the last index record holds ends the start with an error, and nothing is cut");
+
+	/* the same after a rotation, killed before the first flush of the new segment */
+	made = make_rotated(&writer, dir, false);
+	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, writer.dirname);
+	logSize = file_size(log);
+	made = made && logSize > 0 && flip_byte(log, SPOOL_RELATION_HEADER_SIZE + 2);
+	sformat(line, sizeof(line), "Spool file \"%s\" ends its valid records at offset 0",
+			log);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+
+	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  file_size(log) == logSize,
+		  "a relation log damaged below the length that the index record before a removed last segment holds ends the start with an error");
+
+	made = make_spool(&writer, dir);
+	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, writer.dirname);
+	made = made && unlink(log) == 0;
+	sformat(line, sizeof(line),
+			"Failed to open spool file \"%s\": No such file or directory", log);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+
+	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  access(log, F_OK) != 0,
+		  "a missing relation log of a spool whose index records hold a synced length ends the start with an error");
 }
 
 
@@ -3260,16 +3314,40 @@ test_start_failures(const char *dir)
 		  one_line(logged_since(mark), " ERROR ", "Failed to open spool file"),
 		  "a start that cannot read the size of the index file fails with an ERROR line");
 
-	made = make_spool(&writer, dir);
+	/* the header of the last segment, then the header and the index of the one before */
+	made = make_rotated(&writer, dir, false);
+	mark = log_mark();
+	preadFailAt = 3;
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+	injected = preadFailAt == 0;
+	preadFailAt = 0;
 
-	fopenFailures = 1;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
-	injected = fopenFailures == 0;
+	check(made && injected && !started &&
+		  one_line(logged_since(mark), " ERROR ", "Failed to read spool file"),
+		  "a start that cannot read the last index record before a removed last segment fails with an ERROR line");
 
-	fopenFailures = 0;
+	/* with index records, and without one, which proves no length of the log synced */
+	ok = true;
 
-	check(made && injected && !started,
-		  "a relation log that cannot be read fails the start");
+	for (int indexed = 0; indexed < 2; indexed++)
+	{
+		made = make_spool(&writer, dir) &&
+			   (indexed == 1 ||
+				truncate(spool_file(files[0], writer.dirname, 5, ".idx"), 30) == 0);
+		mark = log_mark();
+
+		fopenFailures = 1;
+		started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+		injected = fopenFailures == 0;
+
+		fopenFailures = 0;
+
+		/* a log that was not read is not damage */
+		ok = ok && made && injected && !started &&
+			 count(logged_since(mark), "ends its valid records") == 0;
+	}
+
+	check(ok, "a relation log that cannot be read fails the start");
 
 	/* a link to itself, as the relation log, the segment, or its index */
 	const char *links[] = {

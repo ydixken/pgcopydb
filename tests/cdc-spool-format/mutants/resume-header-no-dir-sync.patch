@@ -3,13 +3,13 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2116,8 +2116,7 @@
- 		/* the header gives the last transaction before it, also after cleanup */
- 		if (tail.headed)
+@@ -2168,8 +2168,7 @@
  		{
--			return spool_sync_directory(dirname) &&
--				   spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
-+			return spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
- 		}
+ 			uint64_t synced = 0;
  
- 		seq = spool_highest_below(indexes, seq);
+-			return spool_sync_directory(dirname) &&
+-				   spool_synced_before(dirname, indexes, seq, &synced) &&
++			return spool_synced_before(dirname, indexes, seq, &synced) &&
+ 				   spool_cut_relations(dirname, synced) &&
+ 				   spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
+ 		}

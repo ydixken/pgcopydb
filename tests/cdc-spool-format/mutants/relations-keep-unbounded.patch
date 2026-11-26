@@ -1,0 +1,14 @@
+Mutant: the start that appends to the last segment cuts the relation log without the length of its last index record. Must fail: a relation log whose valid records end before the length that the last index record holds ends the start with an error, and nothing is cut.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2127,7 +2127,7 @@
+ 		if (tail.keep > 0)
+ 		{
+ 			bool resumed =
+-				spool_cut_relations(dirname, tail.last.relationLogEnd) &&
++				spool_cut_relations(dirname, 0) &&
+ 				spool_tail_cut(&tail, dirname, removed) &&
+ 				spool_tail_append(&tail, writer, dirname, maxSegmentSize);
+ 
