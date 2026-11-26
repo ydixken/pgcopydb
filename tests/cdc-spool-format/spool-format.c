@@ -2,6 +2,7 @@
  * The spool format of performance mode: the checksum, the segment header and
  * frame codecs, the writer with its sync order, and the transaction index.
  */
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -30,6 +31,9 @@ static int fsyncFailures = 0;
 
 /* the same for ftruncate */
 static int ftruncateFailures = 0;
+
+/* the same for realloc, which a PQExpBuffer calls to grow */
+static int reallocFailures = 0;
 
 /* 'w', dataStart, walEnd, sendTime, then a pgoutput BEGIN */
 static char xlogdata[SPOOL_XLOGDATA_HEADER_SIZE + 21];
@@ -86,6 +90,30 @@ ftruncate(int fd, off_t length)
 	}
 
 	return (int) syscall(SYS_ftruncate, fd, length);
+}
+
+
+/*
+ * The same for realloc. It calls the next realloc and not the one of libc,
+ * which does not know the heap of a sanitizer.
+ */
+void *
+realloc(void *ptr, size_t size)
+{
+	static void *(*next)(void *, size_t) = NULL;
+
+	if (reallocFailures > 0)
+	{
+		reallocFailures--;
+		return NULL;
+	}
+
+	if (next == NULL)
+	{
+		next = (void *(*)(void *, size_t))dlsym(RTLD_NEXT, "realloc");
+	}
+
+	return next(ptr, size);
 }
 
 
@@ -1263,6 +1291,54 @@ test_stream_errors(const char *dir)
 }
 
 
+/* a PQExpBuffer that cannot grow drops its bytes, so the writer must fail */
+static void
+test_out_of_memory(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0x9000, .lastEndLSN = 0x9030
+	};
+	SpoolWriter writer = { 0 };
+	Msg begin = begin_msg(0x9110, 0x9100, 930);
+
+	/* an ORIGIN above the 256 bytes that a new PQExpBuffer holds */
+	static char origin[400] = { 'w' };
+
+	origin[SPOOL_XLOGDATA_HEADER_SIZE] = 'O';
+
+	bool fed = new_writer(&writer, dir, &header, 0) && feed(&writer, &begin, 1);
+
+	reallocFailures = 1;
+	bool held = fed && spool_writer_message(&writer, origin, sizeof(origin));
+	reallocFailures = 0;
+
+	check(fed && !held,
+		  "a held frame that cannot be stored in memory is an error");
+
+	/* the fourth record of 64 bytes is the first above those 256 bytes */
+	Msg txns[12];
+
+	for (int i = 0; i < 4; i++)
+	{
+		uint64_t lsn = 0x9200 + 0x100 * (uint64_t) i;
+
+		txns[3 * i] = begin_msg(lsn, lsn + 0x50, 931 + i);
+		txns[3 * i + 1] = other_msg(lsn, 'I');
+		txns[3 * i + 2] = commit_msg(lsn + 0x80, lsn + 0x50, lsn + 0x80, 31 + i);
+	}
+
+	fed = new_writer(&writer, dir, &header, 0) &&
+		  feed(&writer, txns, 11) && records(&writer) == 3;
+
+	reallocFailures = 1;
+	bool indexed = fed && feed(&writer, txns + 11, 1);
+	reallocFailures = 0;
+
+	check(fed && !indexed,
+		  "an index record that cannot be stored in memory is an error");
+}
+
+
 static void
 test_rotation(const char *dir)
 {
@@ -1467,6 +1543,7 @@ main(int argc, char **argv)
 	test_cut_off(dir);
 	test_sent_again(dir);
 	test_stream_errors(dir);
+	test_out_of_memory(dir);
 	test_rotation(dir);
 	test_disk_full(argv[1]);
 

@@ -1,0 +1,14 @@
+Mutant: spool_writer_commit ignores a PQExpBuffer that failed to grow, which drops the index records in memory. Must fail: an index record that cannot be stored in memory is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -732,7 +732,7 @@ spool_writer_commit(SpoolWriter *writer, const char *m
+ 	spool_index_encode(&writer->txn, record);
+ 	appendBinaryPQExpBuffer(&writer->pendingIndex, record, sizeof(record));
+ 
+-	if (PQExpBufferBroken(&writer->pendingIndex))
++	if (false)
+ 	{
+ 		log_error(ALLOCATION_FAILED_ERROR);
+ 		return false;
