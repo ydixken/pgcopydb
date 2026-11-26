@@ -32,7 +32,7 @@ psql -a -d "${PGCOPYDB_TARGET_PGURI}" -1 -f /usr/src/pgcopydb/target.sql
 # Snapshot + slot for follow mode, then copy the seed rows. This step
 # exercises fix #1: copy table-data must succeed against the partitioned
 # target.
-pgcopydb snapshot --follow --plugin test_decoding >/tmp/snapshot.out &
+pgcopydb snapshot --follow --plugin "${PGCOPYDB_OUTPUT_PLUGIN}" >/tmp/snapshot.out &
 snapshot_pid=$!
 
 # the snapshot is printed once the slot exists and the snapshot file is written
@@ -157,11 +157,21 @@ pgcopydb stream catchup --resume --endpos "${lsn3}" --notice
 SHAREDIR=/var/lib/postgres/.local/share/pgcopydb
 REPLAYDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-replay.db' -type f | head -1)
 
+# pgoutput quotes the identifiers, test_decoding does not
+if [ "${PGCOPYDB_OUTPUT_PLUGIN}" = "pgoutput" ]; then
+truncate_sql=$(sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
+  "select sql from stmt where sql like 'TRUNCATE ONLY%' limit 1")
+if [ "${truncate_sql}" != 'TRUNCATE ONLY "partitioned_target"."events"' ]; then
+    echo "FAIL: truncate stmt: got '${truncate_sql}'"
+    exit 1
+fi
+else
 truncate_sql=$(sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
   "select sql from stmt where sql like 'TRUNCATE ONLY%' limit 1")
 if [ "${truncate_sql}" != "TRUNCATE ONLY partitioned_target.events" ]; then
     echo "FAIL: truncate stmt: got '${truncate_sql}'"
     exit 1
+fi
 fi
 
 pgcopydb stream cleanup
