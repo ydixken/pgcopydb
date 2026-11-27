@@ -3635,6 +3635,40 @@ test_start_cut(const char *dir)
 
 	check(refused,
 		  "an invalid last record in the index file of the segment before a headed or torn last segment ends every start with an error, and no file changes");
+
+	/* behind a torn last segment, the writer appends to the last transaction of the one before */
+	made = make_rotated(&writer, dir, false) &&
+		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
+		   truncate(spool_file(first, writer.dirname, 5, ".seg"), SECOND_END - 10) == 0 &&
+		   put_bytes(log_file(log, writer.dirname), -1, junk, 10);
+	sformat(line, sizeof(line), "Spool file \"%s\" ends at %" PRIu64 " bytes", first,
+			SECOND_END - 10);
+
+	check(made && refused_twice(writer.dirname, 7, 50, line),
+		  "a segment before a torn last segment that ends before its last index record ends every start with an error, and no file changes");
+
+	made = make_rotated(&writer, dir, false) &&
+		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
+		   flip_byte(spool_file(first, writer.dirname, 5, ".seg"),
+					 FIRST_END + SPOOL_FRAME_SIZE(secondTxn[0].length) + 6) &&
+		   put_bytes(log_file(log, writer.dirname), -1, junk, 10);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds no valid frame at offset %" PRIu64,
+			first, FIRST_END + SPOOL_FRAME_SIZE(secondTxn[0].length));
+
+	check(made && refused_twice(writer.dirname, 7, 50, line),
+		  "a damaged frame in the last indexed transaction of the segment before a torn last segment ends every start with an error, and no file changes");
+
+	made = make_rotated(&writer, dir, false) &&
+		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
+		   flip_byte(spool_file(first, writer.dirname, 5, ".seg"), 0) &&
+		   put_bytes(log_file(log, writer.dirname), -1, junk, 10);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has no valid header, and its index file holds transactions",
+			first);
+
+	check(made && refused_twice(writer.dirname, 7, 50, line),
+		  "a segment with a torn header before a torn last segment ends every start with an error, and no file changes");
 }
 
 
