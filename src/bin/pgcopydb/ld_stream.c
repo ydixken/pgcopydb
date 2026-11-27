@@ -391,14 +391,16 @@ LogicalStreamModeToString(LogicalStreamMode mode)
 
 
 /*
- * stream_uses_raw_spool routes a run to the raw spool. Its final condition is
- * plugin pgoutput, --follow-mode performance and not a WAL worker process.
+ * stream_uses_raw_spool routes a run to the raw spool: plugin pgoutput,
+ * --follow-mode performance and not a WAL worker process. The option parsers
+ * refuse the other two combinations, so this is also a last line of defence.
  */
 bool
 stream_uses_raw_spool(StreamSpecs *specs)
 {
-	/* shortcut: false until receive and apply on the raw spool are in */
-	return false;
+	return specs->followMode == FOLLOW_MODE_PERFORMANCE &&
+		   specs->slot.plugin == STREAM_PLUGIN_PGOUTPUT &&
+		   !specs->walWorker;
 }
 
 

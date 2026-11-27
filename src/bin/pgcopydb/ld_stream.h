@@ -946,6 +946,9 @@ bool parseWal2jsonMessage(StreamContext *privateContext,
 						  JSON_Value *json);
 
 /* ld_apply.c */
+bool stream_apply_marker_at_endpos(DatabaseCatalog *sourceDB, uint64_t endpos);
+bool stream_endpos_done_before(DatabaseCatalog *sourceDB, bool rawSpool,
+							   uint64_t endpos, uint64_t replayLSN);
 bool stream_apply_catchup(StreamSpecs *specs);
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
 bool stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context);

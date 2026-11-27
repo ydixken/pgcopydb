@@ -126,31 +126,45 @@ jobs:
           - defer-indexes-queue
           - defer-indexes-all-databases
           - cdc-low-level
+          - cdc-low-level-performance
           - cdc-test-decoding
           - cdc-endpos-mid-txn
           - cdc-wal2json
           - cdc-partitioned-target
+          - cdc-partitioned-target-performance
           - cdc-matview
           - cdc-replica-identity-index
+          - cdc-replica-identity-index-performance
           - cdc-replica-identity-full
+          - cdc-replica-identity-full-performance
           - cdc-file-rotation
           - cdc-file-rotation-live
           - cdc-pgoutput
+          - cdc-pgoutput-performance
           - cdc-keepalive
           - cdc-filtering-pgoutput
+          - cdc-filtering-pgoutput-performance
           - cdc-truncate-multi
+          - cdc-truncate-multi-performance
           - cdc-origin-abort
+          - cdc-origin-abort-performance
           - cdc-receive-drain-error
+          - cdc-receive-drain-error-performance
           - cdc-receive-reconnect-dying-source
+          - cdc-receive-reconnect-dying-source-performance
           - cdc-receive-status-interval
+          - cdc-receive-status-interval-performance
           - cdc-apply-wakeup
+          - cdc-apply-wakeup-performance
           - catalog-stmt-cache
           - follow-wal2json
           - follow-9.6
           - follow-data-only
           - follow-pgoutput
           - follow-filtering
+          - follow-filtering-performance
           - follow-resume-snapshot
+          - follow-resume-snapshot-performance
           - cdc-endpos-in-multi-wal-txn
           - cdc-interleaved-commits
           - cdc-resend-after-reconnect

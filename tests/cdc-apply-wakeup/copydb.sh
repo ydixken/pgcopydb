@@ -137,6 +137,7 @@ interrupt() {
 # term_idle <first id - 1>: SIGTERM once apply has caught up with half a backlog and a paused
 # receive holds back the rest. With no target work left apply takes the clean stop at the top
 # of its loop, so follow exits 0 short of the backlog and the resume must apply the rest.
+# In performance mode a signal writes no done marker, so the run fails instead.
 term_idle() {
     local n rpid half=$((backlog / 2))
     insert_txns $(($1 + 1)) $(($1 + half)) term-idle
@@ -149,7 +150,11 @@ term_idle() {
     wait_follow 120
     n=$(count term-idle)
     echo "term-idle: follow exited ${rc} after SIGTERM with ${n} of ${backlog} rows applied"
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     test "${rc}" = 0 || fail "follow stopped by SIGTERM between groups exited ${rc}"
+    else
+    test "${rc}" = 12 || fail "follow stopped by SIGTERM between groups exited ${rc}, not 12"
+    fi
     test "${n}" = "${half}" || fail "${n} term-idle rows applied at the stop, expected ${half}"
     grep -q 'Apply process received a shutdown signal, stopping' "${follow_log}" ||
         fail 'apply did not take the clean stop at the top of its loop'
@@ -240,6 +245,7 @@ diff -q "${TMPDIR}/src.txt" "${TMPDIR}/tgt.txt" > /dev/null ||
     fail "table t differs: target $(target_sql 'select count(*) from t') rows, source $(source_sql 'select count(*) from t')"
 
 # the origin sits on the last COMMIT receive spooled, which is the last lag row
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 last=0
 for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
     l=$(timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader "${f}" \
@@ -247,6 +253,12 @@ for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
     test "${l}" -le "${last}" || last=${l}
 done
 last=$(printf '%X/%X' $((last >> 32)) $((last & 4294967295)))
+else
+# the last index record of the raw spool is the last COMMIT receive wrote
+. /var/lib/postgres/spool-probe.sh
+last=$(spool_commit_lsns | tail -1)
+test -n "${last}" || fail 'the raw spool holds no transaction'
+fi
 origin=$(origin)
 test "${origin}" = "${last}" || fail "origin ${origin} is not the last COMMIT ${last}"
 # the write at endpos and at exit is not held back

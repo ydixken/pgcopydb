@@ -1,8 +1,10 @@
 #! /bin/bash
 #
 # Readers of the change spool for suite scripts: source this file.
-# They read "pgcopydb stream apply --target -" of the default work directory.
-# That command transforms output.db into replay.db again, so it runs on a copy.
+# spool_apply and its two callers read "pgcopydb stream apply --target -" of
+# the default work directory, on either layout. That command transforms
+# output.db into replay.db again, so it runs on a copy.
+# The spool_records group reads "pgcopydb list spool" and needs the raw spool.
 #
 
 # spool_apply: the stdout apply of a copy of the work directory, without replay.db
@@ -43,6 +45,56 @@ spool_apply() {
         echo "FAIL: ${fail}" >&2
         return 1
     }
+}
+
+# spool_records: the index records of the raw spool, as one JSON array.
+# Performance mode only: the SQLite layout has no spool to read.
+spool_records() {
+    local js
+    js=$(pgcopydb list spool --json) || {
+        echo 'FAIL: pgcopydb list spool --json' >&2
+        return 1
+    }
+    jq -e 'type == "array"' <<<"${js}" > /dev/null || {
+        echo "FAIL: pgcopydb list spool --json printed no array: ${js}" >&2
+        return 1
+    }
+    echo "${js}"
+}
+
+# spool_commits: the number of complete transactions in the raw spool
+spool_commits() {
+    local js
+    js=$(spool_records) || return 1
+    jq 'length' <<<"${js}"
+}
+
+# spool_commit_lsns: one commit position per line, in commit order.
+# The commit position is the end LSN of the commit record, which is what
+# origins, endpos and the low-water mark all use.
+spool_commit_lsns() {
+    local js
+    js=$(spool_records) || return 1
+    jq -r '.[].end_lsn' <<<"${js}"
+}
+
+# spool_commit_lsn <xid> [changes]: the commit position of that transaction,
+# which the spool must hold exactly once, with that many I/U/D/T messages
+spool_commit_lsn() {
+    local js row
+    js=$(spool_records) || return 1
+    row=$(jq -r --argjson xid "$1" \
+        'map(select(.xid == $xid)) | if length == 1 then "\(.[0].end_lsn) \(.[0].changes)" else "" end' \
+        <<<"${js}")
+    test -n "${row}" || {
+        echo "FAIL: the raw spool holds no single transaction with xid $1" >&2
+        return 1
+    }
+    if test $# -gt 1 && test "${row#* }" != "$2"; then
+        echo "FAIL: xid $1 has ${row#* } changes, expected $2" >&2
+        return 1
+    fi
+    echo "${row% *}"
 }
 
 # spool_stmts: the distinct statement texts, in first-use order

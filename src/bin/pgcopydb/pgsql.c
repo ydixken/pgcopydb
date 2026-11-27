@@ -4824,6 +4824,14 @@ pgsqlSendFeedback(LogicalStreamClient *client,
 		client->endpos = context->endpos;
 		log_info("endpos is now set to %X/%X",
 				 LSN_FORMAT_ARGS(client->endpos));
+
+		/*
+		 * The keepalive that passed this endpos can have arrived before this
+		 * read, and a walsender sends nothing more to an idle client that has
+		 * confirmed the position it sent. Ask for a reply, so that the
+		 * keepalive answering it runs the endpos test again.
+		 */
+		replyRequested = true;
 	}
 
 	/*

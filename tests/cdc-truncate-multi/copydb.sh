@@ -104,4 +104,7 @@ run() {
 }
 
 run pgoutput
+# test_decoding has no performance mode, so only the sqlite pass runs it
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 run test_decoding
+fi

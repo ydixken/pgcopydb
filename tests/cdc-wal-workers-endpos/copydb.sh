@@ -58,6 +58,31 @@ wait_slots_inactive() {
 
 flush_lsn() { sql "${SRC}" -c 'select pg_current_wal_flush_lsn()'; }
 
+# quiesce n: the source writes no more WAL and its n walsenders have confirmed
+# every byte of it, so no later record can wake a receive that already passed
+# endpos. The first poll waits out the one pending running_xacts record of the
+# bgwriter, which it writes at most one snapshot interval after important WAL.
+quiesce() {
+    local l p='' i=0
+    for _ in $(seq 150); do
+        l=$(flush_lsn)
+        if [ "${l}" = "${p}" ]; then
+            i=$((i + 1))
+            [ "${i}" -ge 16 ] && break
+        else
+            i=0
+            p=${l}
+        fi
+        sleep 1
+    done
+    [ "${i}" -ge 16 ] || fail "the WAL of the source still moves, at ${l}"
+    for _ in $(seq 120); do
+        [ "$(sql "${SRC}" -c 'select count(*) from pg_stat_replication where write_lsn = pg_current_wal_flush_lsn()')" -eq "$1" ] && return
+        sleep 0.5
+    done
+    fail "$1 walsenders have not confirmed the WAL of the source up to $(flush_lsn)"
+}
+
 # commit_record lsn xid: start and end of the COMMIT record of xid, after lsn
 commit_record() {
     sql "${WAL}" -F ' ' -c "select start_lsn, end_lsn from pg_get_wal_records_info('$1', pg_current_wal_flush_lsn()) where record_type = 'COMMIT' and xid::text = '$2'"
@@ -432,6 +457,27 @@ cleanup
 echo "OK an endpos below applied changes fails the run, exit ${rc}"
 
 #
+# a quiet source: endpos at its last record, with the keepalive past endpos
+# already confirmed by both receives, stops both workers without a new record
+#
+start quiet 2 ep.a
+sql "${SRC}" -c "insert into ep.b values (1401, 'w')"
+quiesce 2
+e=$(flush_lsn)
+pgcopydb stream sentinel set endpos --dir "${dir}" "${e}" > /dev/null
+wait_log 1 "WAL worker 0 with pid [0-9]+ has reached endpos ${e}\$"
+wait_log 1 "WAL worker 1 with pid [0-9]+ has reached endpos ${e}\$"
+finish 120
+[ "${rc}" -eq 0 ] || fail "a quiet source left exit ${rc}"
+check 'rows on the target' '0 1' "$(rows "${TGT}" 1401)"
+canary
+wait_slots_inactive
+check 'origins at endpos' "${S}=t ${S}_w1=t" "$(origins_at "${e}")"
+check 'slots at endpos' "${S}=t ${S}_w1=t" "$(slots_at "${e}")"
+cleanup
+echo "OK a quiet source stops every WAL worker at endpos"
+
+#
 # SIGTERM while worker 1 reached endpos by its own commit and waits for its
 # receive, stopped before it read endpos, with its walsender gone: its slot
 # stays below endpos, and a resume moves every origin and slot there
@@ -522,6 +568,7 @@ SQL
 )
 read -r _ e < <(commit_record "${pre}" "${xid}") || fail 'no COMMIT record of 801 on ep.b'
 wait_worker 1 replay_lsn "${e}"
+quiesce 3
 
 worker_pids 1
 kill -STOP "${recv}"
@@ -655,6 +702,7 @@ SQL
 )
 read -r _ c < <(commit_record "${pre}" "${xid}") || fail 'no COMMIT record of 1001 on ep.b'
 check 'COMMIT of 1001 below endpos' t "$(lsn_cmp "${c}" '<' "${E}")"
+quiesce 3
 for _ in $(seq 8); do
     [ "$(lsn_cmp "$(flush_lsn)" '>=' "${E}")" = t ] && break
     sql "${WAL}" -c 'insert into pad values (1)' -c 'select pg_switch_wal()' > /dev/null

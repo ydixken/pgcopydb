@@ -60,12 +60,21 @@ SHAREDIR=/var/lib/postgres/.local/share/pgcopydb
 
 ls -la ${SHAREDIR}/
 
+. /var/lib/postgres/spool-probe.sh
+
+# output.db is the SQLite layout; performance mode counts index records
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 OUTPUTDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-output.db' -type f | head -1)
 
 #
 # Validate the SQLite output table has rows.
 #
 sqlite3 ${OUTPUTDB} "select count(*) as output_rows from output;"
+else
+spool_txns=$(spool_commits)
+echo "raw spool transactions: ${spool_txns}"
+test "${spool_txns}" -ge 2
+fi
 
 # Idempotency: prefetch again should be a no-op
 pgcopydb stream prefetch --debug --resume --endpos "${lsn}"
@@ -81,25 +90,34 @@ pgcopydb stream catchup --resume --endpos "${lsn}" -vv
 # replayDB now exists: validate the SQL templates written by the transform
 # step and that the replay table was populated.
 #
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 REPLAYDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-replay.db' -type f | head -1)
 
 sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
   "select s.sql from stmt s join replay r on r.stmt_hash = s.hash where r.action not in ('B','C','R','K','X','E') group by s.hash order by min(r.id)" \
   > /tmp/stmt-actual.sql
 diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
+else
+# the raw spool keeps no statement table, and the printer builds the same text
+spool_stmts > /tmp/stmt-actual.sql
+diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
+fi
 
 # pin the statement text and transaction shape that the SQLite path applies
 . /var/lib/postgres/spool-probe.sh
 spool_apply_shape > /tmp/apply-actual.sql
 diff /usr/src/pgcopydb/apply.sql /tmp/apply-actual.sql
 
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 sqlite3 ${REPLAYDB} "select count(*) as replay_rows from replay;"
+fi
 
 #
 # 'stream apply --target -' prints every committed transaction of outputDB.
 # It writes a replayDB again, so it runs on a copy of the work directory
 # without one, and cdc_files holds absolute paths that must point at the copy.
 #
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 COPYDIR=$(mktemp -d)
 cp -a ${TMPDIR:-/tmp}/pgcopydb/. ${COPYDIR}/
 mkdir -p ${COPYDIR}/cdc
@@ -133,6 +151,19 @@ timeout -s KILL 60 pgcopydb stream apply --target - --dir ${COPYDIR} > /tmp/appl
 
 commits=`grep -c '^COMMIT$' /tmp/apply-stdout-open.sql || true`
 test "${commits}" -eq $((txns - 1))
+
+else
+
+# the same count on the raw spool, where an index record is the COMMIT: a
+# transaction whose COMMIT did not land has no record, so it cannot be cut out
+spool_apply > /tmp/apply-stdout.sql
+begins=`grep -c '^BEGIN$' /tmp/apply-stdout.sql || true`
+commits=`grep -c '^COMMIT$' /tmp/apply-stdout.sql || true`
+echo "raw spool transactions: ${spool_txns}, stdout BEGIN: ${begins}, COMMIT: ${commits}"
+test "${begins}" -eq "${spool_txns}"
+test "${commits}" -eq "${spool_txns}"
+
+fi
 
 rm -rf ${COPYDIR}
 

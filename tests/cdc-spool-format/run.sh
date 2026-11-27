@@ -29,7 +29,7 @@ done
 
 # main.c defines globals the other objects use, so it links without its main()
 "${cc[@]}" -Dmain=pgcopydb_main -Wno-missing-prototypes -c main.c -o /tmp/main.o
-for name in spool-format sentinel-guard; do
+for name in spool-format sentinel-guard follow-mode-route; do
     "${cc[@]}" -I. -c "${here}/${name}.c" -o "/tmp/${name}.o"
     "${cc[@]}" "/tmp/${name}.o" /tmp/main.o "${objs[@]}" "${libs[@]}" -o "/tmp/${name}"
 done
@@ -38,6 +38,7 @@ export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0}
 status=0
 /tmp/spool-format /spool-full "${PWD}/pgcopydb" || status=1
 /tmp/sentinel-guard || status=1
+/tmp/follow-mode-route || status=1
 
 # Again under strace: each "Synced spool" debug line must be one fsync that
 # returned 0, on a descriptor of the file it names, in the same order. This
