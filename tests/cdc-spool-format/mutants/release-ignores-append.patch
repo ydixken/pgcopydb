@@ -1,4 +1,4 @@
-Mutant: spool_release goes on after a held message that the segment refused. Must fail: a change that releases a held BEGIN onto a closed segment fails with one refusal.
+Mutant: spool_release goes on after a held message that the segment refused. Must fail: a change that releases a held BEGIN onto a closed segment fails with one refusal; a held BEGIN whose release the full volume refuses is an error that names the segment, and no refusal follows it.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

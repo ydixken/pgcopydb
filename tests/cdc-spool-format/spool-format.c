@@ -4387,6 +4387,50 @@ test_list_spool(const char *dir, const char *binary)
 }
 
 
+/* on the one-page volume, once test_disk_full removed its segment */
+static void
+test_release_full(const char *dir)
+{
+	SpoolHeader header = {
+		.firstSeq = 5, .lastFinalLSN = 0xC000, .lastEndLSN = 0xC030
+	};
+	SpoolWriter writer = { 0 };
+	Msg begin = begin_msg(0xC210, 0xC200, 961);
+	Msg change = other_msg(0xC210, 'I');
+	char line[2 * MAXPGPATH];
+	bool filled = new_writer(&writer, dir, &header, 0) && feed(&writer, &begin, 1);
+
+	/* frames fill the write block to 10 bytes short, so the release of the BEGIN writes it */
+	while (filled && SPOOL_BLOCK_SIZE - writer.segment.blockLength > 10)
+	{
+		uint64_t room = SPOOL_BLOCK_SIZE - writer.segment.blockLength - 10;
+
+		filled = room > SPOOL_FRAME_SIZE(SPOOL_XLOGDATA_HEADER_SIZE) &&
+				 spool_append(&writer.segment, filler,
+							  Min(sizeof(filler), room - SPOOL_FRAME_SIZE(0)));
+	}
+
+	sformat(line, sizeof(line),
+			"Failed to write to spool file \"%s\": No space left on device",
+			writer.segment.filename);
+
+	long mark = log_mark();
+	bool released = filled && feed(&writer, &change, 1);
+	char *text = logged_since(mark);
+	char *failure = strstr(text, line);
+
+	check(filled && !released && one_line(text, " ERROR ", line) &&
+		  strstr(failure, "BUG: refusing") == NULL,
+		  "a held BEGIN whose release the full volume refuses is an error that names the segment, and no refusal follows it");
+
+	/* an open file keeps its blocks, and test_relation_log_full needs them */
+	kill_writer(&writer);
+	(void) unlink(writer.segment.filename);
+	(void) unlink(writer.relationLog.filename);
+	(void) rmdir(writer.dirname);
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -4441,6 +4485,7 @@ main(int argc, char **argv)
 	test_index_chunks(dir);
 	test_list_spool(dir, argv[2]);
 	test_disk_full(argv[1]);
+	test_release_full(argv[1]);
 	test_relation_log_full(argv[1]);
 
 	if (failed)
