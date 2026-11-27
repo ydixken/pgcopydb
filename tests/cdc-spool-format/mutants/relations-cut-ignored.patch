@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2280,8 +2280,8 @@
+@@ -2289,8 +2289,8 @@
  
  	/* first, so that a crash after the removal of a new spool leaves a new one */
  	if (start->relations.fd >= 0 &&

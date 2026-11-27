@@ -11,7 +11,7 @@ Apply from the repository root with git apply, and never commit it applied.
  } SpoolStart;
  
  
-@@ -2237,8 +2238,9 @@
+@@ -2246,8 +2247,9 @@
  	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
  					  start->last.last.relationLogEnd;
  
@@ -23,10 +23,10 @@ Apply from the repository root with git apply, and never commit it applied.
  	{
  		return false;
  	}
-@@ -2273,6 +2275,11 @@
- 	if ((start->leftover > 0 && !unlink_file(leftover)) ||
- 		(start->removed &&
- 		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
+@@ -2306,6 +2308,11 @@
+ 	if (start->removed &&
+ 		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename) ||
+ 		 !spool_sync_directory(dirname)))
 +	{
 +		return false;
 +	}

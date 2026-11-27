@@ -15,6 +15,6 @@ Apply from the repository root with git apply, and never commit it applied.
 -			return false;
 -		}
 -
- 		start->leftover = seqs[i];
- 	}
- 
+ 		/* the flush indexed it before the rotation, and cleanup keeps it: damage */
+ 		if (seqs[i] == before)
+ 		{

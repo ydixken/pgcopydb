@@ -2178,6 +2178,15 @@ spool_start_read(SpoolStart *start, const char *dirname,
 			return false;
 		}
 
+		/* the flush indexed it before the rotation, and cleanup keeps it: damage */
+		if (seqs[i] == before)
+		{
+			log_error("Spool file \"%s/%016" PRIX64
+					  ".seg\" has no index file, and is the segment before the "
+					  "last one, which cleanup keeps", dirname, seqs[i]);
+			return false;
+		}
+
 		start->leftover = seqs[i];
 	}
 
@@ -2286,16 +2295,17 @@ spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
 		return false;
 	}
 
-	/* the index file first, as cleanup does */
-	if ((start->leftover > 0 && !unlink_file(leftover)) ||
-		(start->removed &&
-		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
+	/* on disk before last goes, or a crash could leave it directly before the last */
+	if (start->leftover > 0 &&
+		(!unlink_file(leftover) || !spool_sync_directory(dirname)))
 	{
 		return false;
 	}
 
-	/* the removal is on disk before create, which uses O_EXCL, makes it again */
-	if ((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname))
+	/* the index file first, as cleanup does, and on disk before create, which uses O_EXCL */
+	if (start->removed &&
+		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename) ||
+		 !spool_sync_directory(dirname)))
 	{
 		return false;
 	}

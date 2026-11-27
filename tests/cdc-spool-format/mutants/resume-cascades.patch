@@ -1,4 +1,4 @@
-Mutant: the start accepts a segment before a last one without an indexed transaction that holds none either. Must fail: a segment before a torn last segment that holds no indexed transaction ends every start with an error, and no file changes; a segment before a headed last segment without an indexed transaction that holds none either ends every start with an error, and no file changes; a segment without its index file before a headed or torn last segment without an indexed transaction ends every start with an error, and no file changes.
+Mutant: the start accepts a segment before a last one without an indexed transaction that holds none either. Must fail: a segment before a torn last segment that holds no indexed transaction ends every start with an error, and no file changes; a segment before a headed last segment without an indexed transaction that holds none either ends every start with an error, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

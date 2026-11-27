@@ -3,12 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2272,7 +2272,7 @@
- 	/* the index file first, as cleanup does */
- 	if ((start->leftover > 0 && !unlink_file(leftover)) ||
- 		(start->removed &&
--		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
-+		 !((unlink_file(start->last.index) | unlink_file(start->last.segment.filename)) || true)))
+@@ -2304,7 +2304,7 @@
+ 
+ 	/* the index file first, as cleanup does, and on disk before create, which uses O_EXCL */
+ 	if (start->removed &&
+-		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename) ||
++		(!((unlink_file(start->last.index) | unlink_file(start->last.segment.filename)) || true) ||
+ 		 !spool_sync_directory(dirname)))
  	{
  		return false;
- 	}
