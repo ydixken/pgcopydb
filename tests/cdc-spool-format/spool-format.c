@@ -5656,8 +5656,10 @@ test_statements(const char *dir)
 	made = txn_spool(&writer, dir, unknown, lengthof(unknown)) &&
 		   flip_byte(spool_file(path, writer.dirname, 1, ".seg"),
 					 SPOOL_HEADER_SIZE + frames_size(unknown, 2) + 30);
+	mark = log_mark();
 	built = made && statements(writer.dirname, new_specs(), &captured);
-	check(made && !built && captured.count == 0,
+	check(made && !built && captured.count == 0 &&
+		  strstr(logged_since(mark), "holds no valid frame") != NULL,
 		  "a damaged frame of a spooled transaction is an error, and no statement comes");
 
 	/* an index record that ends before the COMMIT frame of its transaction */
@@ -5710,9 +5712,11 @@ test_statements(const char *dir)
 		commit_msg(0x7130, 0x7100, 0x7130, COMMIT_TIME)
 	};
 
+	mark = log_mark();
 	built = txn_spool(&writer, dir, undefined, lengthof(undefined)) &&
 			statements(writer.dirname, new_specs(), &captured);
-	check(!built && captured.count == 0,
+	check(!built && captured.count == 0 &&
+		  strstr(logged_since(mark), "uncached relOid 16999") != NULL,
 		  "a change of a relation that the relation log does not define is an error");
 }
 

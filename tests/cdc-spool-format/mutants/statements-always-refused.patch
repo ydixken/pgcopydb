@@ -1,0 +1,17 @@
+Mutant: the statement source refuses every transaction and logs no reason. Must fail: a damaged frame of a spooled transaction is an error, and no statement comes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3304,6 +3304,11 @@
+ {
+ 	StreamContext *privateContext = &(specs->private);
+ 	SpoolIndexRecord *record = &(reader->record);
++
++	if (record != NULL)
++	{
++		return false;
++	}
+ 	SpoolStatements spooled = {
+ 		.specs = specs,
+ 		.hook = hook,
