@@ -677,6 +677,13 @@ clone_and_follow(CopyDataSpec *copySpecs)
 		}
 	}
 
+	/* before the snapshot, the slot and the schema fetch write anything */
+	if (!copydb_check_cdc_layout(&streamSpecs))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
+
 	/*
 	 * First create/export a snapshot for the whole clone --follow operations.
 	 */
@@ -756,12 +763,6 @@ clone_and_follow(CopyDataSpec *copySpecs)
 					 "the snapshot alive");
 			exit(EXIT_CODE_BAD_STATE);
 		}
-	}
-
-	if (!copydb_check_cdc_layout(&streamSpecs))
-	{
-		/* errors have already been logged */
-		exit(EXIT_CODE_BAD_STATE);
 	}
 
 	/*

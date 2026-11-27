@@ -432,14 +432,8 @@ copydb_check_reused_wal_workers(CopyDataSpec *copySpecs,
 		return false;
 	}
 
-	bool tagged = found && streq(highTraffic, FOLLOW_MODE_PERFORMANCE_TAG);
+	/* copydb_check_cdc_layout already refused a directory of the other mode */
 	bool raw = stream_uses_raw_spool(specs);
-
-	/* copydb_check_cdc_layout refuses a directory of the other mode */
-	if (tagged != raw)
-	{
-		return true;
-	}
 
 	if (workers != walWorkers ||
 		(!raw && !streq(highTraffic, copySpecs->walHighTrafficTables)))

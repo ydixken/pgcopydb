@@ -1541,6 +1541,13 @@ cli_stream_apply(int argc, char **argv)
 		exit(EXIT_CODE_INTERNAL_ERROR);
 	}
 
+	/* before the opens below, which can create files in the work directory */
+	if (!stdoutMode && !copydb_check_cdc_layout(&specs))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
+
 	/*
 	 * Open outputDB (its filename is looked up in the cdc_files table of
 	 * sourceDB) and derive + open replayDB from the outputDB path.
@@ -1662,12 +1669,6 @@ cli_stream_apply(int argc, char **argv)
 	}
 	else
 	{
-		if (!copydb_check_cdc_layout(&specs))
-		{
-			/* errors have already been logged */
-			exit(EXIT_CODE_BAD_STATE);
-		}
-
 		StreamApplyContext context = { 0 };
 
 		if (!stream_apply_setup(&specs, &context))
