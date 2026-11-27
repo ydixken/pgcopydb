@@ -4181,6 +4181,21 @@ test_reader(const char *dir)
 	spool_reader_close(&reader);
 	kill_writer(&fresh);
 
+	/* as when cleanup and the start have removed every segment before segment 7 */
+	SpoolHeader seventh = {
+		.firstSeq = 7, .systemId = 7, .timeline = 2,
+		.lastFinalLSN = 0xD200, .lastEndLSN = 0xD230
+	};
+
+	made = new_writer(&writer, dir, &seventh, 0) &&
+		   spool_reader_open(&reader, writer.dirname, 0);
+	waiting = made && spool_reader_next(&reader, &found) && !found;
+	made = made && feed(&writer, thirdTxn, lengthof(thirdTxn)) && write_index(&writer);
+	check(waiting && made && next_holds(&reader, &context, thirdTxn, lengthof(thirdTxn)),
+		  "a reader of a spool whose only segment is above sequence number 1 and has no index file waits, and reads it once it is there");
+	spool_reader_close(&reader);
+	kill_writer(&writer);
+
 	made = make_spool(&writer, dir) &&
 		   truncate(spool_file(seg, writer.dirname, 5, ".seg"), SECOND_END - 10) == 0 &&
 		   spool_reader_open(&reader, writer.dirname, 0) &&

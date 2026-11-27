@@ -2589,6 +2589,12 @@ spool_reader_open(SpoolReader *reader, const char *dirname, uint64_t after)
 		first = Min(first, seqs[i]);
 	}
 
+	/* without an index file, the next record is the first one of the lowest segment */
+	if (count == 0 && spool_lowest(&segments) > 0)
+	{
+		reader->nextSeq = spool_lowest(&segments);
+	}
+
 	termPQExpBuffer(&segments);
 	termPQExpBuffer(&indexes);
 
