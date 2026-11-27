@@ -1,0 +1,35 @@
+Mutant: spool_writer_commit drops an empty transaction before the end LSN checks of its COMMIT. Must fail: an empty transaction whose COMMIT end LSN is not its header LSN, or not after the last, is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1216,6 +1216,14 @@ spool_writer_commit(SpoolWriter *writer, const char *message, uint32_t length,
+ 	uint64_t endLSN = pgout_u64(message, &pos, length);
+ 	uint64_t commitTime = pgout_u64(message, &pos, length);
+ 
++	/* an empty transaction leaves no byte and does not count as a commit */
++	if (writer->state == SPOOL_TXN_HELD)
++	{
++		resetPQExpBuffer(&writer->held);
++		writer->state = SPOOL_TXN_NONE;
++		return true;
++	}
++
+ 	if (endLSN != lsn)
+ 	{
+ 		log_error("Received a COMMIT of xid %u with end LSN %X/%X "
+@@ -1233,14 +1241,6 @@ spool_writer_commit(SpoolWriter *writer, const char *message, uint32_t length,
+ 		return false;
+ 	}
+ 
+-	/* an empty transaction leaves no byte and does not count as a commit */
+-	if (writer->state == SPOOL_TXN_HELD)
+-	{
+-		resetPQExpBuffer(&writer->held);
+-		writer->state = SPOOL_TXN_NONE;
+-		return true;
+-	}
+-
+ 	if (!spool_append(&writer->segment, message, length))
+ 	{
+ 		return false;

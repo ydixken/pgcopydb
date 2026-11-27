@@ -1498,6 +1498,20 @@ test_stream_errors(const char *dir)
 		  one_line(logged_since(mark), " ERROR ",
 				   "Received an empty XLogData message at 0/7210 outside a transaction"),
 		  "an empty XLogData message outside a transaction is an error that names it");
+
+	Msg emptyBegin = begin_msg(0x7410, 0x7400, 917);
+	Msg emptyOtherEnd = commit_msg(0x7440, 0x7400, 0x7430, 17);
+	Msg emptyEarly[] = {
+		begin_msg(0x7110, 0x7120, 918),
+		commit_msg(0x7128, 0x7120, 0x7128, 18)
+	};
+
+	check(new_writer(&writer, dir, &header, 0) && feed(&writer, &emptyBegin, 1) &&
+		  !feed(&writer, &emptyOtherEnd, 1) &&
+		  new_writer(&writer, dir, &header, 0) && feed(&writer, emptyEarly, 1) &&
+		  !feed(&writer, emptyEarly + 1, 1),
+		  "an empty transaction whose COMMIT end LSN is not its header LSN, "
+		  "or not after the last, is an error");
 }
 
 
@@ -1809,6 +1823,18 @@ test_closed_segment(const char *dir)
 		  spool_writer_rotate_due(&writer) && !spool_writer_rotate(&writer) &&
 		  access(path, F_OK) != 0,
 		  "rotation refuses a segment that a failed fsync closed");
+
+	/* the held BEGIN is the first refusal, so the change itself is not a second */
+	closed = new_writer(&writer, dir, &header, 0) && feed(&writer, txn, 1) &&
+			 fail_sync(&writer);
+
+	long mark = log_mark();
+	bool refusedOnce = closed && !feed(&writer, txn + 1, 1) &&
+					   count(logged_since(mark), "refusing spool file") == 1;
+
+	check(refusedOnce,
+		  "a change that releases a held BEGIN onto a closed segment fails "
+		  "with one refusal");
 }
 
 
