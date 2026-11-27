@@ -23,6 +23,7 @@
 #include "cli_root.h"
 #include "copydb.h"
 #include "env_utils.h"
+#include "ld_spool.h"
 #include "ld_store.h"
 #include "ld_stream.h"
 #include "lock_utils.h"
@@ -60,6 +61,28 @@ static GUC applySessionSettings17[] = {
 	{ NULL, NULL },
 };
 
+/*
+ * A spool worker sets every setting before its first BEGIN, so that a group
+ * never carries a SET. read committed is the isolation of a group of 9d8b660,
+ * which takes it from the target default; stating it keeps the apply correct
+ * on a target that defaults to repeatable read.
+ */
+static GUC applySpoolSettings[] = {
+	COMMON_GUC_SETTINGS,
+	{ "synchronous_commit", "on" },
+	{ "session_replication_role", "'replica'" },
+	{ "row_security", "off" },
+	{ "default_transaction_isolation", "'read committed'" },
+	{ "lock_timeout", "0" },
+	{ "idle_in_transaction_session_timeout", "0" },
+	{ NULL, NULL },
+};
+
+static GUC applySessionSettings14[] = {
+	{ "idle_session_timeout", "0" },
+	{ NULL, NULL },
+};
+
 static bool readTxnCommitLSN(LogicalMessageMetadata *metadata, const char *dir,
 							 bool *txnCommitLSNFound);
 static bool parseTxnMetadataFile(const char *filename, LogicalMessageMetadata *metadata);
@@ -69,13 +92,18 @@ static bool computeTxnMetadataFilename(uint32_t xid, const char *dir, char *file
 static bool writeTxnCommitMetadata(LogicalMessageMetadata *mesg, const char *dir);
 
 static bool setupConnection(PGSQL *pgsql, StreamApplyContext *context);
+static bool stream_apply_store_lsn(StreamApplyContext *context, uint64_t lsn,
+								   CopyDBSentinel *sentinel);
+static bool stream_apply_spool_session(StreamApplyContext *context);
+static bool stream_apply_spool_group_open(StreamApplyContext *context);
+static bool stream_apply_spool_stmt(void *context, ReplayDBStmt *s);
 static bool stream_apply_load_target_relkinds(StreamApplyContext *context);
 
 static bool stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s);
 static bool stream_apply_truncate(StreamApplyContext *context, const char *sql);
 static bool stream_apply_prepare(StreamApplyContext *context, const char *name,
 								 const char *sql);
-static bool stream_apply_group_open(StreamApplyContext *context);
+static bool stream_apply_group_open(StreamApplyContext *context, GUC *settings);
 static bool stream_apply_group_rollback(StreamApplyContext *context);
 static bool stream_apply_group_close(StreamApplyContext *context,
 									 PipelineStateEntry *current);
@@ -89,6 +117,31 @@ static bool stream_apply_txn_body(StreamApplyContext *context,
 								  uint64_t begin_id,
 								  uint64_t commitLSN,
 								  bool *degrade);
+
+/*
+ * ApplyTxnState holds what the statements of one source transaction build up
+ * in the open group. The SQLite path pulls them from its iterator and the raw
+ * path is handed them by the statement source, and both run the same rules.
+ */
+typedef struct ApplyTxnState
+{
+	StreamApplyContext *context;
+	uint32_t xid;
+	uint64_t commitLSN;
+	int rows;
+	bool done;                  /* the COMMIT, ROLLBACK or degrade row came */
+	bool rolledBack;
+	bool degrade;
+	char commitTimestamp[PG_MAX_TIMESTAMP];
+	TargetRelkind *sentRefresh;
+} ApplyTxnState;
+
+static void stream_apply_txn_init(ApplyTxnState *state,
+								  StreamApplyContext *context,
+								  uint32_t xid,
+								  uint64_t commitLSN);
+static bool stream_apply_txn_stmt(ApplyTxnState *state, ReplayDBStmt *s);
+static bool stream_apply_txn_end(ApplyTxnState *state, bool success);
 
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
 
@@ -147,7 +200,16 @@ stream_apply_catchup(StreamSpecs *specs)
 	 * mode the main loop will call stream_transform_from_outputdb() again
 	 * as more rows arrive in outputDB).
 	 */
-	if (!stream_transform_context_init(specs))
+	if (context.rawSpool)
+	{
+		/* the statement builders read the two sets, and no target connection */
+		if (!stream_transform_caches_init(specs))
+		{
+			log_error("Failed to prepare the caches of the statement builders");
+			return false;
+		}
+	}
+	else if (!stream_transform_context_init(specs))
 	{
 		log_error("Failed to initialize inline transform context");
 		return false;
@@ -162,7 +224,9 @@ stream_apply_catchup(StreamSpecs *specs)
 	 */
 	(void) pipeline_state_start(specs->sourceDB, "apply", context.previousLSN);
 
-	bool success = stream_apply_replaydb(specs, &context);
+	bool success = context.rawSpool
+				   ? stream_apply_spool(specs, &context)
+				   : stream_apply_replaydb(specs, &context);
 	bool done = success;
 
 	/* a WAL worker records done only once it finished at endpos */
@@ -520,6 +584,402 @@ apply_group_limit(const char *name, int fallback)
 			 name, value, fallback);
 
 	return fallback;
+}
+
+
+/* the idle wait of a pass that found no transaction to send, in ms */
+#define APPLY_SPOOL_IDLE_MS 10
+
+/* how long the worker may send nothing before it holds the pipeline open */
+#define APPLY_SPOOL_IDLE_PING_MS 10000
+
+/* how often a worker with nothing to send reads the catalog */
+#define APPLY_SPOOL_POLL_MS 100
+
+
+/*
+ * stream_apply_spool_open_reader opens the reader of the raw spool at the
+ * position the target committed.
+ *
+ * A receive start unlinks a last segment that holds no transaction and creates
+ * it again, so a worker that kept its reader open would read the unlinked
+ * inode for good. The worker therefore opens the reader again after every
+ * receive start, and after a group that rolled back, whose members it reads
+ * again.
+ */
+bool
+stream_apply_spool_open_reader(StreamApplyContext *context, SpoolReader *reader,
+							   bool *opened)
+{
+	if (*opened)
+	{
+		(void) spool_reader_close(reader);
+		*opened = false;
+	}
+
+	if (!spool_reader_open(reader, context->paths.dir, context->previousLSN))
+	{
+		/* errors have already been logged */
+		(void) spool_reader_close(reader);
+		return false;
+	}
+
+	*opened = true;
+
+	return true;
+}
+
+
+/* opens a group of the raw path: no SET, and an xid for the origin to ride on */
+static bool
+stream_apply_spool_group_open(StreamApplyContext *context)
+{
+	if (!stream_apply_group_open(context, NULL))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/* a target transaction without an xid writes no commit record */
+	if (!pgsql_execute(&(context->applyPgConn), "SELECT txid_current()"))
+	{
+		/* errors have already been logged */
+		(void) stream_apply_group_rollback(context);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * stream_apply_spool_stmt takes one statement from the statement source. A
+ * degrade stops the source, which only a false return does, and the driver
+ * reads the member again in a group of its own.
+ */
+static bool
+stream_apply_spool_stmt(void *context, ReplayDBStmt *s)
+{
+	ApplyTxnState *state = (ApplyTxnState *) context;
+
+	return stream_apply_txn_stmt(state, s) && !state->degrade;
+}
+
+
+/*
+ * stream_apply_spool applies the indexed transactions of the raw spool to the
+ * target, in commit groups, with no SQLite file and no transform pass in the
+ * path. The worker reads the index in commit order and skips every record at
+ * or below its origin, so what it has applied is exactly what its origin says.
+ *
+ * The cut at endpos and the finish are not here: this driver stops on a signal
+ * or on a failure.
+ */
+bool
+stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
+{
+	SpoolReader reader = { 0 };
+	bool opened = false;
+	bool success = true;
+
+	/* the receive run that the reader was opened after */
+	PipelineStateEntry receive = { 0 };
+
+	(void) pipeline_state_get(specs->sourceDB, "receive", &receive);
+
+	/* pipe_rt[0] carries the out-of-band "receive done" lifecycle signal */
+	int pipe_rd = (specs->pipe_rt[0] > 0) ? specs->pipe_rt[0] : -1;
+
+	PipelineStateEntry current = { 0 };
+	strlcpy(current.process_name, "apply", sizeof(current.process_name));
+	current.run_start_lsn = context->previousLSN;
+	current.last_txn_end_lsn = context->previousLSN;
+	current.run_end_lsn = context->previousLSN;
+
+	specs->private.applyState = &current;
+
+	/* PGCOPYDB_APPLY_GROUP_TXNS=1 applies one source transaction per COMMIT */
+	int groupMaxTxns = apply_group_limit("PGCOPYDB_APPLY_GROUP_TXNS", 100);
+	int groupMaxRows = apply_group_limit("PGCOPYDB_APPLY_GROUP_ROWS", 10000);
+	int groupMaxMs = apply_group_limit("PGCOPYDB_APPLY_GROUP_MS", 200);
+
+	log_info("Applying CDC changes from the raw spool \"%s\" after LSN %X/%X, "
+			 "up to %d transactions, %d rows or %d ms per target transaction",
+			 context->paths.dir,
+			 LSN_FORMAT_ARGS(context->previousLSN),
+			 groupMaxTxns, groupMaxRows, groupMaxMs);
+
+	context->groupOpen = false;
+	context->groupCursorLSN = context->previousLSN;
+
+	/* when the worker last sent a statement, which bounds its idle time */
+	int64_t sent = feGetCurrentTimestamp();
+
+	/* when it last read the catalog, which its idle wait is shorter than */
+	int64_t polled = 0;
+
+	/* block on the pipe only after a pass that found nothing to do */
+	bool idle = false;
+
+	for (;;)
+	{
+		if (stream_apply_stopping())
+		{
+			/* the signal interrupts any query, a group COMMIT included */
+			if (context->groupOpen)
+			{
+				log_info("Apply leaves %d transactions after %X/%X "
+						 "uncommitted, the next run applies them again",
+						 context->groupTxns,
+						 LSN_FORMAT_ARGS(context->previousLSN));
+				context->groupOpen = false;
+				context->groupCursorLSN = context->previousLSN;
+			}
+
+			log_info("Apply process received a shutdown signal, stopping");
+			break;
+		}
+
+		/* the lifecycle pipe, which also serves as the idle wait */
+		if (!specs->upstream_done && pipe_rd >= 0)
+		{
+			fd_set rfds;
+			FD_ZERO(&rfds);
+			FD_SET(pipe_rd, &rfds);
+			struct timeval tv = {
+				.tv_sec = 0,
+				.tv_usec = idle ? APPLY_SPOOL_IDLE_MS * 1000 : 0
+			};
+
+			int nready = select(pipe_rd + 1, &rfds, NULL, NULL, &tv);
+
+			if (nready < 0 && errno != EINTR)
+			{
+				log_error("apply select() on pipe: %m");
+				success = false;
+				break;
+			}
+
+			if (nready > 0 && FD_ISSET(pipe_rd, &rfds))
+			{
+				(void) stream_recv_upstream_done(specs, pipe_rd);
+				pipe_rd = -1;
+			}
+		}
+		else if (idle)
+		{
+			pg_usleep(APPLY_SPOOL_IDLE_MS * 1000);
+		}
+
+		idle = false;
+
+		if (!opened &&
+			!stream_apply_spool_open_reader(context, &reader, &opened))
+		{
+			success = false;
+			break;
+		}
+
+		bool found = false;
+
+		if (!spool_reader_next(&reader, &found))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		if (!found)
+		{
+			if (context->groupOpen &&
+				!stream_apply_group_close(context, &current))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			if (feGetCurrentTimestamp() - polled >= APPLY_SPOOL_POLL_MS * 1000LL)
+			{
+				polled = feGetCurrentTimestamp();
+
+				if (!stream_apply_sync_sentinel(context, false))
+				{
+					log_warn("Failed to sync sentinel when caught up "
+							 "with the spool");
+				}
+
+				current.run_end_lsn = context->previousLSN;
+
+				/* a receive start may have replaced the segment it waits in */
+				PipelineStateEntry started = { 0 };
+
+				if (pipeline_state_get(specs->sourceDB, "receive", &started) &&
+					(started.pid != receive.pid ||
+					 started.started_at != receive.started_at))
+				{
+					receive = started;
+
+					if (!stream_apply_spool_open_reader(context, &reader,
+														&opened))
+					{
+						success = false;
+						break;
+					}
+				}
+			}
+
+			/*
+			 * An idle source leaves the pipeline untouched, where the server
+			 * and the network cannot report a broken connection. An empty
+			 * query string returns PGRES_EMPTY_QUERY, which is not a result
+			 * the pipeline sync accepts, so the statement is select 1.
+			 */
+			if (feGetCurrentTimestamp() - sent >= APPLY_SPOOL_IDLE_PING_MS * 1000LL)
+			{
+				if (!pgsql_execute(&(context->applyPgConn), "select 1") ||
+					!pgsql_sync_pipeline(&(context->applyPgConn)))
+				{
+					log_error("Failed to hold the apply pipeline open "
+							  "while the source is idle");
+					success = false;
+					break;
+				}
+
+				sent = feGetCurrentTimestamp();
+			}
+
+			idle = true;
+			continue;
+		}
+
+		SpoolIndexRecord *record = &(reader.record);
+
+		/*
+		 * The transactions this worker has applied are exactly those at or
+		 * below its origin, because it commits them in commit order and every
+		 * group commit moves the origin to its last member.
+		 */
+		if (record->endLSN <= context->previousLSN)
+		{
+			log_debug("Skip already-applied txn %u committing at %X/%X, "
+					  "at or below %X/%X",
+					  record->xid,
+					  LSN_FORMAT_ARGS(record->endLSN),
+					  LSN_FORMAT_ARGS(context->previousLSN));
+			continue;
+		}
+
+		/* a member that could not join the last group starts a new one */
+		if (context->groupOpen &&
+			record->endLSN == context->groupBreakLSN &&
+			!stream_apply_group_close(context, &current))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		current.last_xid = record->xid;
+		current.last_txn_begin_lsn = record->finalLSN;
+		current.last_txn_end_lsn = InvalidXLogRecPtr;
+		current.last_txn_complete = false;
+		current.last_txn_processed = false;
+
+		if (!context->groupOpen && !stream_apply_spool_group_open(context))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		ApplyTxnState state = { 0 };
+
+		(void) stream_apply_txn_init(&state, context,
+									 record->xid, record->endLSN);
+
+		/*
+		 * A record of no change frames, and one whose changes yield no
+		 * statement, reach the group as an empty member: it is applied as an
+		 * origin advance with no DML, merged like any other member.
+		 */
+		bool applied = stream_spool_statements(specs, &reader,
+											   &stream_apply_spool_stmt,
+											   &state);
+
+		if (!stream_apply_txn_end(&state, applied || state.degrade))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		if (state.degrade)
+		{
+			/*
+			 * Either the rows of this member are rolled back with the group
+			 * before it, or that group commits now. Both leave the reader
+			 * above a position it has to read again.
+			 */
+			context->groupBreakLSN = record->endLSN;
+
+			if ((context->groupOpen &&
+				 !stream_apply_group_close(context, &current)) ||
+				!stream_apply_spool_open_reader(context, &reader, &opened))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			continue;
+		}
+
+		if (!applied)
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		sent = feGetCurrentTimestamp();
+
+		current.last_txn_end_lsn = record->endLSN;
+		current.last_txn_complete = true;
+
+		if (context->groupTxns < groupMaxTxns &&
+			context->groupRows < groupMaxRows &&
+			feGetCurrentTimestamp() - context->groupStart < groupMaxMs * 1000LL)
+		{
+			continue;
+		}
+
+		if (!stream_apply_group_close(context, &current))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+	}
+
+	if (opened)
+	{
+		(void) spool_reader_close(&reader);
+	}
+
+	/* publish the replay_lsn that the once-a-second limit still holds back */
+	context->sentinelSyncTime = 0;
+	(void) stream_apply_sync_sentinel(context, false);
+
+	log_info("Applied %lld transactions in %lld target transactions",
+			 (long long) context->groupedTxnsCommitted,
+			 (long long) context->groupsCommitted);
+
+	/* enforce a final durable checkpoint of the in-memory apply state */
+	(void) pipeline_state_sync(specs->sourceDB, &current);
+	specs->private.applyState = NULL;
+
+	return success;
 }
 
 
@@ -1112,7 +1572,8 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			current.last_txn_complete = false;
 			current.last_txn_processed = false;
 
-			if (!context->groupOpen && !stream_apply_group_open(context))
+			if (!context->groupOpen &&
+				!stream_apply_group_open(context, applySettingsSync))
 			{
 				/* errors have already been logged */
 				success = false;
@@ -1303,10 +1764,10 @@ stream_apply_commit(StreamApplyContext *context, uint64_t lsn, char *timestamp)
 
 /*
  * stream_apply_group_open opens the target transaction that the next source
- * transactions (the group members) are applied in.
+ * transactions (the group members) are applied in, with settings on it.
  */
 static bool
-stream_apply_group_open(StreamApplyContext *context)
+stream_apply_group_open(StreamApplyContext *context, GUC *settings)
 {
 	PGSQL *applyPgConn = &(context->applyPgConn);
 
@@ -1316,7 +1777,8 @@ stream_apply_group_open(StreamApplyContext *context)
 		return false;
 	}
 
-	if (!pgsql_set_gucs(applyPgConn, applySettingsSync))
+	/* a worker that set every setting on its session passes none here */
+	if (settings != NULL && !pgsql_set_gucs(applyPgConn, settings))
 	{
 		/* errors have already been logged */
 		(void) pgsql_execute(applyPgConn, "ROLLBACK");
@@ -1422,8 +1884,8 @@ stream_apply_txn_body(StreamApplyContext *context,
 					  uint64_t commitLSN,
 					  bool *degrade)
 {
-	PGSQL *applyPgConn = &(context->applyPgConn);
 	DatabaseCatalog *replayDB = context->replayDB;
+	ApplyTxnState state = { 0 };
 
 	*degrade = false;
 
@@ -1440,21 +1902,11 @@ stream_apply_txn_body(StreamApplyContext *context,
 		return false;
 	}
 
+	(void) stream_apply_txn_init(&state, context, xid, commitLSN);
+
 	bool success = true;
-	bool rolledBack = false;
-	int rows = 0;
-	char commitTimestamp[PG_MAX_TIMESTAMP] = { 0 };
 
-	/*
-	 * Per-transaction sent-REFRESH set: when the first DML row targeting a
-	 * matview is detected we immediately queue REFRESH on the pipeline so the
-	 * server can start executing it while the client continues reading the
-	 * remaining DML rows from SQLite.  The hash deduplicates: subsequent DML
-	 * rows for the same matview are skipped without sending another REFRESH.
-	 */
-	TargetRelkind *sentRefresh = NULL;
-
-	for (;;)
+	while (!state.done)
 	{
 		if (!ld_store_iter_replay_txn_next(&iter))
 		{
@@ -1475,129 +1927,7 @@ stream_apply_txn_body(StreamApplyContext *context,
 			break;
 		}
 
-		if (s->action == STREAM_ACTION_BEGIN)
-		{
-			/* skip: the outer loop already processed this */
-			continue;
-		}
-
-		if (s->action == STREAM_ACTION_COMMIT)
-		{
-			strlcpy(commitTimestamp, s->timestamp, sizeof(commitTimestamp));
-			break;
-		}
-
-		if ((s->action == STREAM_ACTION_ROLLBACK ||
-			 s->action == STREAM_ACTION_TRUNCATE) &&
-			context->groupTxns > 0)
-		{
-			log_info("Transaction %u (%X/%X) holds a %s after %d of its rows: "
-					 "%s the %d transactions before it in their own "
-					 "target transaction",
-					 xid, LSN_FORMAT_ARGS(commitLSN),
-					 s->action == STREAM_ACTION_ROLLBACK ? "ROLLBACK" : "TRUNCATE",
-					 rows,
-					 rows > 0 ? "rolling back and re-applying" : "committing",
-					 context->groupTxns);
-			*degrade = true;
-			break;
-		}
-
-		if (s->action == STREAM_ACTION_ROLLBACK)
-		{
-			/*
-			 * Rolled-back transactions are normally not emitted by logical
-			 * decoding, but handle defensively.  We abort the target
-			 * transaction and leave previousLSN unchanged.
-			 */
-			log_notice("Rolling back transaction %u (rollback LSN %X/%X)",
-					   xid, LSN_FORMAT_ARGS(s->lsn));
-			rolledBack = true;
-			break;
-		}
-
-		/* DML row (INSERT / UPDATE / DELETE / TRUNCATE) */
-		++rows;
-
-		/*
-		 * If the target relation is a materialized view, skip the DML and
-		 * issue REFRESH MATERIALIZED VIEW on the first occurrence.  REFRESH
-		 * is queued into the pipeline immediately (no CONCURRENTLY, so it
-		 * runs inside the open transaction) — the server starts executing it
-		 * while the client continues reading the rest of the DML rows from
-		 * SQLite.  Subsequent DML rows for the same matview are silently
-		 * skipped using the sentRefresh deduplication hash.
-		 */
-		if (s->action != STREAM_ACTION_TRUNCATE &&
-			context->targetRelkindCache != NULL &&
-			!IS_EMPTY_STRING_BUFFER(s->nspname))
-		{
-			TargetRelkind lookupKey = { 0 };
-			strlcpy(lookupKey.nspname, s->nspname, sizeof(lookupKey.nspname));
-			strlcpy(lookupKey.relname, s->relname, sizeof(lookupKey.relname));
-
-			unsigned keylen =
-				offsetof(TargetRelkind, relname) +
-				sizeof(lookupKey.relname) -
-				offsetof(TargetRelkind, nspname);
-
-			TargetRelkind *found = NULL;
-
-			HASH_FIND(hh, context->targetRelkindCache,
-					  lookupKey.nspname, keylen, found);
-
-			if (found != NULL && found->relkind == 'm')
-			{
-				TargetRelkind *sent = NULL;
-
-				HASH_FIND(hh, sentRefresh, lookupKey.nspname, keylen, sent);
-
-				if (sent == NULL)
-				{
-					/*
-					 * First DML row for this matview in this transaction:
-					 * send REFRESH now into the pipeline so the server starts
-					 * working on it immediately.
-					 */
-					char refreshSQL[BUFSIZE] = { 0 };
-
-					sformat(refreshSQL, sizeof(refreshSQL),
-							"REFRESH MATERIALIZED VIEW %s.%s",
-							s->nspname, s->relname);
-
-					log_info("Refreshing materialized view %s.%s (xid %u)",
-							 s->nspname, s->relname, xid);
-
-					if (!pgsql_execute(applyPgConn, refreshSQL))
-					{
-						log_error("Failed to queue REFRESH for %s.%s",
-								  s->nspname, s->relname);
-						success = false;
-						break;
-					}
-
-					sent = (TargetRelkind *) calloc(1, sizeof(TargetRelkind));
-
-					if (sent == NULL)
-					{
-						log_error(ALLOCATION_FAILED_ERROR);
-						success = false;
-						break;
-					}
-
-					strlcpy(sent->nspname, s->nspname, sizeof(sent->nspname));
-					strlcpy(sent->relname, s->relname, sizeof(sent->relname));
-					sent->relkind = 'm';
-
-					HASH_ADD(hh, sentRefresh, nspname, keylen, sent);
-				}
-
-				/* skip the DML row — REFRESH covers the matview update */
-				continue;
-			}
-		}
-
-		if (!stream_apply_dml(context, s))
+		if (!stream_apply_txn_stmt(&state, s))
 		{
 			/* errors have already been logged */
 			success = false;
@@ -1607,48 +1937,214 @@ stream_apply_txn_body(StreamApplyContext *context,
 
 	(void) ld_store_iter_replay_txn_finish(&iter);
 
-	/* free the per-transaction sent-REFRESH dedup set */
-	{
-		TargetRelkind *pr, *prTmp;
+	*degrade = state.degrade;
 
-		HASH_ITER(hh, sentRefresh, pr, prTmp)
+	return stream_apply_txn_end(&state, success);
+}
+
+
+/* stream_apply_txn_init starts a member of the open group */
+static void
+stream_apply_txn_init(ApplyTxnState *state, StreamApplyContext *context,
+					  uint32_t xid, uint64_t commitLSN)
+{
+	*state = (ApplyTxnState) {
+		.context = context,
+		.xid = xid,
+		.commitLSN = commitLSN
+	};
+}
+
+
+/*
+ * stream_apply_txn_stmt sends one statement of the member into the open group,
+ * and sets state->done at the row that ends it: its COMMIT, a ROLLBACK, or the
+ * row that makes the group degrade.
+ */
+static bool
+stream_apply_txn_stmt(ApplyTxnState *state, ReplayDBStmt *s)
+{
+	StreamApplyContext *context = state->context;
+	PGSQL *applyPgConn = &(context->applyPgConn);
+
+	if (s->action == STREAM_ACTION_BEGIN)
+	{
+		/* skip: the outer loop already processed this */
+		return true;
+	}
+
+	if (s->action == STREAM_ACTION_COMMIT)
+	{
+		strlcpy(state->commitTimestamp, s->timestamp,
+				sizeof(state->commitTimestamp));
+		state->done = true;
+		return true;
+	}
+
+	if ((s->action == STREAM_ACTION_ROLLBACK ||
+		 s->action == STREAM_ACTION_TRUNCATE) &&
+		context->groupTxns > 0)
+	{
+		log_info("Transaction %u (%X/%X) holds a %s after %d of its rows: "
+				 "%s the %d transactions before it in their own "
+				 "target transaction",
+				 state->xid, LSN_FORMAT_ARGS(state->commitLSN),
+				 s->action == STREAM_ACTION_ROLLBACK ? "ROLLBACK" : "TRUNCATE",
+				 state->rows,
+				 state->rows > 0 ? "rolling back and re-applying" : "committing",
+				 context->groupTxns);
+		state->degrade = true;
+		state->done = true;
+		return true;
+	}
+
+	if (s->action == STREAM_ACTION_ROLLBACK)
+	{
+		/*
+		 * Rolled-back transactions are normally not emitted by logical
+		 * decoding, but handle defensively.  We abort the target
+		 * transaction and leave previousLSN unchanged.
+		 */
+		log_notice("Rolling back transaction %u (rollback LSN %X/%X)",
+				   state->xid, LSN_FORMAT_ARGS(s->lsn));
+		state->rolledBack = true;
+		state->done = true;
+		return true;
+	}
+
+	/* DML row (INSERT / UPDATE / DELETE / TRUNCATE) */
+	++state->rows;
+
+	/*
+	 * If the target relation is a materialized view, skip the DML and
+	 * issue REFRESH MATERIALIZED VIEW on the first occurrence.  REFRESH
+	 * is queued into the pipeline immediately (no CONCURRENTLY, so it
+	 * runs inside the open transaction), so the server starts executing it
+	 * while the client continues reading the rest of the DML rows.
+	 * Subsequent DML rows for the same matview are silently skipped using
+	 * the sentRefresh deduplication hash.
+	 */
+	if (s->action != STREAM_ACTION_TRUNCATE &&
+		context->targetRelkindCache != NULL &&
+		!IS_EMPTY_STRING_BUFFER(s->nspname))
+	{
+		TargetRelkind lookupKey = { 0 };
+		strlcpy(lookupKey.nspname, s->nspname, sizeof(lookupKey.nspname));
+		strlcpy(lookupKey.relname, s->relname, sizeof(lookupKey.relname));
+
+		unsigned keylen =
+			offsetof(TargetRelkind, relname) +
+			sizeof(lookupKey.relname) -
+			offsetof(TargetRelkind, nspname);
+
+		TargetRelkind *found = NULL;
+
+		HASH_FIND(hh, context->targetRelkindCache,
+				  lookupKey.nspname, keylen, found);
+
+		if (found != NULL && found->relkind == 'm')
 		{
-			HASH_DEL(sentRefresh, pr);
-			free(pr);
+			TargetRelkind *sent = NULL;
+
+			HASH_FIND(hh, state->sentRefresh, lookupKey.nspname, keylen, sent);
+
+			if (sent == NULL)
+			{
+				/*
+				 * First DML row for this matview in this transaction:
+				 * send REFRESH now into the pipeline so the server starts
+				 * working on it immediately.
+				 */
+				char refreshSQL[BUFSIZE] = { 0 };
+
+				sformat(refreshSQL, sizeof(refreshSQL),
+						"REFRESH MATERIALIZED VIEW %s.%s",
+						s->nspname, s->relname);
+
+				log_info("Refreshing materialized view %s.%s (xid %u)",
+						 s->nspname, s->relname, state->xid);
+
+				if (!pgsql_execute(applyPgConn, refreshSQL))
+				{
+					log_error("Failed to queue REFRESH for %s.%s",
+							  s->nspname, s->relname);
+					return false;
+				}
+
+				sent = (TargetRelkind *) calloc(1, sizeof(TargetRelkind));
+
+				if (sent == NULL)
+				{
+					log_error(ALLOCATION_FAILED_ERROR);
+					return false;
+				}
+
+				strlcpy(sent->nspname, s->nspname, sizeof(sent->nspname));
+				strlcpy(sent->relname, s->relname, sizeof(sent->relname));
+				sent->relkind = 'm';
+
+				HASH_ADD(hh, state->sentRefresh, nspname, keylen, sent);
+			}
+
+			/* skip the DML row: REFRESH covers the matview update */
+			return true;
 		}
 	}
 
-	if (!success || rolledBack || (*degrade && rows > 0))
+	return stream_apply_dml(context, s);
+}
+
+
+/*
+ * stream_apply_txn_end closes the member: it rolls the group back when rows
+ * were sent that cannot stay, and counts the member into the group otherwise.
+ */
+static bool
+stream_apply_txn_end(ApplyTxnState *state, bool success)
+{
+	StreamApplyContext *context = state->context;
+
+	/* free the per-transaction sent-REFRESH dedup set */
+	TargetRelkind *pr, *prTmp;
+
+	HASH_ITER(hh, state->sentRefresh, pr, prTmp)
+	{
+		HASH_DEL(state->sentRefresh, pr);
+		free(pr);
+	}
+
+	if (!success || state->rolledBack || (state->degrade && state->rows > 0))
 	{
 		bool rollbackSent = stream_apply_group_rollback(context);
 
 		return success && rollbackSent;
 	}
 
-	if (*degrade)
+	if (state->degrade)
 	{
 		return true;
 	}
 
-	if (IS_EMPTY_STRING_BUFFER(commitTimestamp))
+	if (IS_EMPTY_STRING_BUFFER(state->commitTimestamp))
 	{
 		TimestampTz now = feGetCurrentTimestamp();
 
 		(void) pgsql_timestamptz_to_string(now,
-										   commitTimestamp,
-										   sizeof(commitTimestamp));
+										   state->commitTimestamp,
+										   sizeof(state->commitTimestamp));
 	}
 
 	if (context->groupTxns == 0)
 	{
-		context->groupFirstXid = xid;
+		context->groupFirstXid = state->xid;
 	}
 
-	context->groupLastXid = xid;
-	context->groupCursorLSN = commitLSN;
-	strlcpy(context->groupLastTs, commitTimestamp, sizeof(context->groupLastTs));
+	context->groupLastXid = state->xid;
+	context->groupCursorLSN = state->commitLSN;
+	strlcpy(context->groupLastTs, state->commitTimestamp,
+			sizeof(context->groupLastTs));
 	context->groupTxns++;
-	context->groupRows += rows;
+	context->groupRows += state->rows;
 
 	return true;
 }
@@ -1865,6 +2361,87 @@ stream_apply_prepare(StreamApplyContext *context, const char *name,
 
 
 /*
+ * stream_apply_prepared returns the entry of the statement that the apply is
+ * about to send, and isNew when it still has to be prepared.
+ *
+ * On the raw path a hit must also match the statement text: the hash of a
+ * statement is a hash, so two texts can share one, and running the second
+ * under the name of the first would apply the wrong rows. The SQLite path
+ * keeps the lookup by hash alone of 9d8b660.
+ */
+bool
+stream_apply_prepared(StreamApplyContext *context, uint32_t hash,
+					  const char *sql, PreparedStmt **entry, bool *isNew)
+{
+	PreparedStmt *head = NULL;
+	int texts = 0;
+
+	HASH_FIND(hh, context->preparedStmt, &hash, sizeof(hash), head);
+
+	for (PreparedStmt *stmt = head; stmt != NULL; stmt = stmt->next)
+	{
+		texts++;
+
+		if (!context->rawSpool ||
+			(sql != NULL && stmt->sql != NULL && streq(stmt->sql, sql)))
+		{
+			*entry = stmt;
+			*isNew = !stmt->prepared;
+
+			return true;
+		}
+	}
+
+	PreparedStmt *stmt = (PreparedStmt *) calloc(1, sizeof(PreparedStmt));
+
+	if (stmt == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	stmt->hash = hash;
+
+	if (texts == 0)
+	{
+		sformat(stmt->name, sizeof(stmt->name), "%x", hash);
+	}
+	else
+	{
+		sformat(stmt->name, sizeof(stmt->name), "%x_%d", hash, texts);
+	}
+
+	if (context->rawSpool && sql != NULL)
+	{
+		stmt->sql = strdup(sql);
+
+		if (stmt->sql == NULL)
+		{
+			log_error(ALLOCATION_FAILED_ERROR);
+			free(stmt);
+			return false;
+		}
+	}
+
+	/* the hash table holds the head of the chain of one hash */
+	if (head == NULL)
+	{
+		HASH_ADD(hh, context->preparedStmt, hash, sizeof(hash), stmt);
+	}
+	else
+	{
+		stmt->next = head->next;
+		head->next = stmt;
+	}
+
+	*entry = stmt;
+	*isNew = true;
+
+	return true;
+}
+
+
+/*
  * stream_apply_dml applies a single DML row (INSERT/UPDATE/DELETE/TRUNCATE)
  * to the target database.  The transaction must already be open.
  *
@@ -1892,45 +2469,28 @@ stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s)
 		return true;
 	}
 
-	uint32_t hash = s->hash;
-	PreparedStmt *stmtHashTable = context->preparedStmt;
 	PreparedStmt *stmt = NULL;
+	bool isNew = false;
 
-	HASH_FIND(hh, stmtHashTable, &hash, sizeof(hash), stmt);
-
-	if (stmt == NULL)
+	if (!stream_apply_prepared(context, s->hash, s->stmt, &stmt, &isNew))
 	{
-		char name[NAMEDATALEN] = { 0 };
-		sformat(name, sizeof(name), "%x", hash);
+		/* errors have already been logged */
+		return false;
+	}
 
-		if (!stream_apply_prepare(context, name, s->stmt))
+	if (isNew)
+	{
+		if (!stream_apply_prepare(context, stmt->name, s->stmt))
 		{
 			/* errors have already been logged */
 			return false;
 		}
 
-		stmt = (PreparedStmt *) calloc(1, sizeof(PreparedStmt));
-
-		if (stmt == NULL)
-		{
-			log_error(ALLOCATION_FAILED_ERROR);
-			return false;
-		}
-
-		stmt->hash = hash;
 		stmt->prepared = true;
-
-		HASH_ADD(hh, stmtHashTable, hash, sizeof(hash), stmt);
-
-		/* HASH_ADD can change the pointer in place, update */
-		context->preparedStmt = stmtHashTable;
 	}
 
 	if (s->data != NULL)
 	{
-		char name[NAMEDATALEN] = { 0 };
-		sformat(name, sizeof(name), "%x", hash);
-
 		JSON_Value *js = json_parse_string(s->data);
 
 		if (json_value_get_type(js) != JSONArray)
@@ -1963,7 +2523,7 @@ stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s)
 			}
 		}
 
-		if (!pgsql_execute_prepared(applyPgConn, name,
+		if (!pgsql_execute_prepared(applyPgConn, stmt->name,
 									count, paramValues,
 									NULL, NULL))
 		{
@@ -2025,7 +2585,17 @@ stream_apply_setup(StreamSpecs *specs, StreamApplyContext *context)
 	 * so we can select the correct starting file when file rotation has
 	 * produced multiple output.db files during prefetch.
 	 */
-	if (!setupReplicationOrigin(context))
+	context->rawSpool = stream_uses_raw_spool(specs);
+
+	if (context->rawSpool)
+	{
+		if (!stream_apply_spool_session(context))
+		{
+			log_error("Failed to set up the apply session for the raw spool");
+			return false;
+		}
+	}
+	else if (!setupReplicationOrigin(context))
 	{
 		log_error("Failed to setup replication origin on the target database");
 		return false;
@@ -2057,33 +2627,36 @@ stream_apply_setup(StreamSpecs *specs, StreamApplyContext *context)
 	 * ld_store_open_outputdb skips its own set_current call when the
 	 * filename is already set.
 	 */
-	if (context->previousLSN != InvalidXLogRecPtr)
+	if (!context->rawSpool)
 	{
-		if (!ld_store_set_cdc_filename_at_lsn(specs, context->previousLSN))
+		if (context->previousLSN != InvalidXLogRecPtr)
+		{
+			if (!ld_store_set_cdc_filename_at_lsn(specs, context->previousLSN))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+		}
+		else
+		{
+			if (!ld_store_set_first_cdc_filename(specs))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+		}
+
+		if (!ld_store_open_outputdb(specs))
 		{
 			/* errors have already been logged */
 			return false;
 		}
-	}
-	else
-	{
-		if (!ld_store_set_first_cdc_filename(specs))
+
+		if (!ld_store_open_replaydb(specs))
 		{
 			/* errors have already been logged */
 			return false;
 		}
-	}
-
-	if (!ld_store_open_outputdb(specs))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	if (!ld_store_open_replaydb(specs))
-	{
-		/* errors have already been logged */
-		return false;
 	}
 
 	char *process =
@@ -2134,6 +2707,23 @@ stream_apply_cleanup(StreamApplyContext *context)
 	{
 		HASH_DEL(context->targetRelkindCache, entry);
 		free(entry);
+	}
+
+	/* free the prepared statements, and the texts that the raw path keeps */
+	PreparedStmt *head, *headTmp;
+
+	HASH_ITER(hh, context->preparedStmt, head, headTmp)
+	{
+		HASH_DEL(context->preparedStmt, head);
+
+		for (PreparedStmt *stmt = head; stmt != NULL;)
+		{
+			PreparedStmt *gone = stmt;
+
+			stmt = stmt->next;
+			free(gone->sql);
+			free(gone);
+		}
 	}
 
 	return true;
@@ -2239,6 +2829,20 @@ stream_apply_wait_for_sentinel(StreamSpecs *specs, StreamApplyContext *context)
 
 
 /*
+ * stream_apply_store_lsn publishes the position the apply committed. On the
+ * raw path that position is W, which segment cleanup reads, so there the write
+ * takes the guarded writer, which refuses a value below the stored one.
+ */
+static bool
+stream_apply_store_lsn(StreamApplyContext *context, uint64_t lsn,
+					   CopyDBSentinel *sentinel)
+{
+	return sentinel_sync_apply(context->sourceDB, lsn, context->rawSpool,
+							   sentinel);
+}
+
+
+/*
  * stream_apply_sync_sentinel sync with the pgcopydb sentinel table, sending
  * the current replay LSN position and fetching the maybe new endpos and apply
  * values.
@@ -2282,8 +2886,7 @@ stream_apply_sync_sentinel(StreamApplyContext *context, bool findDurableLSN)
 	CopyDBSentinel sentinel = { 0 };
 
 	bool synced = write ?
-				  sentinel_sync_apply(context->sourceDB, durableLSN,
-									  context->guardReplayLSN, &sentinel) :
+				  stream_apply_store_lsn(context, durableLSN, &sentinel) :
 				  sentinel_get(context->sourceDB, &sentinel);
 
 	if (!synced)
@@ -3358,6 +3961,157 @@ setupReplicationOrigin(StreamApplyContext *context)
 
 
 /*
+ * How many 100 ms passes a spool worker waits for the backend of the previous
+ * run to let go of its replication origin.
+ *
+ * The number is that of APPLY_SLOT_RELEASE_WAIT, which bounds the release of a
+ * source slot in the N-slot finish. The loop here is its own, because the
+ * single-slot code reuses nothing of that finish.
+ */
+#define APPLY_ORIGIN_ACQUIRE_WAIT 300
+
+/* SQLSTATE object_in_use: another session still holds the origin */
+#define APPLY_ORIGIN_IN_USE "55006"
+
+
+/*
+ * stream_apply_spool_session prepares the target for a worker that applies
+ * from the raw spool: the two connections, every session setting a group
+ * needs, the replication origin, and the position the target committed.
+ *
+ * The order carries the exactly-once rules of the design. A successful origin
+ * acquire proves that the backend of the previous run is gone and that its
+ * last commit is settled, so the flushed origin is read after it and not
+ * before. An origin below the stored position means the target lost commits
+ * that this work directory may no longer hold, and the start is refused.
+ */
+static bool
+stream_apply_spool_session(StreamApplyContext *context)
+{
+	PGSQL *applyPgConn = &(context->applyPgConn);
+	CopyDBSentinel sentinel = { 0 };
+	uint64_t originLSN = InvalidXLogRecPtr;
+	uint32_t oid = 0;
+
+	/* the control connection answers what the pipeline cannot: a relkind */
+	if (!setupConnection(applyPgConn, context) ||
+		!setupConnection(&(context->controlPgConn), context))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!pgsql_set_gucs(applyPgConn, applySpoolSettings))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (applyPgConn->pgversion_num >= 140000 &&
+		!pgsql_set_gucs(applyPgConn, applySessionSettings14))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (applyPgConn->pgversion_num >= 170000 &&
+		!pgsql_set_gucs(applyPgConn, applySessionSettings17))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!pgsql_replication_origin_oid(applyPgConn, context->origin, &oid))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (oid == 0)
+	{
+		log_error("Failed to fetch progress for replication origin \"%s\": "
+				  "replication origin not found on target database",
+				  context->origin);
+		return false;
+	}
+
+	for (int attempt = 1;; attempt++)
+	{
+		applyPgConn->sqlstate[0] = '\0';
+
+		if (pgsql_replication_origin_session_setup(applyPgConn, context->origin))
+		{
+			break;
+		}
+
+		if (!streq(applyPgConn->sqlstate, APPLY_ORIGIN_IN_USE) ||
+			attempt >= APPLY_ORIGIN_ACQUIRE_WAIT ||
+			stream_apply_stopping())
+		{
+			log_error("Failed to take replication origin \"%s\" "
+					  "on the target database", context->origin);
+			return false;
+		}
+
+		if (attempt == 1)
+		{
+			log_info("Waiting for the session that still holds replication "
+					 "origin \"%s\" to exit", context->origin);
+		}
+
+		pg_usleep(100 * 1000);
+	}
+
+	if (!pgsql_replication_origin_progress(applyPgConn, context->origin, true,
+										   &originLSN))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!sentinel_get(context->sourceDB, &sentinel))
+	{
+		log_error("Failed to read the stored replay position of the spool");
+		return false;
+	}
+
+	if (originLSN < sentinel.replay_lsn)
+	{
+		log_error("Replication origin \"%s\" is at %X/%X on the target, "
+				  "below the stored replay position %X/%X: the target lost "
+				  "commits that this work directory no longer holds",
+				  context->origin,
+				  LSN_FORMAT_ARGS(originLSN),
+				  LSN_FORMAT_ARGS(sentinel.replay_lsn));
+		return false;
+	}
+
+	context->previousLSN = originLSN;
+
+	/* segment cleanup reads the stored position, so a failed write ends here */
+	if (!stream_apply_store_lsn(context, originLSN, &sentinel))
+	{
+		log_error("Failed to store the replay position %X/%X of this run",
+				  LSN_FORMAT_ARGS(originLSN));
+		return false;
+	}
+
+	context->sentinelWrittenLSN = originLSN;
+	context->sentinelSyncTime = (uint64_t) time(NULL);
+
+	log_info("Applying from the raw spool as replication origin \"%s\", "
+			 "which the target committed up to %X/%X",
+			 context->origin, LSN_FORMAT_ARGS(originLSN));
+
+	/*
+	 * Enter into pipeline mode, SQL statements which expects sync responses
+	 * are not allowed in this connection anymore.
+	 */
+	return pgsql_enable_pipeline_mode(applyPgConn);
+}
+
+
+/*
  * stream_apply_init_context initializes our context from pieces.
  */
 bool
@@ -3783,6 +4537,92 @@ writeTxnCommitMetadata(LogicalMessageMetadata *mesg, const char *dir)
 	}
 
 	return true;
+}
+
+
+/* what stream apply --target - prints of the transactions of the raw spool */
+typedef struct SpoolPrinted
+{
+	FILE *out;
+	StreamPrepared prepared;
+} SpoolPrinted;
+
+
+static bool
+stream_apply_spool_print(void *context, ReplayDBStmt *s)
+{
+	SpoolPrinted *printed = (SpoolPrinted *) context;
+
+	switch (s->action)
+	{
+		case STREAM_ACTION_BEGIN:
+		{
+			fformat(printed->out, "BEGIN\n");
+			return true;
+		}
+
+		case STREAM_ACTION_COMMIT:
+		{
+			fformat(printed->out, "COMMIT\n");
+			return true;
+		}
+
+		default:
+		{
+			return stream_apply_print_stmt(printed->out, s,
+										   &(printed->prepared));
+		}
+	}
+}
+
+
+/*
+ * stream_apply_spool_to_stdout prints the statements of the raw spool as
+ * stream_apply_to_stdout prints those of the SQLite path. It waits for
+ * nothing: a spool that holds no further transaction ends the output.
+ */
+bool
+stream_apply_spool_to_stdout(StreamSpecs *specs, FILE *out)
+{
+	SpoolReader reader = { 0 };
+	SpoolPrinted printed = { .out = out };
+
+	bool ok = spool_reader_open(&reader, specs->paths.dir, InvalidXLogRecPtr);
+
+	while (ok)
+	{
+		bool found = false;
+
+		if (!spool_reader_next(&reader, &found))
+		{
+			/* errors have already been logged */
+			ok = false;
+			break;
+		}
+
+		if (!found)
+		{
+			break;
+		}
+
+		if (!stream_spool_statements(specs, &reader,
+									 &stream_apply_spool_print, &printed))
+		{
+			/* errors have already been logged */
+			ok = false;
+			break;
+		}
+
+		if (specs->endpos != InvalidXLogRecPtr &&
+			specs->endpos <= reader.record.endLSN)
+		{
+			break;
+		}
+	}
+
+	(void) spool_reader_close(&reader);
+
+	return ok;
 }
 
 

@@ -6262,6 +6262,113 @@ same_as_sqlite_path(StreamSpecs *specs, DatabaseCatalog *output, const Msg *msg,
 }
 
 
+/*
+ * The statements that the apply prepares. On the raw path the hash of a
+ * statement is a hash: two texts can share one, and the second must not run
+ * under the name of the first.
+ */
+static void
+test_prepared_names(void)
+{
+	StreamApplyContext sqlite = { 0 };
+	StreamApplyContext raw = { .rawSpool = true };
+	PreparedStmt *first = NULL;
+	PreparedStmt *second = NULL;
+	PreparedStmt *again = NULL;
+	bool isNew = false;
+
+	const char *one = "INSERT INTO public.t1 (id, name) VALUES ($1, $2)";
+	const char *two = "INSERT INTO public.t2 (id, name) VALUES ($1, $2)";
+
+	bool kept = stream_apply_prepared(&sqlite, 42, one, &first, &isNew) && isNew;
+
+	first->prepared = true;
+
+	kept = kept && stream_apply_prepared(&sqlite, 42, two, &again, &isNew) &&
+		   !isNew && again == first && streq(first->name, "2a");
+
+	check(kept, "the SQLite path prepares one name per statement hash");
+
+	kept = stream_apply_prepared(&raw, 42, one, &first, &isNew) && isNew;
+
+	first->prepared = true;
+
+	kept = kept && stream_apply_prepared(&raw, 42, two, &second, &isNew) &&
+		   isNew && second != first;
+
+	if (kept)
+	{
+		second->prepared = true;
+	}
+
+	check(kept && streq(first->name, "2a") && streq(second->name, "2a_1"),
+		  "two statement texts of one hash get a prepared name of their own");
+
+	kept = stream_apply_prepared(&raw, 42, one, &again, &isNew) &&
+		   !isNew && again == first;
+	kept = kept && stream_apply_prepared(&raw, 42, two, &again, &isNew) &&
+		   !isNew && again == second;
+
+	check(kept, "each statement text of one hash comes back under its own name");
+
+	(void) stream_apply_cleanup(&sqlite);
+	(void) stream_apply_cleanup(&raw);
+}
+
+
+/*
+ * The reader of the apply worker after a receive start. A start that finds a
+ * last segment without an indexed transaction removes it and creates it again,
+ * so a worker that kept its reader open would read the unlinked inode for
+ * good.
+ */
+static void
+test_reader_reopen(const char *dir)
+{
+	StreamApplyContext context = { 0 };
+	StreamContext stream = { 0 };
+	SpoolWriter writer = { 0 };
+	SpoolWriter started = { 0 };
+	SpoolReader reader = { 0 };
+	bool opened = false;
+	bool found = false;
+	char idx[MAXPGPATH];
+	char empty[1] = { 0 };
+
+	/* segment 7 is headed, holds no transaction, and its index file is empty */
+	bool made = make_rotated(&writer, dir, false) &&
+				put_bytes(spool_file(idx, writer.dirname, 7, ".idx"), -1, empty, 0);
+
+	sformat(context.paths.dir, sizeof(context.paths.dir), "%s", writer.dirname);
+
+	bool read = made &&
+				stream_apply_spool_open_reader(&context, &reader, &opened) &&
+				next_holds(&reader, &stream, firstTxn, lengthof(firstTxn)) &&
+				next_holds(&reader, &stream, secondTxn, lengthof(secondTxn));
+
+	/* the worker waits in segment 7, at the position it committed */
+	read = read && spool_reader_next(&reader, &found) && !found;
+	context.previousLSN = reader.record.endLSN;
+
+	/* the receive start, which writes the next transaction into a new inode */
+	bool receive = read && context.previousLSN == 0xD230 &&
+				   spool_writer_open(&started, writer.dirname, 7, 2, 0) &&
+				   feed(&started, thirdTxn, lengthof(thirdTxn)) &&
+				   write_index(&started);
+
+	kill_writer(&started);
+
+	bool stale = receive && spool_reader_next(&reader, &found) && !found;
+
+	check(stale &&
+		  stream_apply_spool_open_reader(&context, &reader, &opened) &&
+		  next_holds(&reader, &stream, thirdTxn, lengthof(thirdTxn)),
+		  "a worker that opens its reader again after a receive start reads the segment that the start created");
+
+	spool_reader_close(&reader);
+}
+
+
 static void
 test_sqlite_path(void)
 {
@@ -6394,6 +6501,8 @@ main(int argc, char **argv)
 	test_reader_failures(dir);
 	test_index_chunks(dir);
 	test_statements(dir);
+	test_prepared_names();
+	test_reader_reopen(dir);
 	test_sqlite_path();
 	test_list_spool(dir, argv[2]);
 	test_disk_full(argv[1]);
