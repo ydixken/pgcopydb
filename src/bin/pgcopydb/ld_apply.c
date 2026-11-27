@@ -145,6 +145,45 @@ static bool stream_apply_txn_end(ApplyTxnState *state, bool success);
 
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
 
+
+/*
+ * stream_apply_marker_at_endpos reads the done marker of the raw path: the
+ * apply row of pipeline_state with state done and the endpos it served as its
+ * end LSN. Every other exit records that row with done false.
+ */
+bool
+stream_apply_marker_at_endpos(DatabaseCatalog *sourceDB, uint64_t endpos)
+{
+	PipelineStateEntry apply = { 0 };
+
+	return endpos != InvalidXLogRecPtr &&
+		   pipeline_state_get(sourceDB, "apply", &apply) &&
+		   apply.process_name[0] != '\0' &&
+		   streq(apply.run_state, "done") &&
+		   apply.run_end_lsn == endpos;
+}
+
+
+/*
+ * stream_endpos_done_before answers whether a previous run already drained to
+ * endpos. On the raw path only the marker answers it: one worker keeps its
+ * origin at its last commit, which the cut can leave below endpos.
+ */
+bool
+stream_endpos_done_before(DatabaseCatalog *sourceDB, bool rawSpool,
+						  uint64_t endpos, uint64_t replayLSN)
+{
+	if (endpos == InvalidXLogRecPtr)
+	{
+		return false;
+	}
+
+	return rawSpool
+		   ? stream_apply_marker_at_endpos(sourceDB, endpos)
+		   : endpos <= replayLSN;
+}
+
+
 /*
  * stream_apply_catchup applies CDC changes stored in the SQLite replayDB to
  * the target database, catching up from the last-known replay LSN position.
@@ -236,9 +275,21 @@ stream_apply_catchup(StreamSpecs *specs)
 		done = success && done;
 	}
 
-	/* a WAL worker done at endpos may keep its origin below it */
-	uint64_t endLSN =
-		specs->walWorker && done ? context.stopEndpos : context.previousLSN;
+	/*
+	 * With endpos set, the raw path records done only when the driver reached
+	 * the finish of the cut, so that exit code 0 and a resume both read the
+	 * marker and never a run that a signal stopped short of endpos.
+	 */
+	bool marker = context.rawSpool && context.endpos != InvalidXLogRecPtr;
+
+	if (marker)
+	{
+		done = success && context.reachedEndPos;
+	}
+
+	/* a run done at endpos may keep its origin below it */
+	uint64_t endLSN = done && (marker || specs->walWorker)
+					  ? context.stopEndpos : context.previousLSN;
 
 	(void) pipeline_state_end(specs->sourceDB, "apply", endLSN, done);
 	(void) stream_apply_cleanup(&context);
@@ -666,14 +717,123 @@ stream_apply_spool_stmt(void *context, ReplayDBStmt *s)
 }
 
 
+/* the cut of the endpos in force, and the endpos that fixed it */
+typedef struct ApplySpoolCut
+{
+	uint64_t endpos;
+	uint64_t lsn;
+} ApplySpoolCut;
+
+
+/*
+ * stream_apply_spool_cut fixes the cut of an endpos that arrived or changed.
+ * It commits the open group first, so that the cut is the larger of endpos and
+ * the commits the worker has already made.
+ */
+static bool
+stream_apply_spool_cut(StreamApplyContext *context, PipelineStateEntry *current,
+					   ApplySpoolCut *cut)
+{
+	uint64_t endpos = context->endpos;
+
+	if (endpos == cut->endpos)
+	{
+		return true;
+	}
+
+	if (context->groupOpen && !stream_apply_group_close(context, current))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	cut->endpos = endpos;
+	cut->lsn = Max(endpos, context->previousLSN);
+
+	if (endpos != InvalidXLogRecPtr)
+	{
+		log_info("Apply cuts at %X/%X for endpos %X/%X, with the target "
+				 "committed up to %X/%X",
+				 LSN_FORMAT_ARGS(cut->lsn),
+				 LSN_FORMAT_ARGS(endpos),
+				 LSN_FORMAT_ARGS(context->previousLSN));
+	}
+
+	return true;
+}
+
+
+/*
+ * stream_apply_spool_receive_done is true once receive finished at or past
+ * endpos: the lifecycle signal carries the LSN it stopped at, and a run with
+ * no pipe left to read reads the row that receive recorded.
+ */
+static bool
+stream_apply_spool_receive_done(StreamSpecs *specs, uint64_t endpos)
+{
+	if (specs->upstream_done)
+	{
+		/* a pipe closed without an LSN reports zero, which is below endpos */
+		return endpos <= specs->upstream_done_lsn;
+	}
+
+	if (specs->pipe_rt[0] > 0)
+	{
+		return false;
+	}
+
+	PipelineStateEntry receive = { 0 };
+
+	return pipeline_state_get(specs->sourceDB, "receive", &receive) &&
+		   receive.process_name[0] != '\0' &&
+		   streq(receive.run_state, "done") &&
+		   endpos <= receive.run_end_lsn;
+}
+
+
+/*
+ * stream_apply_spool_finish ends the run at the cut. It needs all of: endpos
+ * set, receive done at or past it, nothing at or below the cut left to apply
+ * (the caller read a record above the cut, or found none), no open group, and
+ * no stop signal. Only this exit writes the done marker.
+ */
+static bool
+stream_apply_spool_finish(StreamSpecs *specs, StreamApplyContext *context,
+						  const ApplySpoolCut *cut)
+{
+	if (cut->endpos == InvalidXLogRecPtr ||
+		context->groupOpen ||
+		stream_apply_stopping() ||
+		!stream_apply_spool_receive_done(specs, cut->endpos))
+	{
+		return false;
+	}
+
+	context->reachedEndPos = true;
+	context->stopEndpos = cut->endpos;
+
+	/* the cut can lie above the last commit, and replay_lsn measures work */
+	(void) stream_apply_sync_sentinel(context, false);
+
+	log_notice("Apply reached the cut %X/%X of endpos %X/%X, "
+			   "with the target committed up to %X/%X",
+			   LSN_FORMAT_ARGS(cut->lsn),
+			   LSN_FORMAT_ARGS(cut->endpos),
+			   LSN_FORMAT_ARGS(context->previousLSN));
+
+	return true;
+}
+
+
 /*
  * stream_apply_spool applies the indexed transactions of the raw spool to the
  * target, in commit groups, with no SQLite file and no transform pass in the
  * path. The worker reads the index in commit order and skips every record at
  * or below its origin, so what it has applied is exactly what its origin says.
  *
- * The cut at endpos and the finish are not here: this driver stops on a signal
- * or on a failure.
+ * With endpos set the driver applies a transaction if and only if its commit
+ * is at or below the cut, and it ends the run at the finish of that cut. Every
+ * other exit, a signal included, leaves the done marker unwritten.
  */
 bool
 stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
@@ -720,6 +880,12 @@ stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
 
 	/* block on the pipe only after a pass that found nothing to do */
 	bool idle = false;
+
+	/* the cut of the endpos in force */
+	ApplySpoolCut cut = { 0 };
+
+	/* the commit of the record left above the cut, which a raise applies */
+	uint64_t atCut = InvalidXLogRecPtr;
 
 	for (;;)
 	{
@@ -772,6 +938,53 @@ stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
 		}
 
 		idle = false;
+
+		/*
+		 * At the cut: the worker sends nothing more until a raised endpos
+		 * moves the cut above the record it left, or the finish ends the run.
+		 */
+		if (atCut != InvalidXLogRecPtr)
+		{
+			if (feGetCurrentTimestamp() - polled >= APPLY_SPOOL_POLL_MS * 1000LL)
+			{
+				polled = feGetCurrentTimestamp();
+
+				if (!stream_apply_sync_sentinel(context, false))
+				{
+					log_warn("Failed to sync sentinel while waiting "
+							 "at the cut %X/%X",
+							 LSN_FORMAT_ARGS(cut.lsn));
+				}
+
+				if (!stream_apply_spool_cut(context, &current, &cut))
+				{
+					/* errors have already been logged */
+					success = false;
+					break;
+				}
+			}
+
+			if (cut.lsn < atCut)
+			{
+				if (stream_apply_spool_finish(specs, context, &cut))
+				{
+					break;
+				}
+
+				idle = true;
+				continue;
+			}
+
+			/* the raised cut covers that record: read it again */
+			if (!stream_apply_spool_open_reader(context, &reader, &opened))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			atCut = InvalidXLogRecPtr;
+		}
 
 		if (!opened &&
 			!stream_apply_spool_open_reader(context, &reader, &opened))
@@ -829,6 +1042,19 @@ stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
 				}
 			}
 
+			if (!stream_apply_spool_cut(context, &current, &cut))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			/* the spool holds nothing left, at or below the cut or above it */
+			if (stream_apply_spool_finish(specs, context, &cut))
+			{
+				break;
+			}
+
 			/*
 			 * An idle source leaves the pipeline untouched, where the server
 			 * and the network cannot report a broken connection. An empty
@@ -867,6 +1093,53 @@ stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
 					  record->xid,
 					  LSN_FORMAT_ARGS(record->endLSN),
 					  LSN_FORMAT_ARGS(context->previousLSN));
+			continue;
+		}
+
+		/* an endpos set while the group is open keeps its later members out */
+		if (context->groupOpen)
+		{
+			CopyDBSentinel sentinel = { 0 };
+
+			/* as stream_apply_sync_sentinel: keep the last endpos */
+			if (sentinel_get(context->sourceDB, &sentinel))
+			{
+				context->endpos = sentinel.endpos;
+			}
+			else
+			{
+				log_warn("Failed to read endpos from the sentinel, "
+						 "keeping %X/%X",
+						 LSN_FORMAT_ARGS(context->endpos));
+			}
+		}
+
+		if (!stream_apply_spool_cut(context, &current, &cut))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		/* a transaction committing above the cut is not applied */
+		if (cut.endpos != InvalidXLogRecPtr && cut.lsn < record->endLSN)
+		{
+			log_info("Apply leaves txn %u committing at %X/%X above the cut "
+					 "%X/%X of endpos %X/%X",
+					 record->xid,
+					 LSN_FORMAT_ARGS(record->endLSN),
+					 LSN_FORMAT_ARGS(cut.lsn),
+					 LSN_FORMAT_ARGS(cut.endpos));
+
+			if (context->groupOpen &&
+				!stream_apply_group_close(context, &current))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			atCut = record->endLSN;
 			continue;
 		}
 
@@ -2657,7 +2930,8 @@ stream_apply_setup(StreamSpecs *specs, StreamApplyContext *context)
 
 	if (context->endpos != InvalidXLogRecPtr)
 	{
-		if (context->endpos <= context->previousLSN)
+		if (stream_endpos_done_before(context->sourceDB, context->rawSpool,
+									  context->endpos, context->previousLSN))
 		{
 			log_info("Current endpos %X/%X was previously reached at %X/%X",
 					 LSN_FORMAT_ARGS(context->endpos),
