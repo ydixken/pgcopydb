@@ -2904,6 +2904,27 @@ dir_state(const char *dir)
 }
 
 
+/* the descriptors that the process holds open, and one for the listing */
+static int
+open_fds(void)
+{
+	DIR *listing = opendir("/proc/self/fd");
+	int fds = 0;
+
+	while (listing != NULL && readdir(listing) != NULL)
+	{
+		fds++;
+	}
+
+	if (listing != NULL)
+	{
+		(void) closedir(listing);
+	}
+
+	return fds;
+}
+
+
 /*
  * true when two starts on the spool of dir each end with one ERROR line, which
  * holds line, and leave every file of dir at its size and content
@@ -3484,6 +3505,21 @@ test_start_cut(const char *dir)
 
 	check(made && refused_twice(writer.dirname, 7, 50, line),
 		  "the relation log of a start that removes a headed last segment is bound by the last index record of the segment before it");
+
+	/* the read pass opens both segments, and the writer keeps neither */
+	made = make_rotated(&writer, dir, false);
+
+	int fds = open_fds();
+
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+
+	if (started)
+	{
+		kill_writer(&opened);
+	}
+
+	check(started && fds > 0 && open_fds() == fds,
+		  "a start that removes a headed last segment leaves no file of it or of the segment before it open");
 
 	made = make_spool(&writer, dir);
 	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, writer.dirname);
