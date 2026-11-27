@@ -882,6 +882,14 @@ The following options are available to ``pgcopydb clone``:
   A value above 1 requires a source running Postgres 13 or later, the pgoutput plugin, a publication that pgcopydb manages (no ``--publication``), no ``--all-databases``, ``--follow``, a slot name of at most 51 bytes and an origin of at most 59 bytes.
   The slot name and the origin must not end in ``_w<digits>`` or ``_t<digits>``, because WAL workers name their own slots, origins and publications that way.
 
+--follow-mode
+
+  Pipeline that the follow processes use, ``sqlite`` (the default) or ``performance``.
+  ``sqlite`` is the SQLite CDC store, at every worker count.
+  ``performance`` writes the raw spool of :ref:`raw_spool` instead, and it requires ``--plugin pgoutput``, refuses ``--wal-high-traffic-tables``, and for now requires ``--wal-workers 1``.
+  The mode belongs to the work directory: a run whose mode differs from the recorded one is refused with ``Refusing the work directory:`` before it writes.
+  A directory written by a pgcopydb that had no follow mode is a ``sqlite`` directory.
+
 --wal-high-traffic-tables
 
   Comma-separated list of ``schema.table`` entries, without spaces, that each get a WAL worker of their own.
@@ -995,6 +1003,11 @@ PGCOPYDB_WAL_WORKERS
    Number of WAL workers, from 1 to 16.
    When ``--wal-workers`` is omitted from the command line, then this environment variable is used.
    Only ``pgcopydb clone`` and ``pgcopydb follow`` use it: ``pgcopydb snapshot --follow`` always sets up a single WAL worker.
+
+PGCOPYDB_FOLLOW_MODE
+
+   Follow pipeline, ``sqlite`` or ``performance``.
+   When ``--follow-mode`` is omitted from the command line, then this environment variable is used.
 
 PGCOPYDB_WAL_HIGH_TRAFFIC_TABLES
 

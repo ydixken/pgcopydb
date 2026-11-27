@@ -7,11 +7,14 @@ extended: publications are created to match the active filter set, wal2json
 respects filter-tables, and new [include-only-extension] and
 [exclude-extension] sections control which extensions are copied.
 
-The internal format for CDC streaming data has been rewritten to use SQLite.
-WAL changes are now stored in structured output.db and replay.db databases
-instead of JSON files, enabling reliable processing across process restarts,
-size-based file rotation, and a new stream cleanup command to reclaim disk
-space.
+The default internal format for CDC streaming data has been rewritten to use
+SQLite. WAL changes are stored in structured output.db and replay.db
+databases instead of JSON files, enabling reliable processing across process
+restarts, size-based file rotation, and a new stream cleanup command to
+reclaim disk space. The new --follow-mode option selects a second pipeline:
+--follow-mode performance runs pgoutput on one replication slot and spools
+the replication stream to checksummed segment files, with no SQLite store on
+the per-transaction path.
 
 Other major additions include support for cloning an entire Postgres
 instance with --all-databases, Citus-to-Citus migration, regex patterns in

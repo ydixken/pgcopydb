@@ -194,6 +194,16 @@ Otherwise run ``pgcopydb stream cleanup`` with the same ``--dir``, ``--slot-name
 A retry that creates a new replication slot copies under that slot's
 snapshot, even with ``--not-consistent``.
 
+Resuming with a follow mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A work directory records its follow mode, and every command that receives or applies refuses one of the other mode before it writes anything.
+The command exits with code 3, and its error starts with ``Refusing the work directory:``.
+Do not confuse it with ``Refusing to resume the copy:`` above, which is about a re-used slot and not about the mode.
+A directory that a pgcopydb without follow modes wrote has no record, so it reads as ``sqlite`` and resumes unchanged.
+The remedy is to resume with the mode the directory was started with.
+To change the mode, run ``pgcopydb stream cleanup`` with the same ``--dir``, ``--slot-name`` and ``--origin``, then start over with ``--restart``: the two modes share no spool, so there is nothing to convert.
+
 Resuming with WAL workers
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
