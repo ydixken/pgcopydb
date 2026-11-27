@@ -3127,6 +3127,29 @@ test_start_cut(const char *dir)
 		  "a segment file without its index file is deleted as a leftover of cleanup, and the directory synced");
 	kill_writer(&opened);
 
+	/* rotated twice, each segment indexed, and the index file of the middle one lost */
+	Msg fourthTxn[] = {
+		begin_msg(0xD350, 0xD400, 973),
+		other_msg(0xD350, 'I'),
+		commit_msg(0xD430, 0xD400, 0xD430, 73)
+	};
+
+	made = new_writer(&writer, dir, &spoolHeader, 50) &&
+		   feed(&writer, firstTxn, lengthof(firstTxn)) &&
+		   feed(&writer, secondTxn, lengthof(secondTxn)) &&
+		   write_index(&writer) && spool_writer_rotate(&writer) &&
+		   feed(&writer, thirdTxn, lengthof(thirdTxn)) && write_index(&writer) &&
+		   spool_writer_rotate(&writer) &&
+		   feed(&writer, fourthTxn, lengthof(fourthTxn)) && write_index(&writer);
+	kill_writer(&writer);
+	made = made && unlink(spool_file(idx, writer.dirname, 7, ".idx")) == 0;
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has no index file, and is neither the lowest segment nor the last one",
+			spool_file(seg, writer.dirname, 7, ".seg"));
+
+	check(made && refused_twice(writer.dirname, 7, 50, line),
+		  "a segment without its index file that is neither the lowest nor the last ends every start with an error that names it, and no file changes");
+
 	/* the CDC directory holds other files, and names that only look like ours */
 	const char *others[] = {
 		"origin", "0000000000000000.seg", "000000000000000G.idx",

@@ -1637,6 +1637,26 @@ spool_highest_below(PQExpBuffer list, uint64_t bound)
 }
 
 
+/* the lowest sequence number of the list, 0 for none */
+static uint64_t
+spool_lowest(PQExpBuffer list)
+{
+	int count = 0;
+	uint64_t *seqs = spool_seqs(list, &count);
+	uint64_t lowest = 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		if (lowest == 0 || seqs[i] < lowest)
+		{
+			lowest = seqs[i];
+		}
+	}
+
+	return lowest;
+}
+
+
 /*
  * spool_pread reads length bytes at offset, fewer only at the end of the
  * file, and sets done to the number read.
@@ -2082,11 +2102,13 @@ spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
 
 
 /*
- * What the read pass of a start found. The act pass removes last when it
- * holds no indexed transaction, and appends to tail or creates a segment.
+ * What the read pass of a start found. The act pass removes the leftover, and
+ * last when it holds no indexed transaction, then appends to tail or creates
+ * a segment.
  */
 typedef struct SpoolStart
 {
+	uint64_t leftover;          /* the lowest segment, which cleanup left, or 0 */
 	SpoolTail last;
 	bool removed;
 	SpoolTail before;           /* read when last holds no indexed transaction */
@@ -2119,6 +2141,27 @@ spool_start_read(SpoolStart *start, const char *dirname,
 					  ".idx\" has no segment file", dirname, seqs[i]);
 			return false;
 		}
+	}
+
+	/* and goes oldest first, so only the lowest segment can be its leftover */
+	seqs = spool_seqs(segments, &count);
+
+	for (int i = 0; i < count; i++)
+	{
+		if (seqs[i] == seq || spool_listed(indexes, seqs[i]))
+		{
+			continue;
+		}
+
+		if (seqs[i] != spool_lowest(segments))
+		{
+			log_error("Spool file \"%s/%016" PRIX64
+					  ".seg\" has no index file, and is neither the lowest "
+					  "segment nor the last one", dirname, seqs[i]);
+			return false;
+		}
+
+		start->leftover = seqs[i];
 	}
 
 	start->header = *fresh;
@@ -2183,45 +2226,28 @@ spool_start_read(SpoolStart *start, const char *dirname,
 
 
 /*
- * spool_start_act removes the leftovers of cleanup and a last segment without
+ * spool_start_act removes the leftover of cleanup and a last segment without
  * an indexed transaction, cuts the torn tails, and opens the writer.
  */
 static bool
 spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
-				PQExpBuffer segments, PQExpBuffer indexes, uint64_t maxSegmentSize)
+				uint64_t maxSegmentSize)
 {
-	uint64_t seq = spool_highest_below(segments, UINT64_MAX);
-	bool unlinked = start->removed;
-	int count = 0;
-	uint64_t *seqs = spool_seqs(segments, &count);
+	char leftover[MAXPGPATH];
 
-	/* a segment without its index file, but the last one, is a leftover of cleanup */
-	for (int i = 0; i < count; i++)
-	{
-		if (seqs[i] != seq && !spool_listed(indexes, seqs[i]))
-		{
-			char path[MAXPGPATH];
-
-			sformat(path, sizeof(path), "%s/%016" PRIX64 ".seg", dirname, seqs[i]);
-
-			if (!unlink_file(path))
-			{
-				return false;
-			}
-
-			unlinked = true;
-		}
-	}
+	sformat(leftover, sizeof(leftover), "%s/%016" PRIX64 ".seg", dirname,
+			start->leftover);
 
 	/* the index file first, as cleanup does */
-	if (start->removed &&
-		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename)))
+	if ((start->leftover > 0 && !unlink_file(leftover)) ||
+		(start->removed &&
+		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
 	{
 		return false;
 	}
 
 	/* the removal is on disk before create, which uses O_EXCL, makes it again */
-	if ((unlinked && !spool_sync_directory(dirname)) ||
+	if (((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname)) ||
 		(start->relations.fd >= 0 &&
 		 !spool_cut_file(start->relations.fd, start->relations.path,
 						 start->relations.end)))
@@ -2255,8 +2281,7 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 	};
 
 	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh) &&
-				   spool_start_act(&start, writer, dirname, segments, indexes,
-								   maxSegmentSize);
+				   spool_start_act(&start, writer, dirname, maxSegmentSize);
 
 	spool_tail_close(&start.last);
 	spool_tail_close(&start.before);
