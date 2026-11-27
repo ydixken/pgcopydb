@@ -3179,6 +3179,21 @@ test_start_cut(const char *dir)
 	check(made && refused_twice(writer.dirname, 7, 0, line),
 		  "a last index record whose end LSN is not the one of its COMMIT ends every start with an error, and no file changes");
 
+	/* a valid COMMIT frame whose end LSN is 0, under the record of the real one */
+	Msg zeroEnd = commit_msg(0xD230, 0xD200, 0, 71);
+	char zeroFrame[128];
+	uint64_t zeroSize = frame(zeroFrame, zeroEnd.bytes, zeroEnd.length);
+
+	made = make_spool(&writer, dir) &&
+		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), SECOND_END - zeroSize,
+					 zeroFrame, zeroSize);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" ends its last indexed transaction with a COMMIT of end LSN 0/0, and its index record holds 0/D230",
+			seg);
+
+	check(made && refused_twice(writer.dirname, 7, 0, line),
+		  "a last indexed COMMIT of end LSN 0 ends every start with an error, and no file changes");
+
 	/* cleanup unlinked the index file of the oldest segment, and was killed */
 	made = make_rotated_twice(&writer, dir) &&
 		   unlink(spool_file(idx, writer.dirname, 5, ".idx")) == 0;
