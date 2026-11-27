@@ -988,6 +988,7 @@ bool stream_replay_reached_endpos(StreamSpecs *specs,
 
 /* follow.c */
 bool follow_export_snapshot(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
+bool copydb_cdc_layout_mode(StreamSpecs *specs, bool *recorded, bool *tagged);
 bool copydb_check_cdc_layout(StreamSpecs *specs);
 bool follow_setup_databases(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
 bool follow_reset_sequences(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
