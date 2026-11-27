@@ -1,4 +1,4 @@
-Mutant: an only segment with a torn header starts the spool again at sequence number 1, whatever its name. Must fail: an only segment with a torn header and a sequence number above 1 ends the start with an error that names it, and is kept.
+Mutant: an only segment with a torn header starts the spool again at sequence number 1, whatever its name. Must fail: an only segment with a torn header and a sequence number above 1 ends every start with an error that names it, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

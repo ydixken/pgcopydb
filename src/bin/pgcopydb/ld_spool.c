@@ -1809,64 +1809,74 @@ spool_read_header(int fd, const char *path, SpoolHeader *header, bool *headed)
 }
 
 
-/*
- * spool_cut_relations cuts the relation log after its last valid record, as
- * receive may have appended a record and not synced it, and syncs the log.
- * The flush synced it up to synced, so damage before that ends the start.
- */
-static bool
-spool_cut_relations(const char *dirname, uint64_t synced)
+/* the relation log of a spool at start, which the act pass cuts */
+typedef struct SpoolRelations
 {
 	char path[MAXPGPATH];
+	int fd;                     /* open to cut, -1 when the log does not exist */
+	uint64_t size;
+	uint64_t end;               /* of its last valid record */
+} SpoolRelations;
+
+
+/*
+ * spool_relations_read finds where the valid records of the relation log end,
+ * as receive may have appended a record and not synced it. The flush synced
+ * the log up to synced, so damage before that ends the start.
+ */
+static bool
+spool_relations_read(SpoolRelations *log, const char *dirname, uint64_t synced)
+{
 	char *bytes = NULL;
 	long size = 0;
-	uint64_t end = 0;
 	SpoolRelationRecord record = { 0 };
 
-	sformat(path, sizeof(path), "%s/" SPOOL_RELATION_LOG, dirname);
+	sformat(log->path, sizeof(log->path), "%s/" SPOOL_RELATION_LOG, dirname);
 
-	int fd = open(path, O_WRONLY);
+	log->fd = open(log->path, O_WRONLY);
 
-	if (fd < 0 && errno == ENOENT && synced == 0)
+	if (log->fd < 0 && errno == ENOENT && synced == 0)
 	{
 		/* a new spool, whose writer creates the log */
 		return true;
 	}
 
-	if (fd < 0)
+	if (log->fd < 0)
 	{
-		log_error("Failed to open spool file \"%s\": %m", path);
+		log_error("Failed to open spool file \"%s\": %m", log->path);
 		return false;
 	}
 
-	bool cut = read_file(path, &bytes, &size);
-
-	while (cut && end < (uint64_t) size &&
-		   spool_relation_decode(bytes + end, (uint64_t) size - end,
-								 &record) == SPOOL_FRAME_OK)
+	if (!read_file(log->path, &bytes, &size))
 	{
-		end += SPOOL_RELATION_RECORD_SIZE(record.length);
+		return false;
 	}
 
+	log->size = (uint64_t) size;
+
+	while (log->end < log->size &&
+		   spool_relation_decode(bytes + log->end, log->size - log->end,
+								 &record) == SPOOL_FRAME_OK)
+	{
+		log->end += SPOOL_RELATION_RECORD_SIZE(record.length);
+	}
+
+	free(bytes);
+
 	/* a cut there would decode later rows with an older definition */
-	if (cut && end < synced)
+	if (log->end < synced)
 	{
 		log_error("Spool file \"%s\" ends its valid records at offset %" PRIu64
 				  ", before the %" PRIu64 " bytes that its index proves synced",
-				  path, end, synced);
-		cut = false;
+				  log->path, log->end, synced);
+		return false;
 	}
 
-	cut = cut && spool_cut_file(fd, path, end);
-
-	free(bytes);
-	(void) close(fd);
-
-	return cut;
+	return true;
 }
 
 
-/* the last segment of a spool at start, and its index file */
+/* a segment of a spool at start, and its index file */
 typedef struct SpoolTail
 {
 	SpoolSegment segment;       /* open to read, cut and append */
@@ -1961,13 +1971,25 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 }
 
 
-/*
- * spool_tail_cut checks that the last indexed transaction ends with its
- * COMMIT, then cuts the segment after it and the index after its record, and
- * syncs both: receive may have written that record and not synced it.
- */
+/* frames of another source would be applied as if the slot sent them */
 static bool
-spool_tail_cut(SpoolTail *tail, const char *dirname, bool removed)
+spool_tail_source(const SpoolTail *tail, uint64_t systemId)
+{
+	if (tail->headed && tail->header.systemId != systemId)
+	{
+		log_error("Spool file \"%s\" holds the changes of source system %" PRIu64
+				  ", and the source is system %" PRIu64,
+				  tail->segment.filename, tail->header.systemId, systemId);
+		return false;
+	}
+
+	return true;
+}
+
+
+/* spool_tail_check checks that the last indexed transaction ends with its COMMIT */
+static bool
+spool_tail_check(SpoolTail *tail)
 {
 	SpoolSegment *segment = &tail->segment;
 	SpoolFrames frames = {
@@ -1976,7 +1998,7 @@ spool_tail_cut(SpoolTail *tail, const char *dirname, bool removed)
 		.end = tail->last.endOffset,
 		.bufferStart = tail->last.beginOffset
 	};
-	bool cut = true;
+	bool checked = true;
 	bool done = false;
 	char type = 0;
 
@@ -1990,14 +2012,14 @@ spool_tail_cut(SpoolTail *tail, const char *dirname, bool removed)
 	sformat(frames.filename, sizeof(frames.filename), "%s", segment->filename);
 	initPQExpBuffer(&frames.buffer);
 
-	while (cut && !done)
+	while (checked && !done)
 	{
 		const char *message = NULL;
 		uint32_t length = 0;
 
-		cut = spool_frames_next(&frames, &message, &length, &done);
+		checked = spool_frames_next(&frames, &message, &length, &done);
 
-		if (cut && !done)
+		if (checked && !done)
 		{
 			type = message[SPOOL_XLOGDATA_HEADER_SIZE];
 		}
@@ -2005,7 +2027,7 @@ spool_tail_cut(SpoolTail *tail, const char *dirname, bool removed)
 
 	termPQExpBuffer(&frames.buffer);
 
-	if (cut && type != 'C')
+	if (checked && type != 'C')
 	{
 		log_error("Spool file \"%s\" holds no COMMIT at the end of its last "
 				  "indexed transaction, at offset %" PRIu64,
@@ -2013,9 +2035,16 @@ spool_tail_cut(SpoolTail *tail, const char *dirname, bool removed)
 		return false;
 	}
 
-	return cut &&
-		   (!removed || spool_sync_directory(dirname)) &&
-		   spool_cut_file(segment->fd, segment->filename, tail->last.endOffset) &&
+	return checked;
+}
+
+
+/* receive may have written the last index record and not synced it */
+static bool
+spool_tail_cut(SpoolTail *tail)
+{
+	return spool_cut_file(tail->segment.fd, tail->segment.filename,
+						  tail->last.endOffset) &&
 		   spool_cut_file(tail->indexFd, tail->index, tail->keep);
 }
 
@@ -2053,44 +2082,31 @@ spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
 
 
 /*
- * spool_synced_before reads the relation log length that the last index
- * record before segment seq holds, or 0 when no segment comes before it.
+ * What the read pass of a start found. The act pass removes last when it
+ * holds no indexed transaction, and appends to tail or creates a segment.
  */
-static bool
-spool_synced_before(const char *dirname, PQExpBuffer indexes, uint64_t seq,
-					uint64_t *synced)
+typedef struct SpoolStart
 {
-	uint64_t before = spool_highest_below(indexes, seq);
-	SpoolTail tail = { 0 };
-
-	*synced = 0;
-
-	if (before == 0)
-	{
-		return true;
-	}
-
-	bool read = spool_tail_read(&tail, dirname, before, true);
-
-	*synced = tail.last.relationLogEnd;
-	spool_tail_close(&tail);
-
-	return read;
-}
+	SpoolTail last;
+	bool removed;
+	SpoolTail before;           /* read when last holds no indexed transaction */
+	SpoolTail *tail;            /* where the writer appends, or NULL */
+	SpoolHeader header;         /* of the segment created when tail is NULL */
+	SpoolRelations relations;
+} SpoolStart;
 
 
 /*
- * spool_writer_resume continues the spool from its last segment. A last
- * segment without an indexed transaction is removed, and its header, or the
- * segment before it, gives where the spool continues.
+ * spool_start_read reads and checks everything that the start needs, and
+ * writes nothing, so that a refused start leaves the spool as it was.
  */
 static bool
-spool_writer_resume(SpoolWriter *writer, const char *dirname,
-					PQExpBuffer segments, PQExpBuffer indexes,
-					const SpoolHeader *fresh, uint64_t maxSegmentSize)
+spool_start_read(SpoolStart *start, const char *dirname,
+				 PQExpBuffer segments, PQExpBuffer indexes,
+				 const SpoolHeader *fresh)
 {
 	uint64_t seq = spool_highest_below(segments, UINT64_MAX);
-	bool removed = false;
+	uint64_t before = spool_highest_below(segments, seq);
 	int count = 0;
 	uint64_t *seqs = spool_seqs(indexes, &count);
 
@@ -2105,9 +2121,81 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 		}
 	}
 
-	/* and a segment without its index file, but the last one, is its leftover */
-	seqs = spool_seqs(segments, &count);
+	start->header = *fresh;
 
+	if (seq > 0 &&
+		(!spool_tail_read(&start->last, dirname, seq, spool_listed(indexes, seq)) ||
+		 !spool_tail_source(&start->last, fresh->systemId)))
+	{
+		return false;
+	}
+
+	start->removed = seq > 0 && start->last.keep == 0;
+	start->tail = seq > 0 && !start->removed ? &start->last : NULL;
+
+	/* a torn header hides where the spool goes on: only a new one restarts */
+	if (start->removed && !start->last.headed && before == 0 &&
+		seq != SPOOL_FIRST_SEQ)
+	{
+		log_error("Spool file \"%s\" has no valid header, and no segment "
+				  "before it to continue from", start->last.segment.filename);
+		return false;
+	}
+
+	/* the header gives the last transaction before it, also after cleanup */
+	if (start->removed && start->last.headed)
+	{
+		start->header = start->last.header;
+	}
+
+	if (start->removed && before > 0)
+	{
+		if (!spool_tail_read(&start->before, dirname, before,
+							 spool_listed(indexes, before)) ||
+			!spool_tail_source(&start->before, fresh->systemId))
+		{
+			return false;
+		}
+
+		/* a later segment exists only once the flush indexed this one */
+		if (start->before.keep == 0)
+		{
+			log_error("Spool file \"%s\" holds no indexed transaction, but a "
+					  "segment after it was created",
+					  start->before.segment.filename);
+			return false;
+		}
+
+		/* without the header of last, the writer appends to the one before */
+		if (!start->last.headed)
+		{
+			start->tail = &start->before;
+		}
+	}
+
+	/* the last valid index record proves the relation log synced up to its length */
+	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
+					  start->last.last.relationLogEnd;
+
+	return (start->tail == NULL || spool_tail_check(start->tail)) &&
+		   spool_relations_read(&start->relations, dirname, synced);
+}
+
+
+/*
+ * spool_start_act removes the leftovers of cleanup and a last segment without
+ * an indexed transaction, cuts the torn tails, and opens the writer.
+ */
+static bool
+spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
+				PQExpBuffer segments, PQExpBuffer indexes, uint64_t maxSegmentSize)
+{
+	uint64_t seq = spool_highest_below(segments, UINT64_MAX);
+	bool unlinked = start->removed;
+	int count = 0;
+	uint64_t *seqs = spool_seqs(segments, &count);
+
+	/* a segment without its index file, but the last one, is a leftover of cleanup */
 	for (int i = 0; i < count; i++)
 	{
 		if (seqs[i] != seq && !spool_listed(indexes, seqs[i]))
@@ -2121,94 +2209,66 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 				return false;
 			}
 
-			removed = true;
+			unlinked = true;
 		}
 	}
 
-	for (int round = 0; seq > 0; round++)
+	/* the index file first, as cleanup does */
+	if (start->removed &&
+		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename)))
 	{
-		SpoolTail tail = { 0 };
-
-		if (!spool_tail_read(&tail, dirname, seq, spool_listed(indexes, seq)))
-		{
-			spool_tail_close(&tail);
-			return false;
-		}
-
-		/* frames of another source would be applied as if the slot sent them */
-		if (tail.headed && tail.header.systemId != fresh->systemId)
-		{
-			log_error("Spool file \"%s\" holds the changes of source system %" PRIu64
-					  ", and the source is system %" PRIu64,
-					  tail.segment.filename, tail.header.systemId, fresh->systemId);
-			spool_tail_close(&tail);
-			return false;
-		}
-
-		if (tail.keep > 0)
-		{
-			bool resumed =
-				spool_cut_relations(dirname, tail.last.relationLogEnd) &&
-				spool_tail_cut(&tail, dirname, removed) &&
-				spool_tail_append(&tail, writer, dirname, maxSegmentSize);
-
-			spool_tail_close(&tail);
-
-			return resumed;
-		}
-
-		spool_tail_close(&tail);
-
-		/* a later segment exists only once the flush indexed this one */
-		if (round > 0)
-		{
-			log_error("Spool file \"%s\" holds no indexed transaction, but a "
-					  "segment after it was created", tail.segment.filename);
-			return false;
-		}
-
-		/* a torn header hides where the spool goes on: only a new one restarts */
-		if (!tail.headed && seq != SPOOL_FIRST_SEQ &&
-			spool_highest_below(indexes, seq) == 0)
-		{
-			log_error("Spool file \"%s\" has no valid header, and no segment "
-					  "before it to continue from", tail.segment.filename);
-			return false;
-		}
-
-		/* the index file first, as cleanup does */
-		if (!unlink_file(tail.index) || !unlink_file(tail.segment.filename))
-		{
-			return false;
-		}
-
-		removed = true;
-
-		/* the header gives the last transaction before it, also after cleanup */
-		if (tail.headed)
-		{
-			uint64_t synced = 0;
-
-			return spool_sync_directory(dirname) &&
-				   spool_synced_before(dirname, indexes, seq, &synced) &&
-				   spool_cut_relations(dirname, synced) &&
-				   spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
-		}
-
-		seq = spool_highest_below(indexes, seq);
+		return false;
 	}
 
-	return (!removed || spool_sync_directory(dirname)) &&
-		   spool_cut_relations(dirname, 0) &&
-		   spool_writer_create(writer, dirname, fresh, maxSegmentSize);
+	/* the removal is on disk before create, which uses O_EXCL, makes it again */
+	if ((unlinked && !spool_sync_directory(dirname)) ||
+		(start->relations.fd >= 0 &&
+		 !spool_cut_file(start->relations.fd, start->relations.path,
+						 start->relations.end)))
+	{
+		return false;
+	}
+
+	if (start->tail == NULL)
+	{
+		return spool_writer_create(writer, dirname, &start->header, maxSegmentSize);
+	}
+
+	return spool_tail_cut(start->tail) &&
+		   spool_tail_append(start->tail, writer, dirname, maxSegmentSize);
 }
 
 
 /*
- * spool_writer_open starts receive on the spool of dirname, which a kill or a
- * power loss may have left with a torn tail. The spool then ends at its last
- * indexed transaction, every cut is synced, and the writer appends after it,
- * with that transaction in lastFinalLSN and lastEndLSN.
+ * spool_writer_resume continues the spool of dirname in two passes: the read
+ * pass decides every refusal, and only then does the act pass change files.
+ */
+static bool
+spool_writer_resume(SpoolWriter *writer, const char *dirname,
+					PQExpBuffer segments, PQExpBuffer indexes,
+					const SpoolHeader *fresh, uint64_t maxSegmentSize)
+{
+	SpoolStart start = {
+		.last = { .segment = { .fd = -1 }, .indexFd = -1 },
+		.before = { .segment = { .fd = -1 }, .indexFd = -1 },
+		.relations = { .fd = -1 }
+	};
+
+	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh) &&
+				   spool_start_act(&start, writer, dirname, segments, indexes,
+								   maxSegmentSize);
+
+	spool_tail_close(&start.last);
+	spool_tail_close(&start.before);
+	(void) close(start.relations.fd);
+
+	return resumed;
+}
+
+
+/*
+ * spool_writer_open starts receive on the spool of dirname, cut back to its
+ * last indexed transaction, which lastFinalLSN and lastEndLSN then hold.
  */
 bool
 spool_writer_open(SpoolWriter *writer, const char *dirname,

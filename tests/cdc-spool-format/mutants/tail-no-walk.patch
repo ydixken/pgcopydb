@@ -1,4 +1,4 @@
-Mutant: the start does not read the frames of the last indexed transaction. Must fail: a last indexed transaction with a damaged frame ends the start with an error; a segment that ends before its last index record ends the start with an error and is not extended.
+Mutant: the start does not read the frames of the last indexed transaction. Must fail: a last indexed transaction with a damaged frame ends every start with an error, and no file changes; a segment that ends before its last index record ends every start with an error, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

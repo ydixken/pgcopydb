@@ -1,4 +1,4 @@
-Mutant: the gap test of the start compares offsets in the read chunk, so it sees no gap past the first chunk. Must fail: an invalid index record past the first read chunk, before a valid one, ends the start with an error that names its offset, and nothing is cut.
+Mutant: the gap test of the start compares offsets in the read chunk, so it sees no gap past the first chunk. Must fail: an invalid index record past the first read chunk, before a valid one, ends every start with an error that names its offset, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

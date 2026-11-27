@@ -1,4 +1,4 @@
-Mutant: the start pads a segment that is shorter than its last index record. Must fail: a segment that ends before its last index record ends the start with an error and is not extended.
+Mutant: the start pads a segment that is shorter than its last index record. Must fail: a segment that ends before its last index record ends every start with an error, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

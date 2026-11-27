@@ -1,4 +1,4 @@
-Mutant: the start keeps an index file whose valid records follow an invalid one. Must fail: an invalid index record before a valid one ends the start with an error that names its offset, and nothing is cut.
+Mutant: the start keeps an index file whose valid records follow an invalid one. Must fail: an invalid index record before a valid one ends every start with an error that names its offset, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

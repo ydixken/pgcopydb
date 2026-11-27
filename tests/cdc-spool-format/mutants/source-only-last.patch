@@ -1,4 +1,4 @@
-Mutant: the start compares the system identifier only in the header of the last segment. Must fail: a spool of another source system behind a torn last segment ends the start with an error that names both, and the segment before it is not cut.
+Mutant: the start compares the system identifier only in the header of the last segment. Must fail: a spool of another source system behind a torn last segment ends every start with an error that names both, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
