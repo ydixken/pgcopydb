@@ -1,4 +1,4 @@
-Mutant: receive does not carry the stored replay position into the start of the spool. Must fail: the refused start removed the leftover, whose transactions the target has not applied.
+Mutant: receive does not carry the stored replay position into the start of the spool. Must fail: leftover-above-w, the refusal of a leftover whose next segment ends above the stored replay position.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_stream.c

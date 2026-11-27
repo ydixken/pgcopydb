@@ -1,4 +1,4 @@
-Mutant: the flush writes its index records before it syncs the segment they name. Must fail: every transaction the power loss cut is above the confirmed flush position.
+Mutant: the flush writes its index records before it syncs the segment they name. Must fail: the start refused what the power loss left, a cut to the last sync of every file being a prefix that the format promises to read.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

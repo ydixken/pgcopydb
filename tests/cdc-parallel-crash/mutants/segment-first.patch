@@ -1,4 +1,4 @@
-Mutant: segment cleanup unlinks the segment before its index file. Must fail: the killed cleanup unlinked one index file.
+Mutant: segment cleanup unlinks the segment before its index file. Must fail: the killed cleanup left its segment.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

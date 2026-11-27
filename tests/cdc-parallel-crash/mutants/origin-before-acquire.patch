@@ -1,4 +1,4 @@
-Mutant: the worker reads the flushed origin before it acquires the origin session. Must fail: no transaction was applied twice.
+Mutant: the worker reads the flushed origin before it acquires the origin session. Must fail: the late commit case, where the second run applies the spool to its end and the keyless canary shows each transaction once.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_apply.c

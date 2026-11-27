@@ -41,6 +41,7 @@ pid=
 snapshot_pid=
 writer_pid=
 gdb_pid=
+cut_count=0
 tables='cr.acct cr.evt cr.hot'
 
 on_exit() {
@@ -270,18 +271,18 @@ kill_cmd() {
     echo "OK ${what}"
 }
 
-# kill_flush_sync ignore log what command...: the same, killed at the sync of
-# the relation log of a flush, which is after the segment sync and before the
-# index records of that flush are written
-kill_flush_sync() {
-    local ignore=$1 log=${TMPDIR}/$2.log what=$3 rc=0
-    shift 3
+# kill_at_sync ignore sync stops log what command...: run the command under
+# gdb, let it reach that flush, and kill it at the given sync inside it
+kill_at_sync() {
+    local ignore=$1 sync=$2 stops=$3 log=${TMPDIR}/$4.log what=$5 rc=0
+    shift 5
     timeout 240s gdb -q -batch -ex 'break spool_writer_flush' \
-            -ex "ignore 1 ${ignore}" -x /usr/src/pgcopydb/flush-sync.gdb \
+            -ex "ignore 1 ${ignore}" -ex "break ${sync}" -ex 'disable 2' \
+            -ex "set \$stops = ${stops}" -x /usr/src/pgcopydb/step-sync.gdb \
             --args "$@" > "${log}" 2>&1 || rc=$?
     [ "${rc}" -eq 0 ] || { cat "${log}"; fail "gdb exited ${rc} for ${what}"; }
     grep -q '^KILLED-AT-BREAKPOINT$' "${log}" ||
-        { cat "${log}"; fail "${what}: the flush did not reach its relation log sync"; }
+        { cat "${log}"; fail "${what}: the flush did not reach that sync"; }
     settled "${what}"
     wait_slots_inactive
     echo "OK ${what}"
@@ -508,9 +509,9 @@ case_receive() {
     grown "${before}"
 
     before=$(spool_txns)
-    kill_flush_sync 3 k2-index \
-                    'a receive killed after a segment sync and before its index write' \
-                    pgcopydb stream receive --resume --endpos "${FAR}" --max-replaydb-size 8kB
+    kill_at_sync 3 spool_sync 2 k2-index \
+                 'a receive killed after a segment sync and before its index write' \
+                 pgcopydb stream receive --resume --endpos "${FAR}" --max-replaydb-size 8kB
     grown "${before}"
 
     before=$(spool_txns)
@@ -590,13 +591,13 @@ case_worker() {
 }
 
 #
-# power: a kill, then every spool file cut back to the length of its last
-# sync and every segment whose directory entry no sync followed removed. The
-# start may refuse what that leaves, and it may never drop a transaction that
-# the slot reported as flushed.
+# power: two kills, and after each one every spool file cut back to the length
+# of its last sync and every segment whose directory entry no sync followed
+# removed. The start may refuse what that leaves, and it may never drop a
+# transaction that the slot reported as flushed.
 #
 case_power() {
-    local endpos confirmed before
+    local endpos total=0
 
     setup
     rounds 1 40
@@ -606,30 +607,56 @@ case_power() {
     rounds 41 100
     endpos=$(src -c 'select pg_current_wal_flush_lsn()')
 
-    # --debug prints the length of every sync, which the model below reads.
-    # The kill comes right after a block of frames reached the file, where the
-    # bytes past the last sync are the ones a power loss drops.
-    kill_cmd 4 1 spool_write_block p-kill \
+    # --debug prints the length of every sync, which the model reads. This
+    # kill leaves a file with bytes past its last sync, which is what a power
+    # loss drops.
+    kill_cmd 4 1 spool_write_block p1-kill \
              'a receive killed after a block of frames reached the file' \
              pgcopydb stream receive --resume --endpos "${endpos}" \
              --max-replaydb-size 8kB --debug
+    power_loss p1-kill "${endpos}"
+    total=$((total + cut_count))
+
+    rounds 101 140
+    endpos=$(src -c 'select pg_current_wal_flush_lsn()')
+
+    # and this one at the last sync of a flush, where the file that the order
+    # syncs first is durable and the one it syncs last is not
+    kill_at_sync 3 spool_sync 3 p2-kill \
+                 'a receive killed at the last sync of a flush' \
+                 pgcopydb stream receive --resume --endpos "${endpos}" \
+                 --max-replaydb-size 8kB --debug
+    power_loss p2-kill "${endpos}"
+    total=$((total + cut_count))
+
+    test "${total}" -gt 0 ||
+        fail 'the power loss cut no byte and removed no file, so it proves nothing'
+
+    pgcopydb stream sentinel set apply > /dev/null
+    catchup "$(spool_last)" catchup
+    equal_target
+}
+
+# power_loss log endpos: cut what the kill left, then start receive again. The
+# cut keeps a prefix of every file, so the start must read it, and it may
+# never drop a transaction that the slot reported as flushed.
+power_loss() {
+    local before confirmed
     before=$(spool_txns)
-    confirmed=$(src -c "select confirmed_flush_lsn from pg_replication_slots where slot_name = '${S}'")
+    confirmed=$(src -c "select confirmed_flush_lsn from pg_replication_slots
+                        where slot_name = '${S}'")
     echo "the slot confirmed ${confirmed} as flushed, the spool holds $(txn_lines "${before}") transactions"
 
-    cut_to_last_sync "${TMPDIR}/p-kill.log"
+    # a new segment is on disk once its directory entry is synced, and the
+    # flush names it in an index record right after, so the two must not be
+    # separated by anything a power loss can drop
+    check 'every new segment synced its directory entry at once' '' \
+          "$(unsynced_segments "${TMPDIR}/$1.log" | paste -sd, -)"
 
-    if receive_to "${endpos}" receive-after-loss; then
-        lost_above_confirmed "${before}" "${confirmed}"
-        pgcopydb stream sentinel set apply > /dev/null
-        catchup "${endpos}" catchup
-        equal_target
-    else
-        grep -qF 'below the' "${TMPDIR}/receive-after-loss.log" ||
-            fail 'the start refused the power loss without naming both positions'
-        echo 'NOTE the start refused what the power loss left, which the model allows'
-        lost_above_confirmed "${before}" "${confirmed}"
-    fi
+    cut_to_last_sync "${TMPDIR}/$1.log"
+    receive_to "$2" "$1-resume" ||
+        fail 'the start refused what the power loss left: a cut to the last sync of every file is a prefix that the format promises to read'
+    lost_above_confirmed "${before}" "${confirmed}"
 }
 
 # cut_to_last_sync log: the power loss. A file goes back to the length of its
@@ -637,7 +664,8 @@ case_power() {
 # reached the disk. A file that this run never synced is left alone: it was
 # durable before the run started.
 cut_to_last_sync() {
-    local f synced size changed=0
+    local f synced size
+    cut_count=0
 
     for f in "${spool}"/*.seg "${spool}"/*.idx "${spool}/relation.log"; do
         test -f "${f}" || continue
@@ -647,21 +675,29 @@ cut_to_last_sync() {
         test "${size}" -gt "${synced}" || continue
         echo "cut \"${f}\" from ${size} to ${synced} bytes"
         truncate -s "${synced}" "${f}"
-        changed=$((changed + 1))
+        cut_count=$((cut_count + 1))
     done
 
-    for f in "${spool}"/*.seg; do
+    for f in $(unsynced_segments "$1"); do
         test -f "${f}" || continue
-        grep -qF "Synced spool file \"${f}\"" "$1" || continue
-        sed -n "\\|Synced spool file \"${f}\"|,\$p" "$1" |
-            grep -q 'Synced spool directory' && continue
         echo "removed \"${f}\", whose directory entry no sync followed"
         rm -f "${f}" "${f%.seg}.idx"
-        changed=$((changed + 1))
+        cut_count=$((cut_count + 1))
     done
+}
 
-    test "${changed}" -gt 0 ||
-        fail 'the power loss cut no byte and removed no file, so it proves nothing'
+# unsynced_segments log: the segments whose header sync no directory sync
+# followed at once, which is what a new segment must have to be on disk
+unsynced_segments() {
+    awk '/Synced spool file .*\.seg" at 64 bytes/ {
+             match($0, /"[^"]*"/)
+             pending = substr($0, RSTART + 1, RLENGTH - 2)
+             created[pending] = 1
+             next
+         }
+         /Synced spool directory/ { if (pending != "") synced[pending] = 1; pending = ""; next }
+         /Synced spool file/ { pending = ""; next }
+         END { for (s in created) if (!(s in synced)) print s }' "$1"
 }
 
 # lost_above_confirmed old confirmed: every transaction the spool no longer
@@ -676,7 +712,8 @@ lost_above_confirmed() {
         echo 'OK the power loss cut no indexed transaction'
         return
     fi
-    check "the $(txn_lines "${lost}") transaction(s) the power loss cut are above ${2}" t \
+    echo "the power loss cut $(txn_lines "${lost}") indexed transaction(s)"
+    check 'every transaction the power loss cut is above the confirmed flush position' t \
           "$(src -c "select bool_and(x::pg_lsn > '$2'::pg_lsn) from
                      unnest(string_to_array('${lost}', ',')) as t(x) where x <> ''")"
 }

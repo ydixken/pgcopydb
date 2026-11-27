@@ -1,4 +1,4 @@
-Mutant: the start is not refused when the origin is below the stored replay position. Must fail: the start that found lost commits applied nothing.
+Mutant: the start is not refused when the origin is below the stored replay position. Must fail: lost-commits, the refusal that names the origin below the stored replay position.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_apply.c
