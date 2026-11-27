@@ -2,8 +2,9 @@
 # One run of one variant on one workload, on fresh bench-rel-* containers under
 # the shared podman lock: base clone, init, backlog, then the receive phase with
 # apply off and the apply phase. Results go to OUTDIR/<label>/ (result.json).
-# Usage: run-rel.sh OUTDIR V26-1|V27-1|V27-8|V27-8HT|BASE-1|CAND-1 A|B
-# (environment: BENCH_LOCK, and IMAGE_BASE, WANT_BASE, IMAGE_CAND, WANT_CAND for BASE-1 and CAND-1)
+# Usage: run-rel.sh OUTDIR V26-1|V27-1|V27-8|V27-8HT|BASE-1|CAND-1|PERF-1|RL A|B
+# (environment: BENCH_LOCK, IMAGE_BASE, WANT_BASE, IMAGE_CAND, WANT_CAND for the
+# local-build variants, IMAGE_V27 and WANT_V27 for the V27 variants)
 set -euo pipefail
 
 out=${1:?usage: run-rel.sh OUTDIR VARIANT WORKLOAD}
@@ -28,8 +29,9 @@ export SRC_CPUS=${SRC_CPUS:-4} DST_CPUS=${DST_CPUS:-2} POD_CPUS=${POD_CPUS:-8}
 big_in=${BIG_IN:-$d_big_in}
 # the matrix keeps only runs at the default size, seed, quotas, images and workload source
 full_size=1
-[[ -z ${TXNS:-}${SEED:-}${CLIENTS:-} && "$SRC_CPUS $DST_CPUS $POD_CPUS $big_in" == "4 2 8 $d_big_in" &&
-  $image_v26 == "$d_v26" && $image_v27 == "$d_v27" && $pg_image == "$d_pg" &&
+# IMAGE_V27 is an input of the V27 variants, not an override, so it is left out here
+[[ -z ${TXNS:-}${SEED:-}${CLIENTS:-}${PRE_COMPARE_SQL:-} && "$SRC_CPUS $DST_CPUS $POD_CPUS $big_in" == "4 2 8 $d_big_in" &&
+  $image_v26 == "$d_v26" && $pg_image == "$d_pg" &&
   $(cd "$s0" 2>/dev/null && pwd -P) == "$(cd "$d_s0" 2>/dev/null && pwd -P)" ]] || full_size=0
 
 case $workload in
@@ -40,19 +42,28 @@ case $workload in
      ht_list=public.b1,public.b2 ;;
   *) echo "run-rel.sh: workload must be A or B" >&2; exit 2 ;;
 esac
+# mode goes into the runner container's environment; rl replaces follow with a plain drain
+mode='' rl=0
 case $variant in
   V26-1) image=$image_v26 want=0.18.144.g86bf908 n=1 ww=0 ht='' ;;
-  V27-1) image=$image_v27 want=0.18.159.g9d8b660 n=1 ww=1 ht='' ;;
-  V27-8) image=$image_v27 want=0.18.159.g9d8b660 n=8 ww=1 ht='' ;;
-  V27-8HT) image=$image_v27 want=0.18.159.g9d8b660 n=8 ww=1 ht=$ht_list ;;
-  BASE-1 | CAND-1)
-    # both images are local builds, so all four settings are required inputs
+  V27-1 | V27-8 | V27-8HT)
+    # the V27 variants measure the sqlite mode of a build of this repository, not a
+    # published runner, so both settings are required inputs
+    for v in IMAGE_V27 WANT_V27; do
+      [[ -n ${!v:-} ]] || { echo "run-rel.sh: $variant needs IMAGE_V27 and WANT_V27; $v is unset" >&2; exit 2; }
+    done
+    image=$IMAGE_V27 want=$WANT_V27 ww=1 ht=''
+    case $variant in V27-1) n=1 ;; V27-8) n=8 ;; V27-8HT) n=8 ht=$ht_list ;; esac ;;
+  BASE-1 | CAND-1 | PERF-1 | RL)
+    # these images are local builds, so all four settings are required inputs
     for v in IMAGE_BASE WANT_BASE IMAGE_CAND WANT_CAND; do
       [[ -n ${!v:-} ]] || { echo "run-rel.sh: $variant needs IMAGE_BASE, WANT_BASE, IMAGE_CAND and WANT_CAND; $v is unset" >&2; exit 2; }
     done
     if [[ $variant == BASE-1 ]]; then image=$IMAGE_BASE want=$WANT_BASE; else image=$IMAGE_CAND want=$WANT_CAND; fi
-    n=1 ww=1 ht='' ;;
-  *) echo "run-rel.sh: variant must be V26-1, V27-1, V27-8, V27-8HT, BASE-1 or CAND-1" >&2; exit 2 ;;
+    n=1 ww=1 ht=''
+    # the candidate runs sqlite mode by default, so performance mode is set explicitly
+    case $variant in PERF-1) mode=performance ;; RL) rl=1 ;; esac ;;
+  *) echo "run-rel.sh: variant must be V26-1, V27-1, V27-8, V27-8HT, BASE-1, CAND-1, PERF-1 or RL" >&2; exit 2 ;;
 esac
 ((txns % clients == 0)) || { echo "run-rel.sh: TXNS must be a multiple of CLIENTS" >&2; exit 2; }
 label=${LABEL:-$workload-$variant-$(date +%Y%m%dT%H%M%S)}
@@ -123,6 +134,8 @@ locked=1
 {
   echo "label=$label"; echo "variant=$variant"; echo "workload=$workload"; echo "n=$n"; echo "wal_workers_flag=$ww"
   echo "high_traffic=$ht"; echo "txns=$txns"; echo "full_size=$full_size"; echo "clients=$clients"; echo "seed=$seed"; echo "image=$image"
+  # a flag, not the text: the SQL may hold '=' or a newline, which run.env cannot carry
+  echo "follow_mode=$mode"; echo "pre_compare_sql=$([[ -n ${PRE_COMPARE_SQL:-} ]] && echo 1 || echo 0)"
   echo "image_id=$(podman image inspect -f '{{.Id}}' "$image" 2>/dev/null)"; echo "pg_image=$pg_image"
   echo "cpus=src:$SRC_CPUS,dst:$DST_CPUS,pod:$POD_CPUS"; echo "started=$(date +%s)"
   echo "host_cpu_limit=$host_cpu_limit"
@@ -167,7 +180,10 @@ podman pod create --name bench-rel-pod --infra-name bench-rel-infra --network be
   --cpus "$POD_CPUS" --memory 8g --memory-swap 8g >/dev/null
 uris=(-e PGCOPYDB_SOURCE_PGURI=postgres://postgres@bench-rel-src:5432/bench
   -e PGCOPYDB_TARGET_PGURI=postgres://postgres@bench-rel-dst:5432/bench)
-podman run -d --name bench-rel-runner --pod bench-rel-pod -v bench-rel-work:$W "${uris[@]}" \
+runner_env=("${uris[@]}")
+# in the container, so that every exec of this run sees the same mode
+[[ -n $mode ]] && runner_env+=(-e "PGCOPYDB_FOLLOW_MODE=$mode")
+podman run -d --name bench-rel-runner --pod bench-rel-pod -v bench-rel-work:$W "${runner_env[@]}" \
   "$image" sleep infinity >/dev/null
 podman run -d --name bench-rel-load --pod bench-rel-pod -v bench-rel-work:$W:ro "${uris[@]}" \
   "$pg_image" sleep infinity >/dev/null
@@ -180,7 +196,7 @@ got=$(podman exec bench-rel-runner pgcopydb --version 2>/dev/null | sed -n 's/^p
 env_ pgcopydb "$got"
 [[ $got == "$want" ]] || { log "image $image runs pgcopydb $got, expected $want"; exit 1; }
 
-rx() { podman exec -e "N=$n" -e "WW=$ww" -e "HT=$ht" bench-rel-runner "$@"; }
+rx() { podman exec -e "N=$n" -e "WW=$ww" -e "HT=$ht" -e "RL=$rl" bench-rel-runner "$@"; }
 srcq() { podman exec bench-rel-src psql -U postgres -d bench -XAtq -c "$1"; }
 dstq() { podman exec bench-rel-dst psql -U postgres -d bench -XAtq -c "$1"; }
 for uri in PGCOPYDB_SOURCE_PGURI PGCOPYDB_TARGET_PGURI; do
@@ -242,25 +258,34 @@ srcq vacuum >/dev/null && srcq checkpoint >/dev/null
 
 echo receive >"$rd/phase"
 mark receive_start
-log "receive phase: follow --resume with apply off, endpos $endpos"
-podman exec -d -e "N=$n" -e "WW=$ww" -e "HT=$ht" bench-rel-runner $W/gen/inner-rel.sh start >/dev/null
-rx $W/gen/inner-rel.sh wait-receive "$timeout_s" >>"$rd/run.env" || { log "receive phase failed"; exit 1; }
-mark receive_end
+if ((rl)); then
+  # the drain's own failure is a validity rule, not a reason to skip cleanup
+  log "receive phase: pg_recvlogical drains slot bench_rl to endpos $endpos"
+  rx $W/gen/inner-rel.sh drain "$endpos" >>"$rd/run.env" || log "drain failed"
+  mark receive_end
+else
+  log "receive phase: follow --resume with apply off, endpos $endpos"
+  podman exec -d -e "N=$n" -e "WW=$ww" -e "HT=$ht" bench-rel-runner $W/gen/inner-rel.sh start >/dev/null
+  rx $W/gen/inner-rel.sh wait-receive "$timeout_s" >>"$rd/run.env" || { log "receive phase failed"; exit 1; }
+  mark receive_end
 
-echo apply >"$rd/phase"
-mark apply_start
-log "apply phase: sentinel set apply"
-# set -e ignores a failure inside an argument's command substitution
-on=$(rx $W/gen/inner-rel.sh apply-on) || { log "sentinel set apply failed"; exit 1; }
-env_ apply_on_t "$(head -1 <<<"$on")"
-rx $W/gen/inner-rel.sh wait-exit "$timeout_s" >>"$rd/run.env" || { log "apply phase failed"; exit 1; }
-settle dstq
-mark apply_end
-grep -q '^follow_rc=0$' "$rd/run.env" || { log "follow exited $(sed -n 's/^follow_rc=//p' "$rd/run.env")"; exit 1; }
+  echo apply >"$rd/phase"
+  mark apply_start
+  log "apply phase: sentinel set apply"
+  # set -e ignores a failure inside an argument's command substitution
+  on=$(rx $W/gen/inner-rel.sh apply-on) || { log "sentinel set apply failed"; exit 1; }
+  env_ apply_on_t "$(head -1 <<<"$on")"
+  rx $W/gen/inner-rel.sh wait-exit "$timeout_s" >>"$rd/run.env" || { log "apply phase failed"; exit 1; }
+  settle dstq
+  mark apply_end
+  grep -q '^follow_rc=0$' "$rd/run.env" || { log "follow exited $(sed -n 's/^follow_rc=//p' "$rd/run.env")"; exit 1; }
 
-echo compare >"$rd/phase"
-log "compare data"
-if rx pgcopydb compare data --dir $W/cmp >"$rd/compare.log" 2>&1; then env_ compare pass; else env_ compare fail; fi
+  echo compare >"$rd/phase"
+  # the control of F23: a target that no longer matches the source must fail compare
+  [[ -n ${PRE_COMPARE_SQL:-} ]] && { log "PRE_COMPARE_SQL on the target"; dstq "$PRE_COMPARE_SQL" >"$rd/pre-compare.log"; }
+  log "compare data"
+  if rx pgcopydb compare data --dir $W/cmp >"$rd/compare.log" 2>&1; then env_ compare pass; else env_ compare fail; fi
+fi
 if kill "$sampler" 2>/dev/null; then wait "$sampler" || true; else env_ sampler dead; fi
 sampler=''
 
@@ -272,5 +297,7 @@ both() { echo "$(srcq "$1"),$(dstq "$1")"; }
 env_ slots_left "$(both 'select count(*) from pg_replication_slots')"
 env_ publications_left "$(both 'select count(*) from pg_publication')"
 env_ origins_left "$(both 'select count(*) from pg_replication_origin')"
-grep -q '^compare=pass' "$rd/run.env" || { log "compare data reported a difference: run disqualified"; exit 3; }
+# RL has no apply and no compare, so its validity list stands on the drain alone
+((rl)) || grep -q '^compare=pass' "$rd/run.env" ||
+  { log "compare data reported a difference: run disqualified"; exit 3; }
 log "done"

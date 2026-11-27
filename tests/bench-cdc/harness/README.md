@@ -1,7 +1,8 @@
 # CDC benchmark harness: WAL receive and apply
 
 This harness measures WAL receive and WAL apply of `pgcopydb follow --plugin pgoutput` separately, one run at a time on a local podman machine, under a shared podman lock.
-It compares the runner images of operator releases v0.26.0 (pgcopydb 0.18.144.g86bf908) and v0.27.0 (0.18.159.g9d8b660), or two images built from this repository and measured together, a base and a candidate.
+It compares images built from this repository and measured together in one session, a base and a candidate, in either follow mode, against each other and against a plain `pg_recvlogical` drain.
+The variant `V26-1` still reads the published runner image of operator release v0.26.0 (pgcopydb 0.18.144.g86bf908), which no rule compares against.
 
 [TOC]
 
@@ -23,6 +24,8 @@ tests/bench-cdc/
 │   ├── order-B.txt    # workload B, 3 runs per release variant
 │   ├── order-Q-A.txt  # workload A, 5 alternating pairs of BASE-1 and CAND-1
 │   ├── order-Q-B.txt  # workload B, 5 alternating pairs of BASE-1 and CAND-1
+│   ├── order-P1-A.txt # workload A, 5 blocks of the 5 Phase 1 gate variants
+│   ├── order-P1-B.txt # workload B, 5 blocks of the 5 Phase 1 gate variants
 │   ├── schema-b.sql   # workload B: 8 tables of 1.6 kB rows
 │   └── gen-b.sh       # workload B pgbench script
 ├── workload-a/        # workload A: schema.sql and gen.sh, read by the harness, the probe and the profile
@@ -33,14 +36,20 @@ tests/bench-cdc/
 ## Variants and workloads
 
 - `V26-1`: runner v0.26.0, no `--wal-workers` (0.18.144 has no such option).
-- `V27-1`: runner v0.27.0, `--wal-workers 1`.
-- `V27-8`: runner v0.27.0, `--wal-workers 8`.
-- `V27-8HT`: runner v0.27.0, `--wal-workers 8 --wal-high-traffic-tables` with the workload's hot tables.
+- `V27-1`: the image `IMAGE_V27`, `--wal-workers 1`.
+- `V27-8`: the image `IMAGE_V27`, `--wal-workers 8`.
+- `V27-8HT`: the image `IMAGE_V27`, `--wal-workers 8 --wal-high-traffic-tables` with the workload's hot tables.
 - `BASE-1`: the image `IMAGE_BASE`, `--wal-workers 1`, which must print the version `WANT_BASE`.
 - `CAND-1`: the image `IMAGE_CAND`, `--wal-workers 1`, which must print the version `WANT_CAND`.
+- `PERF-1`: the image `IMAGE_CAND`, `--wal-workers 1`, with `PGCOPYDB_FOLLOW_MODE=performance` in the runner container, because a build of this repository runs sqlite mode by default.
+  `run.env` records the mode as `follow_mode`.
+- `RL`: a plain `pg_recvlogical` drain in the runner container of the image `IMAGE_CAND`, the yardstick for the receive rule.
+  It has no apply phase, no `compare data` and no `apply_s`.
 
-`BASE-1` and `CAND-1` need all four of `IMAGE_BASE`, `WANT_BASE`, `IMAGE_CAND` and `WANT_CAND`, and stop with a usage error when one is unset.
-`run.env` records both tags and both image ids.
+`BASE-1`, `CAND-1`, `PERF-1` and `RL` need all four of `IMAGE_BASE`, `WANT_BASE`, `IMAGE_CAND` and `WANT_CAND`, and the three `V27` variants need `IMAGE_V27` and `WANT_V27`.
+An unset one is a usage error.
+The `V27` variants measure the sqlite mode of a build of this repository, so they carry no default image: no rule reads the numbers of a published runner.
+`run.env` records every tag and image id.
 All variants use `--plugin pgoutput --slot-name bench --origin bench`, and the clone uses `--table-jobs 4 --index-jobs 4`.
 `run-rel.sh` refuses an image whose `pgcopydb --version` is not the expected one.
 
@@ -80,6 +89,14 @@ No rule compares with the numbers of a published runner image: build the base ri
 6. Apply phase: `stream sentinel set apply`, until every apply reached endpos and follow exited 0.
 7. `compare data`, then `stream cleanup`; slots, publications and origins are counted on both sides.
 
+`RL` replaces steps 5 to 7 with one drain.
+Step 3 creates the slot `bench_rl` with pgoutput where the other variants let follow create theirs, before the backlog, so both retain WAL from the same point.
+The drain is `pg_recvlogical --start --no-loop --endpos <endpos> -o proto_version=1 -o publication_names=bench -f <work volume>/rl.out`, the plugin options that follow passes, and `receive_s` is its wall time from start to exit.
+`stream cleanup` does not know that slot, so step 7 drops it.
+
+`PRE_COMPARE_SQL` runs on the target right before `compare data`.
+It exists to break a run on purpose, so a run that sets it is never full size, and the matrix refuses to start with it set.
+
 ## Phase boundaries
 
 The receive phase starts at the in-container clock read just before `follow --resume` starts.
@@ -113,7 +130,11 @@ A run is valid when all of these hold:
 - the target's row counters did not move during the receive phase, and the apply wake time is logged and comes after `sentinel set apply`;
 - WAL bytes are positive, pgbench ran every transaction, and `rows_applied` equals `rows_workload`;
 - the CPU marks exist, the sampler lived and the disk check did not abort;
-- `stream cleanup` exited 0 and left no slot, publication or replication origin on either side.
+- `stream cleanup` exited 0 and left no slot, publication or replication origin on either side;
+- in performance mode, the work directory holds a `cdc/*.seg` file after receive, so a build that ignores `PGCOPYDB_FOLLOW_MODE` cannot pass as performance mode.
+
+`RL` has no follow and no compare, so it keeps the rules it can answer and drops the rest: it exited 0, `pg_recvlogical` exited 0 and wrote a positive number of bytes, the receive CPU marks exist, WAL bytes are positive, pgbench ran every transaction, the run is not contended, and cleanup left no slot, publication or origin.
+We read the bytes the drain wrote, because a drain that found nothing to read also exits 0, in no time, and would otherwise read as the fastest receive of the session.
 
 A run is contended, and left out, when another container ran in the VM, another podman machine than `podman-machine-default` was running or starting at the start check, a phase mark or a sample (`machines.log`), or the mean CPU of host processes outside the VM exceeded `HOST_CPU_LIMIT` (400%, the 4 host cores the 14 vCPUs leave free) in either phase.
 `host_cpu()` leaves VM processes out by name, so a second machine's vCPUs would not show in the host CPU; `run-rel.sh` refuses to start while one runs, and a failed `podman machine list` counts as one.
@@ -125,6 +146,7 @@ Set `BENCH_LOCK` to the shared lock directory (see "Rules for local runs"), take
 Run the commands of this section from `tests/bench-cdc/harness`.
 
 ```sh
+export IMAGE_V27=pgcopydb-bench:cand WANT_V27=$(cat ../../../version)
 ./matrix-rel.sh "$OUT" A
 ./matrix-rel.sh "$OUT" B
 ./report-rel.sh "$OUT"
@@ -139,14 +161,27 @@ export IMAGE_CAND=pgcopydb-bench:cand WANT_CAND=$(cat ../../../version)
 REF_VARIANT=BASE-1 ./report-rel.sh "$OUT"
 ```
 
+Run the Phase 1 gate with the P1 order files, five blocks of `BASE-1`, `PERF-1`, `V27-8`, `V27-8HT` and `RL`.
+The first report serves the apply and recommendation rules, the second the receive rule.
+
+```sh
+export IMAGE_BASE=pgcopydb-bench:base WANT_BASE=<the version of the Q1 build>
+export IMAGE_CAND=pgcopydb-bench:cand WANT_CAND=<the version of the Phase 1 build>
+export IMAGE_V27=pgcopydb-bench:cand WANT_V27=$WANT_CAND
+./matrix-rel.sh "$OUT" A order-P1-A.txt
+./matrix-rel.sh "$OUT" B order-P1-B.txt
+REF_VARIANT=BASE-1 ./report-rel.sh "$OUT"
+REF_VARIANT=RL ./report-rel.sh "$OUT"
+```
+
 `matrix-rel.sh` takes an order file as its optional third argument, `order-<WORKLOAD>.txt` by default.
 `report-rel.sh` lists every variant its results hold, and prints each one against `REF_VARIANT` (default `V26-1`): the ratio of the medians, the conservative ratio, and min and max of both variants.
 
 Run the matrix again to resume it: valid runs are skipped and the others start over, the old directory kept as `<label>.prev-<epoch>`.
 A skipped run is not checked against the current images, so each comparison takes a new results directory.
-The matrix refuses to start with `TXNS`, `SEED`, `CLIENTS`, `LABEL`, `SRC_CPUS`, `DST_CPUS`, `POD_CPUS`, `PG_IMAGE`, `IMAGE_V26`, `IMAGE_V27`, `STAGE0` or `BIG_IN` set, and skips only a run whose `result.json` is valid, full size and of the order line's variant and workload.
+The matrix refuses to start with `TXNS`, `SEED`, `CLIENTS`, `LABEL`, `SRC_CPUS`, `DST_CPUS`, `POD_CPUS`, `PG_IMAGE`, `IMAGE_V26`, `STAGE0`, `BIG_IN` or `PRE_COMPARE_SQL` set, and skips only a run whose `result.json` is valid, full size and of the order line's variant and workload.
 A run is full size only when all of those settings have their defaults; `run.env` records each of them, and a `run.env` without them reads as not full size.
-`IMAGE_BASE`, `WANT_BASE`, `IMAGE_CAND` and `WANT_CAND` are inputs of two variants, not overrides, so they do not change the full size.
+`IMAGE_BASE`, `WANT_BASE`, `IMAGE_CAND`, `WANT_CAND`, `IMAGE_V27` and `WANT_V27` are inputs of the variants that need them, not overrides, so they do not change the full size.
 The report groups runs that are not full size apart from the full-size ones and labels them.
 `matrix-rel.sh` exits 1 when any run failed or ended not valid.
 
