@@ -2892,6 +2892,13 @@ test_writer_open(const char *dir)
 	check(rotated && file_size(spool_file(path, writer.dirname, 6, ".seg")) ==
 		  SPOOL_HEADER_SIZE,
 		  "a writer opened on a spool past its limit can rotate before it appends");
+
+	bytes = rotated ? slurp(spool_file(path, writer.dirname, 6, ".seg"), &size) : NULL;
+
+	check(bytes != NULL && spool_header_decode(bytes, size, &read) &&
+		  read.firstSeq == 6 && read.systemId == 7 && read.timeline == 2 &&
+		  read.lastFinalLSN == 0xD100 && read.lastEndLSN == 0xD130,
+		  "a rotation after a start writes the source system, timeline and last transaction into the new header");
 	kill_writer(&opened);
 }
 
