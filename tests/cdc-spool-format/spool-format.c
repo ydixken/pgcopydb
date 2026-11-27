@@ -4312,7 +4312,7 @@ test_list_spool(const char *dir, const char *binary)
 		begin_msg(0x110, 0x100, 994),
 		other_msg(0x110, 'I'),
 		other_msg(0x120, 'U'),
-		commit_msg(0x130, 0x100, 0x130, 94),
+		commit_msg(0x130, 0x100, 0x130, UINT64CONST(86400123456)),
 		begin_msg(0x150, 0x200, 995),
 		other_msg(0x150, 'D'),
 		commit_msg(0x230, 0x200, 0x230, 95)
@@ -4327,6 +4327,9 @@ test_list_spool(const char *dir, const char *binary)
 
 	kill_writer(&writer);
 	sformat(args, sizeof(args), "list spool --dir %s --json", top);
+
+	/* pgcopydb prints the commit time in the local time zone */
+	setenv("TZ", "UTC", 1);
 
 	char *output = made ? run_pgcopydb(binary, args, &status) : "";
 	JSON_Value *js = json_parse_string(output);
@@ -4344,7 +4347,8 @@ test_list_spool(const char *dir, const char *binary)
 		  json_object_get_number(first, "end_offset") == end &&
 		  strcmp(json_object_get_string(first, "final_lsn"), "0/100") == 0 &&
 		  strcmp(json_object_get_string(first, "end_lsn"), "0/130") == 0 &&
-		  json_object_get_string(first, "commit_time") != NULL &&
+		  strcmp(json_object_get_string(first, "commit_time"),
+				 "2000-01-02 00:00:00.123456+0000") == 0 &&
 		  json_object_get_number(second, "seq") == 2 &&
 		  json_object_get_number(second, "begin_offset") == end &&
 		  strcmp(json_object_get_string(second, "end_lsn"), "0/230") == 0,
