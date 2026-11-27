@@ -5278,11 +5278,17 @@ test_statements(const char *dir)
 		  memcmp(captured.changes, oneChanges, sizeof(oneChanges)) == 0,
 		  "a statement is handed over once the next change cannot merge with it, before the COMMIT");
 
-	captured.failAt = 2;
-	check(made && !statements(writer.dirname, new_specs(), &captured) && captured.count ==
-		  2,
-		  "a statement that the callback refuses ends the transaction, and no statement follows");
+	/* each of the eight calls: BEGIN, the six statements, COMMIT */
+	bool ended = made;
+
+	for (captured.failAt = 1; captured.failAt <= 8; captured.failAt++)
+	{
+		ended = ended && !statements(writer.dirname, new_specs(), &captured) &&
+				captured.count == captured.failAt;
+	}
 	captured.failAt = 0;
+	check(ended,
+		  "a statement that the callback refuses ends the transaction, and no statement follows");
 
 	/* a BEGIN at 0/0, as with a replication origin, and a pgcopydb change first */
 	Msg two[] = {

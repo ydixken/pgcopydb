@@ -1,0 +1,14 @@
+Mutant: the statement source hands the first statement over after the hook refused its BEGIN. Must fail: a statement that the callback refuses ends the transaction, and no statement follows.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3252,7 +3252,7 @@
+ 	{
+ 		spooled->begun = true;
+ 
+-		if (!(*spooled->hook)(spooled->context, &spooled->begin))
++		if (((void) (*spooled->hook)(spooled->context, &spooled->begin), false))
+ 		{
+ 			return false;
+ 		}

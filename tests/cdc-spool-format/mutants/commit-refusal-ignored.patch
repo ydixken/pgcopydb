@@ -1,0 +1,14 @@
+Mutant: the statement source reports a transaction as done after the hook refused its COMMIT. Must fail: a statement that the callback refuses ends the transaction, and no statement follows.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3438,7 +3438,7 @@
+ 						sizeof(commit.timestamp));
+ 
+ 				return stream_spool_hand_waiting(&spooled) &&
+-					   stream_spool_hand(&spooled, &commit);
++					   ((void) stream_spool_hand(&spooled, &commit), true);
+ 			}
+ 
+ 			default:
