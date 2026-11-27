@@ -3279,15 +3279,39 @@ test_start_cut(const char *dir)
 		  "a first segment with a torn header is removed, the directory synced, and the spool starts again");
 	kill_writer(&opened);
 
-	sformat(line, sizeof(line), "%s/tornlog", dir);
-	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, line);
-	made = mkdir(line, 0700) == 0 &&
-		   put_bytes(spool_file(seg, line, SPOOL_FIRST_SEQ, ".seg"), -1, junk, 10) &&
-		   put_bytes(log, -1, junk, 10);
-	started = made && spool_writer_open(&opened, line, 7, 2, 0);
+	/* relation records follow the first segment, so without one they are damage */
+	char name[MAXPGPATH];
+	char logged[256];
+	uint64_t loggedSize = relation_record(logged, SPOOL_FIRST_SEQ, 0, &firstTxn[1]);
 
-	check(started && file_size(log) == 0 && opened.nextSeq == SPOOL_FIRST_SEQ,
-		  "a start that begins a new spool cuts the torn tail of the relation log");
+	sformat(name, sizeof(name), "%s/logonly", dir);
+	made = mkdir(name, 0700) == 0 &&
+		   put_bytes(log_file(log, name), -1, logged, loggedSize);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds %" PRIu64
+			" bytes, but the spool has no segment with a valid header", log, loggedSize);
+
+	check(made && refused_twice(name, 7, 0, line),
+		  "a relation log that holds records in a directory without a segment ends every start with an error that names it, and no file changes");
+
+	sformat(name, sizeof(name), "%s/tornlog", dir);
+	made = mkdir(name, 0700) == 0 &&
+		   put_bytes(spool_file(seg, name, SPOOL_FIRST_SEQ, ".seg"), -1, junk, 10) &&
+		   put_bytes(log_file(log, name), -1, junk, 10);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds 10 bytes, but the spool has no segment with a valid header",
+			log);
+
+	check(made && refused_twice(name, 7, 0, line),
+		  "a relation log that holds bytes beside an only segment with a torn header ends every start with an error that names it, and no file changes");
+
+	sformat(name, sizeof(name), "%s/emptylog", dir);
+	made = mkdir(name, 0700) == 0 && put_bytes(log_file(log, name), -1, junk, 0);
+	started = made && spool_writer_open(&opened, name, 7, 2, 0);
+
+	check(started && opened.nextSeq == SPOOL_FIRST_SEQ &&
+		  file_size(spool_file(seg, name, SPOOL_FIRST_SEQ, ".seg")) == SPOOL_HEADER_SIZE,
+		  "a start on a directory with an empty relation log and no segment begins a new spool");
 	kill_writer(&opened);
 
 	/* cleanup removed the segment before a last one whose create was cut short */

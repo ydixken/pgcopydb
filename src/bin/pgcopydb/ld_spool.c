@@ -2220,8 +2220,22 @@ spool_start_read(SpoolStart *start, const char *dirname,
 	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
 					  start->last.last.relationLogEnd;
 
-	return (start->tail == NULL || spool_tail_check(start->tail)) &&
-		   spool_relations_read(&start->relations, dirname, synced);
+	if ((start->tail != NULL && !spool_tail_check(start->tail)) ||
+		!spool_relations_read(&start->relations, dirname, synced))
+	{
+		return false;
+	}
+
+	/* a new spool: relation records follow the first segment, so these are damage */
+	if (start->tail == NULL && !start->last.headed && start->relations.size > 0)
+	{
+		log_error("Spool file \"%s\" holds %" PRIu64
+				  " bytes, but the spool has no segment with a valid header",
+				  start->relations.path, start->relations.size);
+		return false;
+	}
+
+	return true;
 }
 
 
