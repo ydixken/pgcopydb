@@ -3387,17 +3387,17 @@ test_start_cut(const char *dir)
 	check(made && refused_twice(name, 7, 0, line),
 		  "a relation log of bytes that hold no record, in a directory without a segment, ends every start with an error that names it, and no file changes");
 
-	/* a first segment with a torn header beside a record of the relation log */
+	/* the writer syncs the header of the first segment before it logs a record */
 	sformat(name, sizeof(name), "%s/tornlog", dir);
 	made = mkdir(name, 0700) == 0 &&
 		   put_bytes(spool_file(seg, name, SPOOL_FIRST_SEQ, ".seg"), -1, junk, 10) &&
 		   put_bytes(log_file(log, name), -1, logged, loggedSize);
-	started = made && spool_writer_open(&opened, name, 7, 2, 0);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds %" PRIu64
+			" bytes, but the spool has no segment with a valid header", log, loggedSize);
 
-	check(started && opened.nextSeq == SPOOL_FIRST_SEQ && opened.lastEndLSN == 0 &&
-		  file_size(seg) == SPOOL_HEADER_SIZE && file_size(log) == 0,
-		  "an only segment with a torn header and sequence number 1 is removed with the records of the relation log, and the spool starts again");
-	kill_writer(&opened);
+	check(made && refused_twice(name, 7, 0, line),
+		  "a relation log that holds bytes beside an only segment with a torn header ends every start with an error that names it, and no file changes");
 
 	sformat(name, sizeof(name), "%s/emptylog", dir);
 	made = mkdir(name, 0700) == 0 && put_bytes(log_file(log, name), -1, junk, 0);

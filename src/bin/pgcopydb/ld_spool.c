@@ -2318,10 +2318,10 @@ spool_start_read(SpoolStart *start, const char *dirname,
 	}
 
 	/*
-	 * Relation records follow the first segment, and the start empties the log
-	 * of a new spool before it removes that segment, so these are damage.
+	 * The writer syncs the first header before it logs a record, and a start
+	 * empties the log before it removes that segment, so here they are damage.
 	 */
-	if (seq == 0 && start->relations.size > 0)
+	if (start->tail == NULL && !start->last.headed && start->relations.size > 0)
 	{
 		log_error("Spool file \"%s\" holds %" PRIu64
 				  " bytes, but the spool has no segment with a valid header",
