@@ -1,14 +1,17 @@
 Mutant: the start reads only the first read chunk of the last index file, and cuts the index and the segment after it. Must fail: a start on an index file of more records than one read chunk keeps them all, and cuts only its torn tail.
 Apply from the repository root with git apply, and never commit it applied.
 
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..0fce7fc 100644
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1988,7 +1988,7 @@
+@@ -2176,7 +2176,8 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
  
  	tail->indexSize = (uint64_t) st.st_size;
  
--	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
-+	for (uint64_t at = 0; at < Min((uint64_t) st.st_size, sizeof(bytes)); at += sizeof(bytes))
+-	for (uint64_t at = 0; !tail->gap && at < (uint64_t) st.st_size;
++	for (uint64_t at = 0;
++		 !tail->gap && at < Min((uint64_t) st.st_size, sizeof(bytes));
+ 		 at += sizeof(bytes))
  	{
  		if (!spool_pread(tail->indexFd, tail->index, bytes,
- 						 Min(sizeof(bytes), (uint64_t) st.st_size - at), at, &done))

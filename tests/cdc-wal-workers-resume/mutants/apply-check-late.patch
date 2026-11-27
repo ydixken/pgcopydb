@@ -1,9 +1,11 @@
 Mutant: stream apply checks the mode after it opened the spool files. Must fail: the mode case check "nothing changed by a refused stream apply".
 Apply from the repository root with git apply, and never commit it applied.
 
+diff --git a/src/bin/pgcopydb/cli_stream.c b/src/bin/pgcopydb/cli_stream.c
+index a60eae0..09976a0 100644
 --- a/src/bin/pgcopydb/cli_stream.c
 +++ b/src/bin/pgcopydb/cli_stream.c
-@@ -1541,13 +1541,6 @@
+@@ -1542,13 +1542,6 @@ cli_stream_apply(int argc, char **argv)
  		exit(EXIT_CODE_INTERNAL_ERROR);
  	}
  
@@ -14,10 +16,10 @@ Apply from the repository root with git apply, and never commit it applied.
 -		exit(EXIT_CODE_BAD_STATE);
 -	}
 -
- 	/*
- 	 * Open outputDB (its filename is looked up in the cdc_files table of
- 	 * sourceDB) and derive + open replayDB from the outputDB path.
-@@ -1669,6 +1662,12 @@
+ 	/* a performance work directory holds the spool, and no SQLite file to open */
+ 	if (stdoutMode && stream_uses_raw_spool(&specs))
+ 	{
+@@ -1684,6 +1677,12 @@ cli_stream_apply(int argc, char **argv)
  	}
  	else
  	{

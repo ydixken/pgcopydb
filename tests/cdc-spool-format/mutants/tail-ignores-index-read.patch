@@ -1,11 +1,13 @@
 Mutant: a record of the index file that cannot be read counts as invalid. Must fail: a start that cannot read the segment or its index fails with an ERROR line.
 Apply from the repository root with git apply, and never commit it applied.
 
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..93823e5 100644
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1990,11 +1990,8 @@
- 
- 	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
+@@ -2179,11 +2179,8 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
+ 	for (uint64_t at = 0; !tail->gap && at < (uint64_t) st.st_size;
+ 		 at += sizeof(bytes))
  	{
 -		if (!spool_pread(tail->indexFd, tail->index, bytes,
 -						 Min(sizeof(bytes), (uint64_t) st.st_size - at), at, &done))
@@ -15,5 +17,5 @@ Apply from the repository root with git apply, and never commit it applied.
 +		(void) spool_pread(tail->indexFd, tail->index, bytes,
 +						   Min(sizeof(bytes), (uint64_t) st.st_size - at), at, &done);
  
- 		for (uint64_t i = 0; i < done; i += SPOOL_INDEX_RECORD_SIZE)
+ 		for (uint64_t i = 0; !tail->gap && i < done; i += SPOOL_INDEX_RECORD_SIZE)
  		{

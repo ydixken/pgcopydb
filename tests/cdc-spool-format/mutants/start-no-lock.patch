@@ -2,14 +2,14 @@ Mutant: a start takes no lock, so a cleanup pass runs inside it. Must fail: a cl
 Apply from the repository root with git apply, and never commit it applied.
 
 diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
-index a798b76..c1a06ef 100644
+index c1d9088..1bf5c4f 100644
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2589,7 +2589,6 @@ spool_writer_open(SpoolWriter *writer, const char *dirname,
+@@ -2873,7 +2873,6 @@ spool_writer_open(SpoolWriter *writer, const char *dirname,
  
  	/* no cleanup pass runs while the start reads and changes the files */
  	bool opened = spool_dirname_fits(dirname) &&
 -				  spool_lock(dirname, true, &lock) &&
  				  spool_scan(dirname, &segments, &indexes) &&
  				  spool_writer_resume(writer, dirname, &segments, &indexes,
- 									  &fresh, maxSegmentSize, storedW);
+ 									  &fresh, confirmedFlushLSN,

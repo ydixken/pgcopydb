@@ -1,9 +1,11 @@
 Mutant: the start compares the system identifiers after it removed the leftover and the last segment. Must fail: a spool of another source system with a leftover of cleanup ends every start with an error that names both, and no file changes; a spool of another source system behind a torn last segment ends every start with an error that names both, and no file changes; a spool of another source system before a headed last segment of the source ends every start with an error that names both, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..3500e38 100644
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2237,8 +2237,7 @@
+@@ -2559,8 +2559,7 @@ spool_start_read(SpoolStart *start, const char *dirname,
  	start->header = *fresh;
  
  	if (seq > 0 &&
@@ -13,7 +15,7 @@ Apply from the repository root with git apply, and never commit it applied.
  	{
  		return false;
  	}
-@@ -2264,8 +2263,7 @@
+@@ -2586,8 +2585,7 @@ spool_start_read(SpoolStart *start, const char *dirname,
  	if (start->removed && before > 0)
  	{
  		if (!spool_tail_read(&start->before, dirname, before,
@@ -23,7 +25,7 @@ Apply from the repository root with git apply, and never commit it applied.
  		{
  			return false;
  		}
-@@ -2339,7 +2337,7 @@
+@@ -2728,7 +2726,7 @@ spool_start_read(SpoolStart *start, const char *dirname,
   */
  static bool
  spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
@@ -32,23 +34,23 @@ Apply from the repository root with git apply, and never commit it applied.
  {
  	char leftover[MAXPGPATH];
  
-@@ -2365,6 +2363,12 @@
- 	if (start->removed &&
- 		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename) ||
- 		 !spool_sync_directory(dirname)))
+@@ -2758,6 +2756,12 @@ spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
+ 		return false;
+ 	}
+ 
++	if (!spool_tail_source(&start->last, systemId) ||
++		!spool_tail_source(&start->before, systemId))
 +	{
 +		return false;
 +	}
 +
-+	if (!spool_tail_source(&start->last, systemId) ||
-+		!spool_tail_source(&start->before, systemId))
+ 	if (start->tail == NULL)
  	{
- 		return false;
- 	}
-@@ -2395,7 +2399,7 @@
- 	};
+ 		return spool_writer_create(writer, dirname, &start->header, maxSegmentSize);
+@@ -2786,7 +2790,7 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
  
- 	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh) &&
+ 	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh,
+ 									confirmedFlushLSN, storedW) &&
 -				   spool_start_act(&start, writer, dirname, maxSegmentSize);
 +				   spool_start_act(&start, writer, dirname, maxSegmentSize, fresh->systemId);
  

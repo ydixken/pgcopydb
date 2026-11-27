@@ -1,10 +1,12 @@
 Mutant: A directory of the other mode is accepted. Must fail: the mode case check "pgcopydb snapshot --follow --slot-name mode_slot --dir".
 Apply from the repository root with git apply, and never commit it applied.
 
+diff --git a/src/bin/pgcopydb/snapshot.c b/src/bin/pgcopydb/snapshot.c
+index c8567e6..f408981 100644
 --- a/src/bin/pgcopydb/snapshot.c
 +++ b/src/bin/pgcopydb/snapshot.c
-@@ -818,7 +818,7 @@
- 	bool tagged = found && streq(highTraffic, FOLLOW_MODE_PERFORMANCE_TAG);
+@@ -840,7 +840,7 @@ copydb_check_cdc_layout(StreamSpecs *specs)
+ 
  	bool raw = stream_uses_raw_spool(specs);
  
 -	if (tagged != raw)
