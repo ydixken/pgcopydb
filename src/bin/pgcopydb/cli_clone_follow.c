@@ -967,8 +967,10 @@ cli_follow(int argc, char **argv)
 		exit(EXIT_CODE_INTERNAL_ERROR);
 	}
 
-	if (sentinel.endpos != InvalidXLogRecPtr &&
-		sentinel.endpos <= sentinel.replay_lsn)
+	if (stream_endpos_done_before(specs.sourceDB,
+								  stream_uses_raw_spool(&specs),
+								  sentinel.endpos,
+								  sentinel.replay_lsn))
 	{
 		log_info("Current endpos %X/%X was previously reached at %X/%X",
 				 LSN_FORMAT_ARGS(sentinel.endpos),
@@ -1220,8 +1222,10 @@ start_follow_process(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs,
 		return false;
 	}
 
-	if (sentinel->endpos != InvalidXLogRecPtr &&
-		sentinel->endpos <= sentinel->replay_lsn)
+	if (stream_endpos_done_before(streamSpecs->sourceDB,
+								  stream_uses_raw_spool(streamSpecs),
+								  sentinel->endpos,
+								  sentinel->replay_lsn))
 	{
 		log_info("Current endpos %X/%X was previously reached at %X/%X",
 				 LSN_FORMAT_ARGS(sentinel->endpos),

@@ -419,6 +419,24 @@ follow_main_loop(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs)
 			return true;
 		}
 
+		/*
+		 * On the raw path the done marker is the only finish, and a signal
+		 * never writes it. A run that stopped short of endpos therefore
+		 * fails, so that the next one resumes and no cutover reads a short
+		 * drain as a finished one.
+		 */
+		if (streamSpecs->sentinel.endpos != InvalidXLogRecPtr &&
+			stream_uses_raw_spool(streamSpecs))
+		{
+			log_error("Subprocesses exited with endpos set at %X/%X and the "
+					  "apply recorded no finish there, with replay_lsn at "
+					  "%X/%X. Data not fully applied.",
+					  LSN_FORMAT_ARGS(streamSpecs->sentinel.endpos),
+					  LSN_FORMAT_ARGS(streamSpecs->sentinel.replay_lsn));
+
+			return false;
+		}
+
 		if (asked_to_stop || asked_to_stop_fast || asked_to_quit)
 		{
 			log_warn("Main follow process was asked to terminate, exiting");
@@ -497,6 +515,10 @@ follow_main_loop(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs)
  *
  * A WAL worker uses check (b) only: its apply records 'done' only at endpos,
  * once its origin and slot are there, and never after a signal.
+ *
+ * The raw path uses neither: its done marker names the endpos it served, which
+ * check (a) cannot read from a cut above endpos and check (b) would read from
+ * a run that a signal stopped.
  */
 bool
 follow_reached_endpos(StreamSpecs *streamSpecs, bool *done)
@@ -508,6 +530,22 @@ follow_reached_endpos(StreamSpecs *streamSpecs, bool *done)
 	{
 		log_error("Failed to get sentinel values");
 		return false;
+	}
+
+	if (stream_uses_raw_spool(streamSpecs))
+	{
+		*done = stream_apply_marker_at_endpos(streamSpecs->sourceDB,
+											  sentinel->endpos);
+
+		if (*done)
+		{
+			log_info("Current endpos %X/%X has been reached: the apply "
+					 "recorded its finish there, with replay_lsn %X/%X",
+					 LSN_FORMAT_ARGS(sentinel->endpos),
+					 LSN_FORMAT_ARGS(sentinel->replay_lsn));
+		}
+
+		return true;
 	}
 
 	/* Check (a): normal commit-boundary endpos, not proof for a WAL worker */
