@@ -1,0 +1,14 @@
+Mutant: Performance mode runs stream apply - on the SQLite path. Must fail: the mode case check "pgcopydb stream apply --follow-mode performance --dir /tmp/mode/fresh -".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -1381,7 +1381,7 @@
+ 	if (argc == 1 && streq(argv[0], "-"))
+ 	{
+ 		/* performance mode has no pipe protocol to fall back to */
+-		if (streamDBoptions.followMode == FOLLOW_MODE_PERFORMANCE)
++		if (false && streamDBoptions.followMode == FOLLOW_MODE_PERFORMANCE)
+ 		{
+ 			log_fatal("Option --follow-mode performance is not compatible "
+ 					  "with stream apply -");

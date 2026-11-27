@@ -1,0 +1,14 @@
+Mutant: A directory of the other mode is accepted. Must fail: the mode case check "pgcopydb snapshot --follow --slot-name mode_slot --dir".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/snapshot.c
++++ b/src/bin/pgcopydb/snapshot.c
+@@ -818,7 +818,7 @@
+ 	bool tagged = found && streq(highTraffic, FOLLOW_MODE_PERFORMANCE_TAG);
+ 	bool raw = stream_uses_raw_spool(specs);
+ 
+-	if (tagged != raw)
++	if (false && tagged != raw)
+ 	{
+ 		const char *recorded = tagged ? "performance" : "sqlite";
+ 

@@ -1,0 +1,14 @@
+Mutant: The value sqlite is not accepted. Must fail: the mode case check "env PGCOPYDB_FOLLOW_MODE=sqlite pgcopydb follow --wal-high-traffic-tables".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -535,7 +535,7 @@
+ bool
+ cli_parse_follow_mode(const char *value, FollowMode *mode)
+ {
+-	if (streq(value, "sqlite"))
++	if (false && streq(value, "sqlite"))
+ 	{
+ 		*mode = FOLLOW_MODE_SQLITE;
+ 	}

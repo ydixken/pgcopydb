@@ -1,0 +1,14 @@
+Mutant: snapshot --follow has no mode check. Must fail: the mode case check "pgcopydb snapshot --follow --slot-name mode_slot --dir".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_snapshot.c
++++ b/src/bin/pgcopydb/cli_snapshot.c
+@@ -365,7 +365,7 @@
+ 									  : (1ULL << 30);
+ 		streamSpecs.followMode = copySpecs.followMode;
+ 
+-		if (!copydb_check_cdc_layout(&streamSpecs))
++		if (false && !copydb_check_cdc_layout(&streamSpecs))
+ 		{
+ 			/* errors have already been logged */
+ 			exit(EXIT_CODE_BAD_STATE);

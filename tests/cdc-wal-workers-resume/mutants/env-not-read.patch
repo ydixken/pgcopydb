@@ -1,0 +1,14 @@
+Mutant: PGCOPYDB_FOLLOW_MODE is never read. Must fail: the mode case check "env PGCOPYDB_FOLLOW_MODE=bogus pgcopydb follow".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -317,7 +317,7 @@
+ 		++errors;
+ 	}
+ 
+-	if (env_exists(PGCOPYDB_FOLLOW_MODE) &&
++	if (false && env_exists(PGCOPYDB_FOLLOW_MODE) &&
+ 		!cli_parse_follow_mode(followMode, &(options->followMode)))
+ 	{
+ 		/* errors have already been logged */
