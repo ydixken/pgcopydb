@@ -3800,6 +3800,25 @@ test_reader(const char *dir)
 		  "a frame with a flipped bit fails the reader");
 	spool_reader_close(&reader);
 
+	/* the high byte of the length of that INSERT: it ends 16 MiB past the file */
+	uint64_t insert = SPOOL_HEADER_SIZE + SPOOL_FRAME_SIZE(firstTxn[0].length) +
+					  SPOOL_FRAME_SIZE(firstTxn[1].length);
+
+	made = make_spool(&writer, dir) &&
+		   flip_byte(spool_file(seg, writer.dirname, 5, ".seg"), insert) &&
+		   spool_reader_open(&reader, writer.dirname, 0) &&
+		   spool_reader_next(&reader, &found) && found &&
+		   spool_reader_frame(&reader, &context, &message, &length, &done) &&
+		   spool_reader_frame(&reader, &context, &message, &length, &done);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds no valid frame at offset %" PRIu64,
+			seg, insert);
+	mark = log_mark();
+	check(made && !spool_reader_frame(&reader, &context, &message, &length, &done) &&
+		  one_line(logged_since(mark), " ERROR ", line),
+		  "a frame whose length ends past its transaction fails the reader as damage, and is not read");
+	spool_reader_close(&reader);
+
 	made = make_spool(&writer, dir) &&
 		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), -1, junk, sizeof(junk));
 	check(made && reader_holds(writer.dirname, 0, all, 2),
