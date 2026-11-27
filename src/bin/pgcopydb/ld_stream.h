@@ -16,6 +16,7 @@
 #include "schema.h"
 #include "string_utils.h"
 #include "ld_pgoutput.h"
+#include "ld_spool.h"
 
 #define OUTPUT_BEGIN "BEGIN; -- "
 #define OUTPUT_COMMIT "COMMIT; -- "
@@ -442,6 +443,11 @@ typedef struct StreamContext
 	DatabaseCatalog *outputDB;   /* output.db — receive writes, apply reads */
 	DatabaseCatalog *replayDB;   /* replay.db — apply writes exclusively */
 
+	/* the raw spool of performance mode, which takes the place of output.db */
+	SpoolWriter spool;
+	bool rawSpool;
+	bool spoolOpen;             /* its start returned, and a reconnect keeps it */
+
 	/* hash table acts as a cache for tables with generated columns */
 	GeneratedColumnsCache *generatedColumnsCache;
 
@@ -686,6 +692,7 @@ struct StreamSpecs
 	uint64_t startpos;
 	uint64_t endpos;
 	uint64_t maxReplayDBSize;   /* rotate replayDB file at this size (bytes) */
+	uint64_t confirmedFlushLSN; /* of the slot, read before the start */
 	CopyDBSentinel sentinel;
 
 	LogicalStreamMode mode;
