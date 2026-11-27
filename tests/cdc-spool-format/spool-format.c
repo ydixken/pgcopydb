@@ -3488,6 +3488,29 @@ test_start_cut(const char *dir)
 		  "the start cuts the relation log after its last valid record, and syncs it");
 	kill_writer(&opened);
 
+	/* every spool before its first rotation */
+	SpoolHeader one = {
+		.firstSeq = SPOOL_FIRST_SEQ, .systemId = 7, .timeline = 2
+	};
+
+	made = new_writer(&writer, dir, &one, 0) &&
+		   feed(&writer, firstTxn, lengthof(firstTxn)) &&
+		   feed(&writer, secondTxn, lengthof(secondTxn)) && write_index(&writer);
+	kill_writer(&writer);
+	logSize = file_size(log_file(log, writer.dirname));
+	kept = made && logSize > 0;
+
+	for (int i = 0; kept && i < 2; i++)
+	{
+		kept = spool_writer_open(&opened, writer.dirname, 7, 2, 0) &&
+			   opened.nextSeq == 3 && opened.lastEndLSN == 0xD230;
+		kill_writer(&opened);
+		kept = kept && file_size(log) == logSize;
+	}
+
+	check(kept,
+		  "two starts on a spool whose only segment is sequence number 1 and holds indexed transactions keep its relation log");
+
 	/* a bit of the definition that the flush of the index records synced */
 	made = make_spool(&writer, dir) &&
 		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), -1, junk, sizeof(junk));

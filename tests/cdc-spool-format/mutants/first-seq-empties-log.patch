@@ -1,0 +1,14 @@
+Mutant: the start empties the relation log of any spool whose last segment is sequence number 1. Must fail: two starts on a spool whose only segment is sequence number 1 and holds indexed transactions keep its relation log.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2268,7 +2268,7 @@
+ 	}
+ 
+ 	/* nothing of a new spool is indexed, and a new session sends each definition again */
+-	if (start->removed && seq == SPOOL_FIRST_SEQ)
++	if (seq == SPOOL_FIRST_SEQ)
+ 	{
+ 		start->relations.end = 0;
+ 	}
