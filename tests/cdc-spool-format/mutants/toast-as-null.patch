@@ -1,0 +1,14 @@
+Mutant: the adapter passes a column of unchanged TOAST data on as a NULL. Must fail: each change gives the SQL, arguments and hash of the SQLite path of 9d8b660.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_pgoutput.c
++++ b/src/bin/pgcopydb/ld_pgoutput.c
+@@ -1409,7 +1409,7 @@
+ 		ctx.sections[i][0] = old ? (msg->oldType == 'O' ? 'O' : 'K') :
+ 							 (msg->action == 'T' ? 'T' : 'N');
+ 		strlcpy(ctx.names[i], col->name, PG_NAMEDATALEN);
+-		ctx.statuses[i][0] = col->status;
++		ctx.statuses[i][0] = col->status == 'u' ? 'n' : col->status;
+ 		ctx.values[i] = col->status == 't' ? col->value : NULL;
+ 	}
+ 

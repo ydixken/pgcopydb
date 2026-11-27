@@ -2,7 +2,8 @@
  * The spool format of performance mode: the checksum, the segment header and
  * frame codecs, the writer with its sync order, the transaction index, the
  * relation log with its cursor, the start and the reader, pgcopydb list spool,
- * and the statements that the builders of 9d8b660 make of a spooled transaction.
+ * and the statements that the builders of 9d8b660 make of a spooled transaction,
+ * the same as on the SQLite path.
  */
 #include <dirent.h>
 #include <dlfcn.h>
@@ -21,6 +22,7 @@
 
 #include "postgres_fe.h"
 
+#include "catalog.h"
 #include "file_utils.h"
 #include "ld_spool.h"
 #include "ld_store.h"
@@ -949,7 +951,7 @@ test_index_record(void)
 /* one spool message as receive hands it to the writer */
 typedef struct Msg
 {
-	char bytes[128];
+	char bytes[192];
 	uint32_t length;
 } Msg;
 
@@ -5099,7 +5101,7 @@ test_release_full(const char *dir)
 /* the pgoutput part of a message that a check builds */
 typedef struct Body
 {
-	char bytes[100];
+	char bytes[160];
 	int n;
 } Body;
 
@@ -5219,17 +5221,20 @@ change_msg(uint64_t lsn, char type, uint32_t oid, char oldType,
 }
 
 
-/* a TRUNCATE of two relations */
+/* a TRUNCATE of the n relations of oids */
 static Msg
-truncate_msg(uint64_t lsn, uint8_t flags, uint32_t first, uint32_t second)
+truncate_msg(uint64_t lsn, uint8_t flags, int n, const uint32_t *oids)
 {
 	Body body = { 0 };
 
 	put8(&body, 'T');
-	put32(&body, 2);
+	put32(&body, (uint32_t) n);
 	put8(&body, flags);
-	put32(&body, first);
-	put32(&body, second);
+
+	for (int i = 0; i < n; i++)
+	{
+		put32(&body, oids[i]);
+	}
 
 	return xlog(lsn, body.bytes, body.n);
 }
@@ -5427,7 +5432,7 @@ test_statements(const char *dir)
 		change_msg(0x1080, 'U', T2, 'O', ROW("1", NULL), ROW("1", "v")),
 		change_msg(0x1090, 'D', T1, 'K', ROW("4", NULL, NULL), 0, NULL),
 		change_msg(0x10A0, 'D', T1, 'K', ROW("2", NULL, NULL), 0, NULL),
-		truncate_msg(0x10B0, 2, T1, T3),
+		truncate_msg(0x10B0, 2, 2, (const uint32_t[]) { T1, T3 }),
 		commit_msg(0x1130, 0x1100, 0x1130, COMMIT_TIME)
 	};
 	const char *const oneWant[][2] = {
@@ -5657,6 +5662,153 @@ test_statements(const char *dir)
 }
 
 
+/*
+ * Builds the statement of the change msg as the SQLite path does, from a row
+ * of output.db that parsePgoutputMessage reads back, and as the adapter does.
+ */
+static bool
+same_as_sqlite_path(StreamSpecs *specs, DatabaseCatalog *output, const Msg *msg,
+					bool noOp)
+{
+	StreamContext *context = &(specs->private);
+	const char *buf = msg->bytes + SPOOL_XLOGDATA_HEADER_SIZE;
+	int bufLen = (int) msg->length - SPOOL_XLOGDATA_HEADER_SIZE;
+	LogicalStreamContext stream = {
+		.private = context, .buffer = buf, .bufferLen = bufLen
+	};
+	LogicalTransactionStatement *stored = calloc(1, sizeof(*stored));
+	LogicalTransactionStatement *spooled = calloc(1, sizeof(*spooled));
+	ReplayDBStmt sqlite = { .action = (StreamAction) buf[0] };
+	ReplayDBStmt spool = { .action = (StreamAction) buf[0] };
+	sqlite3_stmt *query = NULL;
+	int64_t id = 0;
+	bool skip = false;
+
+	if (stored == NULL || spooled == NULL)
+	{
+		return false;
+	}
+
+	/* output.db takes one row per LSN */
+	static uint64_t lsn = 0x9000;
+
+	context->metadata = (LogicalMessageMetadata) {
+		.action = (StreamAction) buf[0], .xid = 900, .lsn = (lsn += 0x10), .seq = 1
+	};
+	strlcpy(context->metadata.timestamp, "2026-11-27 10:00:00+00",
+			sizeof(context->metadata.timestamp));
+
+	bool stored_ok = preparePgoutputMessage(&stream) &&
+					 ld_store_insert_pgoutput_message(output, &(context->metadata),
+													  &(context->pgoutputMsg)) &&
+					 sqlite3_prepare_v2(output->db, "select max(id) from output", -1,
+										&query, NULL) == SQLITE_OK &&
+					 sqlite3_step(query) == SQLITE_ROW &&
+					 (id = sqlite3_column_int64(query, 0)) > 0;
+
+	(void) sqlite3_finalize(query);
+
+	stored->action = (StreamAction) buf[0];
+	context->stmt = stored;
+	stored_ok = stored_ok && parsePgoutputMessage(context, output, id) &&
+				stream_write_statement(noOp, &sqlite, stored);
+
+	spooled->action = (StreamAction) buf[0];
+	bool spooled_ok = pgoutput_spool_change(context, buf, bufLen, spooled, &skip) &&
+					  !skip && stream_write_statement(noOp, &spool, spooled);
+
+	bool same = stored_ok && spooled_ok && same_text(sqlite.stmt, spool.stmt) &&
+				same_text(sqlite.data, spool.data) && sqlite.hash == spool.hash;
+
+	if (!same)
+	{
+		printf("change '%c' with replayNoOpUpdates %d: SQLite path (%d) %s %s, "
+			   "adapter (%d) %s %s\n", buf[0], noOp, stored_ok,
+			   sqlite.stmt ? sqlite.stmt : "(null)", sqlite.data ? sqlite.data : "(null)",
+			   spooled_ok, spool.stmt ? spool.stmt : "(null)",
+			   spool.data ? spool.data : "(null)");
+	}
+
+	return same;
+}
+
+
+static void
+test_sqlite_path(void)
+{
+	StreamSpecs *specs = new_specs();
+	DatabaseCatalog output = { .type = DATABASE_CATALOG_TYPE_OUTPUT };
+
+	/* in memory: run.sh wants a spool debug line for each fsync, and SQLite syncs */
+	strlcpy(output.dbfile, ":memory:", sizeof(output.dbfile));
+
+	Msg relations[] = {
+		rel_msg(17001, "public", "t1", 'd', "*id,name,note"),
+		rel_msg(17002, "public", "t2", 'f', "*id,*v"),
+		rel_msg(17003, "Mixed Schema", "Tab\"le", 'd', "*Id,col 2"),
+		rel_msg(17004, "public", "keyless", 'f', "*a,*b"),
+		rel_msg(17005, "public", "ri", 'i', "*a,b,*c"),
+		rel_msg(17006, "public", "wide", 'd', "*c0,c1,c2,c3,c4,c5,c6,c7,c8,c9")
+	};
+	bool cached = catalog_init(&output);
+
+	for (int i = 0; cached && i < (int) lengthof(relations); i++)
+	{
+		cached = pgoutput_replace_relation(&(specs->private),
+										   relations[i].bytes +
+										   SPOOL_XLOGDATA_HEADER_SIZE,
+										   (int) relations[i].length -
+										   SPOOL_XLOGDATA_HEADER_SIZE);
+	}
+
+	Msg changes[] = {
+		change_msg(0, 'I', 17001, 0, 0, NULL, ROW("1", "a", NULL)),
+		change_msg(0, 'I', 17001, 0, 0, NULL, ROW("2", "it's \\ \"q\" \xc3\xbc\nx", "")),
+		change_msg(0, 'U', 17001, 'K', ROW("3", NULL, NULL), ROW("4", "c", "y")),
+		change_msg(0, 'U', 17001, 0, 0, NULL, ROW("4", "d", "y")),
+		change_msg(0, 'U', 17001, 0, 0, NULL, ROW("4", unchanged, "y")),
+		change_msg(0, 'U', 17001, 'K', ROW("4", NULL, NULL), ROW("4", unchanged, NULL)),
+		change_msg(0, 'U', 17002, 'O', ROW("1", NULL), ROW("1", "v")),
+		change_msg(0, 'U', 17002, 'O', ROW("1", "x"), ROW("2", "y")),
+		change_msg(0, 'U', 17002, 'O', ROW("1", "x"), ROW("1", "x")),
+		change_msg(0, 'D', 17001, 'K', ROW("4", NULL, NULL), 0, NULL),
+		change_msg(0, 'D', 17002, 'O', ROW("1", NULL), 0, NULL),
+		truncate_msg(0, 2, 2, (const uint32_t[]) { 17001, 17003 }),
+		truncate_msg(0, 0, 1, (const uint32_t[]) { 17001 }),
+		truncate_msg(0, 1, 3, (const uint32_t[]) { 17001, 17002, 17003 }),
+		truncate_msg(0, 3, 2, (const uint32_t[]) { 17001, 17003 }),
+		change_msg(0, 'I', 17003, 0, 0, NULL, ROW("x", "y")),
+		change_msg(0, 'U', 17003, 'K', ROW("x", NULL), ROW("z", "w")),
+		change_msg(0, 'U', 17003, 0, 0, NULL, ROW("z", "v")),
+		change_msg(0, 'D', 17003, 'K', ROW("z", NULL), 0, NULL),
+		change_msg(0, 'U', 17004, 'O', ROW("a1", "b1"), ROW("a2", "b1")),
+		change_msg(0, 'D', 17004, 'O', ROW("a1", "b1"), 0, NULL),
+		change_msg(0, 'U', 17005, 0, 0, NULL, ROW("k1", "v", "k2")),
+		change_msg(0, 'U', 17005, 'K', ROW("k1", NULL, "k2"), ROW("k3", "v", "k2")),
+		change_msg(0, 'D', 17005, 'K', ROW("k1", NULL, "k2"), 0, NULL),
+		change_msg(0, 'I', 17006, 0, 0, NULL,
+				   ROW("0", NULL, "2", NULL, "4", "5", NULL, "7", "8", NULL)),
+		change_msg(0, 'U', 17006, 0, 0, NULL,
+				   ROW("0", "1", unchanged, NULL, "4", "5", NULL, "7", unchanged, "9"))
+	};
+	int same = 0;
+
+	for (int noOp = 0; cached && noOp <= 1; noOp++)
+	{
+		for (int i = 0; i < (int) lengthof(changes); i++)
+		{
+			same += same_as_sqlite_path(specs, &output, &changes[i], noOp == 1);
+		}
+	}
+
+	check(cached && same == 2 * (int) lengthof(changes),
+		  "each change gives the SQL, arguments and hash of the SQLite path of 9d8b660");
+
+	(void) catalog_close(&output);
+	(void) semaphore_finish(&(output.sema));
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -5710,6 +5862,7 @@ main(int argc, char **argv)
 	test_reader_failures(dir);
 	test_index_chunks(dir);
 	test_statements(dir);
+	test_sqlite_path();
 	test_list_spool(dir, argv[2]);
 	test_disk_full(argv[1]);
 	test_release_full(argv[1]);
