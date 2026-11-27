@@ -314,6 +314,10 @@ A WAL worker therefore stops before any transaction that commits past endpos: Gu
 We cut on the commit LSN because the BEGIN rule lets one worker apply its part of a transaction that spans two workers, while the other worker stops before its part.
 Once receive knows endpos it spools nothing past it, but an endpos set later can leave transactions that commit past it in a spool, so apply stops before those too.
 
+Receive reads endpos from the sentinel when it sends its status, so the keepalive that already passed a new endpos can have arrived before that read.
+A walsender sends nothing more to an idle client that has confirmed the position it sent, which would leave the worker waiting for a record that a quiet source never writes.
+The status that carries a changed endpos therefore asks the walsender for a reply, and receive stops on the keepalive that answers it.
+
 A WAL worker that stopped at endpos moves its replication slot on the source and its replication origin on the target to endpos.
 After a clean finish every origin equals endpos, also for a worker whose tables saw no change, unless endpos falls inside a COMMIT record, see below.
 The worker moves them only when all of the following hold in the same run:
