@@ -169,6 +169,7 @@ jobs:
           - cdc-interleaved-commits
           - cdc-interleaved-commits-performance
           - cdc-resend-after-reconnect
+          - cdc-resend-after-reconnect-performance
           - cdc-commit-order-resume
           - cdc-commit-order-resume-performance
           - cdc-copy-multi-insert

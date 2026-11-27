@@ -17,6 +17,10 @@ fi
 plugin=${RESEND_CASE%%:*}
 mode=${RESEND_CASE#*:}
 echo "=== ${plugin} ${mode}"
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ] && [ "${plugin}" != pgoutput ]; then
+    echo "SKIP: ${plugin} has no performance mode"
+    exit 0
+fi
 
 rows=${RESEND_ROWS:-500000}
 db=resend_${plugin}_${mode}
@@ -61,6 +65,16 @@ spool() {
 
 slot_active() {
     test "$(source_sql "select count(*) from pg_replication_slots where slot_name = 'pgcopydb' and active")" = 1
+}
+
+. /var/lib/postgres/spool-probe.sh
+
+# every xid of $@ has an index record in the raw spool
+spooled() {
+    local x
+    for x in "$@"; do
+        spool_commit_lsn "${x}" > /dev/null 2>&1 || return 1
+    done
 }
 
 tx_lock() {
@@ -109,6 +123,37 @@ xid_a=$(source_sql "begin; select txid_current(); insert into t select g, 'A' fr
 xid_d=$(source_sql "begin; select txid_current(); insert into t values (-1, 'D'); commit")
 echo "A: xid ${xid_a}, ${rows} rows; D: xid ${xid_d}"
 
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+    # Receive skips a transaction that is sent again, by its final_lsn, so
+    # the raw path keeps no partial copy of A for apply to wait on. What the
+    # forced reconnects must leave is one index record per source
+    # transaction, with the change count the source sent.
+    poll 'A and D in the raw spool' 600 spooled "${xid_a}" "${xid_d}"
+    poll 'apply to block on X' 60 tx_lock "not l.granted"
+
+    for attempt in 1 2 3; do
+        poll 'an active walsender' 60 slot_active
+        sender_pid=$(source_sql "select active_pid from pg_replication_slots where slot_name = 'pgcopydb'")
+        source_sql "select pg_terminate_backend(${sender_pid})" > /dev/null
+        # only a walsender that streamed again can have sent this one
+        xid_p=$(source_sql "begin; select txid_current(); insert into pad values (${attempt}); commit")
+        poll "the pad transaction ${xid_p} after reconnect ${attempt}" 300 spooled "${xid_p}"
+        spool_commit_lsn "${xid_a}" "${rows}" > /dev/null ||
+            fail "A has no single record of ${rows} changes after reconnect ${attempt}"
+        spool_commit_lsn "${xid_d}" 1 > /dev/null ||
+            fail "D has no single record of one change after reconnect ${attempt}"
+        echo "reconnect ${attempt}: the walsender of ${sender_pid} was replaced, A and D each one record"
+    done
+
+    # the resume branch and the tail both reach for it, and a CONT of a
+    # process that was never stopped changes nothing
+    receive_pid=$(pgrep -f '^pgcopydb: follow receive')
+
+    if test "${mode}" = endpos; then
+        lsn_a=$(spool_commit_lsn "${xid_a}")
+        pgcopydb stream sentinel set endpos "${lsn_a}"
+    fi
+else
 deadline=$((SECONDS + 300))
 until IFS='|' read -r _ commit_d _ <<<"$(spool "${xid_d}")" && test -n "${commit_d}"; do
     test "${SECONDS}" -lt "${deadline}" || fail "D's COMMIT never reached output.db"
@@ -177,6 +222,7 @@ for attempt in 1 2 3 4 5; do
     done
 done
 test -n "${held}" || fail 'never held receive with A partly sent again'
+fi
 
 # a crash leaves A's partial copy for the next run; with no receive, that
 # run's apply can only wait on A
@@ -207,6 +253,15 @@ poll 'apply to commit X' 60 x_applied
 # Nothing signals that apply chose to wait, so watch it for a while: D
 # must not commit before A, which receive cannot finish while held.
 early=
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ] && test "${mode}" != endpos; then
+    # the raw path applies A whole, so the first moment D is on the target
+    # every row of A is too
+    d_applied() { test "$(target_sql 'select count(*) from t where id = -1')" = 1; }
+    poll 'apply to commit D' 600 d_applied
+    got=$(target_sql "select count(*) from t where id > 0")
+    echo "D committed with ${got} rows of A on the target"
+    test "${got}" = "${rows}" || early="apply committed D with ${got} rows of A of ${rows}"
+else
 deadline=$((SECONDS + 5))
 while test "${SECONDS}" -lt "${deadline}"; do
     if test "$(target_sql 'select count(*) from t where id = -1')" != 0; then
@@ -216,6 +271,7 @@ while test "${SECONDS}" -lt "${deadline}"; do
     fi
     sleep 0.2
 done
+fi
 if test "${mode}" = resume; then
     kill -0 "${catchup_pid}" 2>/dev/null || fail 'catchup exited while A was partly sent again'
     kill -TERM -- "-${catchup_pid}"
@@ -227,13 +283,20 @@ else
     # endpos at A's COMMIT while receive is inside A: receive must write all of
     # A before it stops, and the run must end with A applied and D not
     if test "${mode}" = endpos; then
+        if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+        lsn_a=$(spool_commit_lsn "${xid_a}")
+        else
         lsn_a=$(timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader \
             "${XDG_DATA_HOME}"/pgcopydb/*-output.db \
             "select printf('%X/%X', lsn >> 32, lsn & 4294967295) from output
               where action = 'C' and xid = ${xid_a}")
+        fi
         pgcopydb stream sentinel set endpos "${lsn_a}"
     fi
+    # receive was never stopped on the raw path, and at endpos it is gone
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     kill -CONT "${receive_pid}"
+    fi
 fi
 
 if test "${mode}" = endpos; then
