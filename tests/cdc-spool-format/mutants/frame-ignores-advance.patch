@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2441,12 +2441,8 @@
+@@ -2797,12 +2797,8 @@
  
  	if (type == 'I' || type == 'U' || type == 'D' || type == 'T')
  	{

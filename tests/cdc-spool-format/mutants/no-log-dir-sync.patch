@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -987,7 +987,7 @@
+@@ -1014,7 +1014,7 @@
  	log->size = cursor.size;
  	spool_relation_cursor_close(&cursor);
  

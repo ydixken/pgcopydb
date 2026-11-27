@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1143,10 +1143,7 @@ spool_release(SpoolWriter *writer)
+@@ -1157,10 +1157,7 @@ spool_release(SpoolWriter *writer)
  		int pos = 0;
  		uint32_t length = pgout_u32(held->data + offset, &pos, 4);
  

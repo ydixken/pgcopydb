@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2487,11 +2487,7 @@
+@@ -2745,11 +2745,7 @@
  			/* receive creates a later segment only after it wrote the record */
  			if (later > reader->nextSeq)
  			{

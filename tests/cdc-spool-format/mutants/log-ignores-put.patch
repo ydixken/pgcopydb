@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1034,10 +1034,11 @@
+@@ -1061,10 +1061,11 @@
  	spool_put_u32(head + 16, bodyLength);
  	spool_put_u32(crcBytes, spool_relation_crc(head, body, bodyLength));
  

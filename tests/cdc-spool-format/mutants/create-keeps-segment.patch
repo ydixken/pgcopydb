@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1074,7 +1074,6 @@
+@@ -1083,7 +1083,6 @@
  	if (!spool_writer_open_relations(writer))
  	{
  		spool_writer_free_relations(writer);

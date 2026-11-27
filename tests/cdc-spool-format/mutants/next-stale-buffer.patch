@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2386,7 +2386,6 @@
+@@ -2714,7 +2714,6 @@
  				reader->frames.end = record->endOffset;
  
  				/* the buffer may hold the bytes of another segment */

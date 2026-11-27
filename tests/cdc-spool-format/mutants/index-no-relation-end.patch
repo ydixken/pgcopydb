@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -544,7 +544,7 @@
+@@ -558,7 +558,7 @@
  	read.finalLSN = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
  	read.endLSN = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
  	read.commitTime = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -869,11 +869,6 @@ spool_writer_rewind(SpoolWriter *writer)
+@@ -1412,11 +1412,6 @@ spool_writer_rewind(SpoolWriter *writer)
  	resetPQExpBuffer(&writer->held);
  	writer->state = SPOOL_TXN_NONE;
  

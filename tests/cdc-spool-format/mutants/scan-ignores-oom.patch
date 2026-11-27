@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1578,12 +1578,6 @@
+@@ -1594,12 +1594,6 @@
  
  	(void) closedir(dir);
  

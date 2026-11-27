@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2149,17 +2149,6 @@
+@@ -2193,17 +2193,6 @@
  	int count = 0;
  	uint64_t *seqs = spool_seqs(indexes, &count);
  

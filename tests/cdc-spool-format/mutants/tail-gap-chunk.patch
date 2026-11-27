@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1946,7 +1946,7 @@
+@@ -2007,7 +2007,7 @@
  			 * A power loss can keep a later record of a write and not an earlier
  			 * one, and a cut cannot tell that from damage of synced records.
  			 */

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -799,7 +799,7 @@
+@@ -819,7 +819,7 @@
  	uint64_t key = spool_relation_key(cursor->bytes + entry->offset,
  									  entry->length);
  

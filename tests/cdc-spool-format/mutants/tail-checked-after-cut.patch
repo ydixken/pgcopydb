@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2237,8 +2237,7 @@
+@@ -2305,8 +2305,7 @@
  	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
  					  start->last.last.relationLogEnd;
  
@@ -13,7 +13,7 @@ Apply from the repository root with git apply, and never commit it applied.
  	{
  		return false;
  	}
-@@ -2291,7 +2290,7 @@
+@@ -2374,7 +2373,7 @@
  		return spool_writer_create(writer, dirname, &start->header, maxSegmentSize);
  	}
  

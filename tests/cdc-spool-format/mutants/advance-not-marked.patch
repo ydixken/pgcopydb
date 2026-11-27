@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -841,8 +841,6 @@
+@@ -868,8 +868,6 @@
  		{
  			continue;
  		}

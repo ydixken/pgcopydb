@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -947,10 +947,7 @@ spool_writer_rotate(SpoolWriter *writer)
+@@ -1491,10 +1491,7 @@ spool_writer_rotate(SpoolWriter *writer)
  	(void) close(segment->fd);
  	free(segment->block);
  

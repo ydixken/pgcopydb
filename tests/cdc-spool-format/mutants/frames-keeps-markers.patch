@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1777,7 +1777,7 @@
+@@ -1816,7 +1816,7 @@
  		frames->offset += size;
  
  		/* a keepalive marker has 17 bytes, and an empty XLogData message 25 */

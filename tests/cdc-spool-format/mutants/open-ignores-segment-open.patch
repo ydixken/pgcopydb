@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2328,13 +2328,6 @@
+@@ -2648,13 +2648,6 @@
  
  		int fd = open(path, O_RDONLY);
  

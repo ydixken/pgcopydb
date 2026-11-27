@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2304,7 +2304,7 @@
+@@ -2363,7 +2363,7 @@
  
  	/* the index file first, as cleanup does, and on disk before create, which uses O_EXCL */
  	if (start->removed &&

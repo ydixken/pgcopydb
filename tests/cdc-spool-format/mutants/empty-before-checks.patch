@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1216,6 +1216,14 @@ spool_writer_commit(SpoolWriter *writer, const char *message, uint32_t length,
+@@ -1230,6 +1230,14 @@ spool_writer_commit(SpoolWriter *writer, const char *message, uint32_t length,
  	uint64_t endLSN = pgout_u64(message, &pos, length);
  	uint64_t commitTime = pgout_u64(message, &pos, length);
  
@@ -18,7 +18,7 @@ Apply from the repository root with git apply, and never commit it applied.
  	if (endLSN != lsn)
  	{
  		log_error("Received a COMMIT of xid %u with end LSN %X/%X "
-@@ -1233,14 +1241,6 @@ spool_writer_commit(SpoolWriter *writer, const char *message, uint32_t length,
+@@ -1247,14 +1255,6 @@ spool_writer_commit(SpoolWriter *writer, const char *message, uint32_t length,
  		return false;
  	}
  

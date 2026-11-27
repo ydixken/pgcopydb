@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -245,16 +245,7 @@ spool_fsync(int fd, const char *path, bool directory, uint64_t length)
+@@ -263,16 +263,7 @@ spool_fsync(int fd, const char *path, bool directory, uint64_t length)
  static void
  spool_fail(SpoolSegment *segment)
  {

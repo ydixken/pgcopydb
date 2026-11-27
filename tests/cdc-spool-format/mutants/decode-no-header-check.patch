@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -605,11 +605,6 @@
+@@ -623,11 +623,6 @@
  spool_relation_decode(const char *buf, uint64_t size, SpoolRelationRecord *record)
  {
  	int pos = 16;

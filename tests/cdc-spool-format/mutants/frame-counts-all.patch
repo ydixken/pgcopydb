@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2439,7 +2439,7 @@
+@@ -2795,7 +2795,7 @@
  
  	char type = (*message)[SPOOL_XLOGDATA_HEADER_SIZE];
  

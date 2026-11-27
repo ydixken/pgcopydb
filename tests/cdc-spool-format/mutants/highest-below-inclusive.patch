@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1625,7 +1625,7 @@
+@@ -1641,7 +1641,7 @@
  
  	for (int i = 0; i < count; i++)
  	{

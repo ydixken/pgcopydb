@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1528,8 +1528,7 @@
+@@ -1544,8 +1544,7 @@
  	}
  
  	/* sequence numbers start at SPOOL_FIRST_SEQ */

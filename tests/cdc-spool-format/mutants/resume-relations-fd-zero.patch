@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2347,7 +2347,7 @@
+@@ -2391,7 +2391,7 @@
  	SpoolStart start = {
  		.last = { .segment = { .fd = -1 }, .indexFd = -1 },
  		.before = { .segment = { .fd = -1 }, .indexFd = -1 },

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -836,8 +836,7 @@
+@@ -863,8 +863,7 @@
  		SpoolRelationEntry *entry = spool_relation_entry(cursor, i);
  		const char *message = cursor->bytes + entry->offset;
  

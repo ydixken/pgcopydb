@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2281,8 +2281,10 @@
+@@ -2601,8 +2601,10 @@
  	reader->indexOffset += (uint64_t) reader->chunkCount * SPOOL_INDEX_RECORD_SIZE;
  
  	/* receive synced the definitions of these records before it wrote them */

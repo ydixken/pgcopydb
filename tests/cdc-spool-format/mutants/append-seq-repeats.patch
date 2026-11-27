@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2010,7 +2010,7 @@
+@@ -2143,7 +2143,7 @@
  		.header = tail->header,
  		.segment = tail->segment,
  		.relationLog = { .fd = -1 },

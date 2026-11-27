@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2338,12 +2338,6 @@
+@@ -2658,12 +2658,6 @@
  		opened = spool_read_header(fd, path, &header, &headed);
  		(void) close(fd);
  

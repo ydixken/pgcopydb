@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2146,7 +2146,8 @@
+@@ -2421,7 +2421,8 @@
  	SpoolHeader fresh = {
  		.firstSeq = SPOOL_FIRST_SEQ,
  		.systemId = systemId,

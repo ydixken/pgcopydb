@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2184,7 +2184,7 @@
+@@ -2237,7 +2237,7 @@
  	start->header = *fresh;
  
  	if (seq > 0 &&

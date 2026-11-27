@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1895,12 +1895,13 @@
+@@ -1966,12 +1966,13 @@
  	sformat(tail->segment.filename, MAXPGPATH, "%s/%016" PRIX64 ".seg", dirname, seq);
  	sformat(tail->index, MAXPGPATH, "%s/%016" PRIX64 ".idx", dirname, seq);
  

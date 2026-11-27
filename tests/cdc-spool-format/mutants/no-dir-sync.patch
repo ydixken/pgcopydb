@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -414,9 +414,10 @@ spool_segment_create(SpoolSegment *segment, const char *dirname,
+@@ -447,9 +447,10 @@ spool_segment_create(SpoolSegment *segment, const char *dirname,
  
  	spool_header_encode(header, buf);
  

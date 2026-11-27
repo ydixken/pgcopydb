@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2063,7 +2063,7 @@
+@@ -2107,7 +2107,7 @@
  	}
  
  	/* a valid record of another transaction would report that one as durable */

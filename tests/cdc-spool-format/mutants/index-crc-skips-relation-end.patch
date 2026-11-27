@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -517,7 +517,7 @@
+@@ -531,7 +531,7 @@
  	spool_put_u64(buf + 44, record->endLSN);
  	spool_put_u64(buf + 52, record->commitTime);
  	spool_put_u64(buf + 60, record->relationLogEnd);
@@ -12,7 +12,7 @@ Apply from the repository root with git apply, and never commit it applied.
  }
  
  
-@@ -546,7 +546,7 @@
+@@ -560,7 +560,7 @@
  	read.commitTime = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
  	read.relationLogEnd = pgout_u64(buf, &pos, SPOOL_INDEX_RECORD_SIZE);
  

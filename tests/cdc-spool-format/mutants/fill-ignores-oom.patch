@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1710,11 +1710,7 @@
+@@ -1746,11 +1746,7 @@
  	resetPQExpBuffer(buffer);
  	frames->bufferStart = frames->offset;
  

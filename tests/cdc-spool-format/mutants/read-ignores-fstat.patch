@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2230,11 +2230,7 @@
+@@ -2544,11 +2544,7 @@
  	reader->chunkNext = 0;
  
  	/* the size first: receive appends, so every byte below it is written */

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1030,7 +1030,7 @@
+@@ -1057,7 +1057,7 @@
  
  	/* in a transaction sent again, spool_writer_begin reset the count to 0 */
  	spool_put_u64(head, writer->nextSeq);

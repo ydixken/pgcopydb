@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2223,7 +2223,7 @@
+@@ -2261,7 +2261,7 @@
  		start->header = start->last.header;
  	}
  

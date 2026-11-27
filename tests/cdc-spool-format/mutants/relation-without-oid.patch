@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -568,7 +568,7 @@
+@@ -586,7 +586,7 @@
  static bool
  spool_relation_valid(const char *message, uint32_t length)
  {

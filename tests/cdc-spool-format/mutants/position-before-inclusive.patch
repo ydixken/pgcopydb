@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -649,7 +649,7 @@
+@@ -667,7 +667,7 @@
  spool_position_before(uint64_t seq, uint64_t changes,
  					  uint64_t otherSeq, uint64_t otherChanges)
  {

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2234,7 +2234,7 @@
+@@ -2302,7 +2302,7 @@
  	}
  
  	/* the last valid index record proves the relation log synced up to its length */

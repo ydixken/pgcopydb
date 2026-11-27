@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -849,7 +849,7 @@
+@@ -876,7 +876,7 @@
  			!pgoutput_replace_relation(context, message, (int) entry->length))
  		{
  			/* errors have already been logged */

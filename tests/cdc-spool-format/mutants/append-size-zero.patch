@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2017,7 +2017,6 @@
+@@ -2150,7 +2150,6 @@
  	};
  
  	/* the cut synced the segment at that length */

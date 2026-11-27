@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -597,7 +597,7 @@ spool_hold(SpoolWriter *writer, const char *message, u
+@@ -1133,7 +1133,7 @@ spool_hold(SpoolWriter *writer, const char *message, u
  	appendBinaryPQExpBuffer(&writer->held, lengthBytes, sizeof(lengthBytes));
  	appendBinaryPQExpBuffer(&writer->held, message, length);
  

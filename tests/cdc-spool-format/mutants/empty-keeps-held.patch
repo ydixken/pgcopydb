@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -701,7 +701,6 @@ spool_writer_commit(SpoolWriter *writer, const char *m
+@@ -1250,7 +1250,6 @@ spool_writer_commit(SpoolWriter *writer, const char *m
  	/* an empty transaction leaves no byte and does not count as a commit */
  	if (writer->state == SPOOL_TXN_HELD)
  	{

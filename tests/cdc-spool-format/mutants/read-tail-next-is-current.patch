@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2491,9 +2491,7 @@
+@@ -2574,9 +2574,7 @@
  		if (!spool_index_decode(bytes + at, done - at, record))
  		{
  			uint64_t offset = reader->indexOffset + at;

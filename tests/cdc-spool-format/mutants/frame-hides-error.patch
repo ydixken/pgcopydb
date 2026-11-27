@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2429,7 +2429,8 @@
+@@ -2785,7 +2785,8 @@
  {
  	if (!spool_frames_next(&reader->frames, message, length, done))
  	{

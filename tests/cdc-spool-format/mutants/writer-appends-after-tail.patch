@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -973,7 +973,6 @@
+@@ -1000,7 +1000,6 @@
  	{
  		log_error("Spool file \"%s\" ends inside a record at offset %" PRIu64,
  				  log->filename, cursor.size);

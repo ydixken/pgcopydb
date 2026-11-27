@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2357,7 +2357,7 @@
+@@ -2683,7 +2683,7 @@
  
  	/* below the header of every segment, as after cleanup: the first one */
  	return opened &&

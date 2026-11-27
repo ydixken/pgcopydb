@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2351,7 +2351,6 @@
+@@ -2398,7 +2398,6 @@
  				   spool_start_act(&start, writer, dirname, maxSegmentSize);
  
  	spool_tail_close(&start.last);

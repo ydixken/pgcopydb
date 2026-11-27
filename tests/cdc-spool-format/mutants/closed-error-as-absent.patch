@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2414,7 +2414,7 @@
+@@ -2497,7 +2497,7 @@
  	*closed = access(path, F_OK) == 0;
  
  	/* any other error would read as a file not written yet, and the reader wait */

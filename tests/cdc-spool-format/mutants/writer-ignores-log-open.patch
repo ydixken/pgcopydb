@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -963,7 +963,7 @@
+@@ -990,7 +990,7 @@
  
  	if (!spool_file_open(log, O_WRONLY | O_CREAT | O_APPEND))
  	{

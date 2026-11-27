@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2211,8 +2211,7 @@
+@@ -2264,8 +2264,7 @@
  	if (start->removed && before > 0)
  	{
  		if (!spool_tail_read(&start->before, dirname, before,

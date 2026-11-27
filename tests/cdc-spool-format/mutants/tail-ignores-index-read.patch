@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1929,11 +1929,8 @@
+@@ -1990,11 +1990,8 @@
  
  	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
  	{

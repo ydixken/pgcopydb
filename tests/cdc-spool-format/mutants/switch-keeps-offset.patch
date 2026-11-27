@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2196,7 +2196,6 @@
+@@ -2470,7 +2470,6 @@
  
  	reader->segment = seq;
  	reader->nextSeq = seq;

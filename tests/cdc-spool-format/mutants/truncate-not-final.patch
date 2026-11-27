@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -862,7 +862,6 @@ spool_writer_rewind(SpoolWriter *writer)
+@@ -1427,7 +1427,6 @@ spool_writer_rewind(SpoolWriter *writer)
  	{
  		log_error("Failed to truncate spool file \"%s\" to %" PRIu64 " bytes: %m",
  				  segment->filename, writer->completeSize);

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2287,25 +2287,25 @@
+@@ -2346,25 +2346,25 @@
  	sformat(leftover, sizeof(leftover), "%s/%016" PRIX64 ".seg", dirname,
  			start->leftover);
  

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2244,7 +2244,7 @@
+@@ -2312,7 +2312,7 @@
  	}
  
  	/* nothing of a new spool is indexed, and a new session sends each definition again */

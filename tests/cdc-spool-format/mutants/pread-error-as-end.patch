@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1649,13 +1649,7 @@
+@@ -1685,13 +1685,7 @@
  	{
  		ssize_t n = pread(fd, buf + *done, length - *done, (off_t) (offset + *done));
  

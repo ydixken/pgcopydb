@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1746,9 +1746,6 @@
+@@ -1760,9 +1760,6 @@
  
  	buffer->len = done;
  

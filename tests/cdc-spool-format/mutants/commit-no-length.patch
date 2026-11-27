@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -669,7 +669,7 @@ spool_writer_commit(SpoolWriter *writer, const char *m
+@@ -1218,7 +1218,7 @@ spool_writer_commit(SpoolWriter *writer, const char *m
  {
  	char record[SPOOL_INDEX_RECORD_SIZE];
  

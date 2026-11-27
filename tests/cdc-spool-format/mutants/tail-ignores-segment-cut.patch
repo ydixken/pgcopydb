@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2080,8 +2080,8 @@
+@@ -2124,8 +2124,8 @@
  static bool
  spool_tail_cut(SpoolTail *tail)
  {

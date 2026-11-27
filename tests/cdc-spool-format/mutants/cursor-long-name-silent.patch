@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -696,7 +696,7 @@
+@@ -714,7 +714,7 @@
  	initPQExpBuffer(&cursor->entries);
  
  	if (sformat(cursor->filename, sizeof(cursor->filename),

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1063,7 +1063,6 @@
+@@ -1108,7 +1108,6 @@
  		.maxSegmentSize = maxSegmentSize,
  		.header = *header,
  		.segment = { .fd = -1 },

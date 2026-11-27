@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -629,8 +629,7 @@
+@@ -647,8 +647,7 @@
  	pos = 0;
  	uint32_t crc = pgout_u32(message + length, &pos, 4);
  

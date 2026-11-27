@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1494,12 +1494,6 @@
+@@ -1510,12 +1510,6 @@
  static bool
  spool_dirname_fits(const char *dirname)
  {

@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -890,7 +890,7 @@ spool_writer_rewind(SpoolWriter *writer)
+@@ -1433,7 +1433,7 @@ spool_writer_rewind(SpoolWriter *writer)
  
  	/* the bytes before completeSize may still wait for their sync */
  	segment->size = writer->completeSize;

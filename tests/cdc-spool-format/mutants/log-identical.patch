@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1016,12 +1016,6 @@
+@@ -1043,12 +1043,6 @@
  
  	SpoolRelationLast *last =
  		spool_relation_last(writer, spool_relation_key(body, bodyLength));

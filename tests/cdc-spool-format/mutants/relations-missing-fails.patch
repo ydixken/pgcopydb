@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1854,12 +1854,6 @@
+@@ -1882,12 +1882,6 @@
  	sformat(log->path, sizeof(log->path), "%s/" SPOOL_RELATION_LOG, dirname);
  
  	log->fd = open(log->path, O_WRONLY);

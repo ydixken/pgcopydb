@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2193,8 +2193,7 @@
+@@ -2237,8 +2237,7 @@
  	start->header = *fresh;
  
  	if (seq > 0 &&
@@ -13,7 +13,7 @@ Apply from the repository root with git apply, and never commit it applied.
  	{
  		return false;
  	}
-@@ -2220,8 +2219,7 @@
+@@ -2264,8 +2263,7 @@
  	if (start->removed && before > 0)
  	{
  		if (!spool_tail_read(&start->before, dirname, before,
@@ -23,7 +23,7 @@ Apply from the repository root with git apply, and never commit it applied.
  		{
  			return false;
  		}
-@@ -2280,7 +2278,7 @@
+@@ -2339,7 +2337,7 @@
   */
  static bool
  spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
@@ -32,7 +32,7 @@ Apply from the repository root with git apply, and never commit it applied.
  {
  	char leftover[MAXPGPATH];
  
-@@ -2306,6 +2304,12 @@
+@@ -2365,6 +2363,12 @@
  	if (start->removed &&
  		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename) ||
  		 !spool_sync_directory(dirname)))
@@ -45,7 +45,7 @@ Apply from the repository root with git apply, and never commit it applied.
  	{
  		return false;
  	}
-@@ -2336,7 +2340,7 @@
+@@ -2395,7 +2399,7 @@
  	};
  
  	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh) &&
