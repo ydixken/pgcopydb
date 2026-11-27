@@ -1,0 +1,16 @@
+Mutant: The stream commands parse --follow-mode and ignore it. Must fail: the mode case check "pgcopydb stream apply --follow-mode performance --dir /tmp/mode/fresh -".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -380,7 +380,9 @@
+ 
+ 			case 1009:      /* --follow-mode */
+ 			{
+-				if (!cli_parse_follow_mode(optarg, &(options.followMode)))
++				FollowMode ignored = FOLLOW_MODE_SQLITE;
++
++				if (!cli_parse_follow_mode(optarg, &ignored))
+ 				{
+ 					/* errors have already been logged */
+ 					exit(EXIT_CODE_BAD_ARGS);

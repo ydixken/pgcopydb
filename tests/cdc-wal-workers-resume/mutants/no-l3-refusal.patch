@@ -1,0 +1,14 @@
+Mutant: Performance mode accepts more than one WAL worker. Must fail: the mode case check "env PGCOPYDB_FOLLOW_MODE=performance pgcopydb clone --follow --wal-workers 2".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -604,7 +604,7 @@
+ 		}
+ 
+ 		/* shortcut: one worker until the dispatcher lands, then this goes */
+-		if (n > 1)
++		if (false && n > 1)
+ 		{
+ 			log_fatal("Option --follow-mode performance requires "
+ 					  "--wal-workers 1, found --wal-workers %d",

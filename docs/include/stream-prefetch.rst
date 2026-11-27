@@ -11,3 +11,5 @@
      --slot-name           Stream changes recorded by this slot
      --endpos              LSN position where to stop receiving changes
      --max-replaydb-size   Rotate CDC files at this size (default 1GB)
+     --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)
+   

@@ -213,6 +213,7 @@ bool
 cli_copydb_getenv(CopyDBOptions *options)
 {
 	int errors = 0;
+	char followMode[BUFSIZE] = { 0 };
 
 	/* Fill in the defaults before reading environment variables */
 	options->tableJobs = DEFAULT_TABLE_JOBS;
@@ -299,6 +300,10 @@ cli_copydb_getenv(CopyDBOptions *options)
 			PGCOPYDB_WAL_HIGH_TRAFFIC_TABLES, ENV_TYPE_STRING,
 			&(options->walHighTrafficTables),
 			sizeof(options->walHighTrafficTables)
+		},
+		{
+			PGCOPYDB_FOLLOW_MODE, ENV_TYPE_STRING,
+			followMode, sizeof(followMode)
 		}
 	};
 
@@ -307,6 +312,13 @@ cli_copydb_getenv(CopyDBOptions *options)
 	EnvParserArray parserArray = { .count = parserCount, .array = parsers };
 
 	if (!get_env_using_parsers(&parserArray))
+	{
+		/* errors have already been logged */
+		++errors;
+	}
+
+	if (env_exists(PGCOPYDB_FOLLOW_MODE) &&
+		!cli_parse_follow_mode(followMode, &(options->followMode)))
 	{
 		/* errors have already been logged */
 		++errors;
@@ -517,6 +529,55 @@ cli_validate_wal_high_traffic_tables(CopyDBOptions *options)
 
 
 /*
+ * cli_parse_follow_mode parses the value of --follow-mode or of the
+ * environment variable PGCOPYDB_FOLLOW_MODE.
+ */
+bool
+cli_parse_follow_mode(const char *value, FollowMode *mode)
+{
+	if (streq(value, "sqlite"))
+	{
+		*mode = FOLLOW_MODE_SQLITE;
+	}
+	else if (streq(value, "performance"))
+	{
+		*mode = FOLLOW_MODE_PERFORMANCE;
+	}
+	else
+	{
+		log_fatal("Failed to parse --follow-mode \"%s\", "
+				  "expected sqlite or performance",
+				  value);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * cli_validate_follow_mode refuses another plugin than pgoutput in performance
+ * mode. Callers run it once the previous run is merged, which sets the plugin.
+ */
+bool
+cli_validate_follow_mode(CopyDBOptions *options)
+{
+	ReplicationSlot *slot = &(options->slot);
+
+	if (options->followMode == FOLLOW_MODE_PERFORMANCE &&
+		slot->plugin != STREAM_PLUGIN_PGOUTPUT)
+	{
+		log_fatal("Option --follow-mode performance requires --plugin pgoutput, "
+				  "found --plugin %s",
+				  OutputPluginToString(slot->plugin));
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
  * cli_validate_wal_workers refuses option combinations that WAL workers do not
  * support, once options, environment and the previous run are merged. Only
  * clone and follow call it: other commands ignore these options.
@@ -526,6 +587,31 @@ cli_validate_wal_workers(CopyDBOptions *options)
 {
 	int n = options->walWorkers;
 	ReplicationSlot *slot = &(options->slot);
+
+	if (!cli_validate_follow_mode(options))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (options->followMode == FOLLOW_MODE_PERFORMANCE)
+	{
+		if (!IS_EMPTY_STRING_BUFFER(options->walHighTrafficTables))
+		{
+			log_fatal("Option --follow-mode performance is not compatible "
+					  "with --wal-high-traffic-tables");
+			return false;
+		}
+
+		/* shortcut: one worker until the dispatcher lands, then this goes */
+		if (n > 1)
+		{
+			log_fatal("Option --follow-mode performance requires "
+					  "--wal-workers 1, found --wal-workers %d",
+					  n);
+			return false;
+		}
+	}
 
 	if (n > 1)
 	{
@@ -949,6 +1035,7 @@ cli_copy_db_getopts(int argc, char **argv)
 		{ "defer-indexes", no_argument, NULL, 1006 },
 		{ "wal-workers", required_argument, NULL, 1007 },
 		{ "wal-high-traffic-tables", required_argument, NULL, 1008 },
+		{ "follow-mode", required_argument, NULL, 1009 },
 		{ "host", required_argument, NULL, 1001 },
 		{ "port", required_argument, NULL, 1002 },
 		{ "version", no_argument, NULL, 'V' },
@@ -1379,6 +1466,17 @@ cli_copy_db_getopts(int argc, char **argv)
 				}
 				log_trace("--wal-high-traffic-tables %s",
 						  options.walHighTrafficTables);
+				break;
+			}
+
+			case 1009:      /* --follow-mode */
+			{
+				if (!cli_parse_follow_mode(optarg, &(options.followMode)))
+				{
+					/* errors have already been logged */
+					exit(EXIT_CODE_BAD_ARGS);
+				}
+				log_trace("--follow-mode %s", optarg);
 				break;
 			}
 

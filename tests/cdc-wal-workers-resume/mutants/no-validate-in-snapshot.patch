@@ -1,0 +1,14 @@
+Mutant: snapshot --follow never checks the plugin of performance mode. Must fail: the mode case check "pgcopydb snapshot --follow --follow-mode performance --dir".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_snapshot.c
++++ b/src/bin/pgcopydb/cli_snapshot.c
+@@ -264,7 +264,7 @@
+ 		exit(EXIT_CODE_BAD_ARGS);
+ 	}
+ 
+-	if (options.follow && !cli_validate_follow_mode(&options))
++	if (false && options.follow && !cli_validate_follow_mode(&options))
+ 	{
+ 		/* errors have already been logged */
+ 		exit(EXIT_CODE_BAD_ARGS);
