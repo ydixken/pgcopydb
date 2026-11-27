@@ -365,6 +365,13 @@ setup() {
     export PGCOPYDB_TARGET_PGURI=${tgt_base}/${db}
     echo "=== ${tc}"
 
+    # a slot name and an origin name are unique in the cluster, not in one
+    # database, so the case before this one may still hold both
+    src -c "select pg_drop_replication_slot(slot_name) from pg_replication_slots
+            where slot_name = '${S}'" > /dev/null
+    tgt -c "select pg_replication_origin_drop('${S}') from pg_replication_origin
+            where roname = '${S}'" > /dev/null
+
     src <<'SQL' > /dev/null
 create schema cr;
 create table cr.hot(id bigserial primary key, n bigint not null);
@@ -378,7 +385,8 @@ insert into cr.acct select i, 0 from generate_series(0, 49) i;
 insert into cr.evt select i, 'seed' from generate_series(-10, 0) i;
 SQL
 
-    pgcopydb snapshot --follow --plugin pgoutput > "${TMPDIR}/snapshot.out" 2> "${TMPDIR}/snapshot.log" &
+    pgcopydb snapshot --follow --plugin pgoutput \
+            > "${TMPDIR}/snapshot.out" 2> "${TMPDIR}/snapshot.log" &
     snapshot_pid=$!
     for _ in $(seq 120); do
         test -s "${TMPDIR}/snapshot.out" && break
