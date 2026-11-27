@@ -5258,6 +5258,7 @@ typedef struct Captured
 	uint64_t changes[16];       /* change frames that the reader had returned */
 	int count;
 	int failAt;                 /* the call, counted from 1, that fails; 0 none */
+	int reallocAfter;           /* the call after which the next realloc fails */
 	SpoolReader *reader;
 } Captured;
 
@@ -5274,6 +5275,11 @@ capture(void *context, ReplayDBStmt *stmt)
 
 	captured->changes[captured->count] = captured->reader->changes;
 	captured->stmts[captured->count++] = *stmt;
+
+	if (captured->count == captured->reallocAfter)
+	{
+		reallocFailures = 1;
+	}
 
 	return captured->failAt != captured->count;
 }
@@ -5704,6 +5710,30 @@ test_statements(const char *dir)
 	check(made && !built && captured.count == 0 &&
 		  strstr(logged_since(mark), "after the COMMIT") != NULL,
 		  "the frames of an index record that go on after its COMMIT are an error, and no COMMIT comes");
+
+	/* an INSERT of 16 rows, whose SQL text outgrows the first PQExpBuffer block */
+	Msg rows[20] = {
+		begin_msg(0x6810, 0x6900, 907),
+		rel_msg(T1, "public", "t1", 'd', "*id,name,note"),
+		change_msg(0x6820, 'U', T1, 0, 0, NULL, ROW("1", "a", "b"))
+	};
+
+	for (int i = 3; i < 19; i++)
+	{
+		rows[i] = change_msg(0x6830 + i, 'I', T1, 0, 0, NULL, ROW("2", "c", "d"));
+	}
+	rows[19] = commit_msg(0x6930, 0x6900, 0x6930, COMMIT_TIME);
+
+	/* the realloc after the UPDATE is the first of the INSERT's SQL text */
+	captured.reallocAfter = 2;
+	mark = log_mark();
+	built = txn_spool(&writer, dir, rows, lengthof(rows)) &&
+			statements(writer.dirname, new_specs(), &captured);
+	check(!built && captured.count == 2 && reallocFailures == 0 &&
+		  strstr(logged_since(mark), "Failed to transform INSERT statement") != NULL,
+		  "a statement that the builder cannot write ends the transaction, and no statement follows");
+	captured.reallocAfter = 0;
+	reallocFailures = 0;
 
 	/* a change of a relation that the relation log does not define */
 	Msg undefined[] = {
