@@ -175,6 +175,7 @@ jobs:
           - cdc-commit-order-resume
           - cdc-commit-order-resume-performance
           - cdc-copy-multi-insert
+          - cdc-copy-multi-insert-performance
           - cdc-receive-group-commit
           - cdc-endpos-before-txn
           - cdc-origin-source
@@ -287,6 +288,8 @@ jobs:
           - TEST: cdc-commit-order-resume-performance
             PGVERSION: 16
           - TEST: cdc-copy-multi-insert
+            PGVERSION: 16
+          - TEST: cdc-copy-multi-insert-performance
             PGVERSION: 16
           - TEST: cdc-receive-group-commit
             PGVERSION: 16

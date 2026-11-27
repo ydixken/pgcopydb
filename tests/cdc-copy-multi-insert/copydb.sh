@@ -91,6 +91,21 @@ check_spool() {
     fi
 }
 
+. /var/lib/postgres/spool-probe.sh
+
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+    committed() { spool_commit_lsn "$1" > /dev/null 2>&1; }
+    # An index record counts the change messages of its transaction, one per
+    # COPY tuple. The lsns that one multi-insert record shares are in no index
+    # record, so the multi-insert shape stays pinned by the sqlite pass.
+    check_spool() {
+        local lsn
+        lsn=$(spool_commit_lsn "$2" "${rows}") ||
+            fail "$1: the raw spool does not hold xid $2 once with ${rows} changes"
+        echo "$1: xid $2, ${rows} changes in one index record committing at ${lsn}"
+    }
+fi
+
 # a row in pgoutput_col whose output row was replaced is left over
 check_orphans() {
     local n
@@ -158,6 +173,10 @@ stop_follow() {
 pgcopydb ping
 
 for plugin in pgoutput test_decoding wal2json; do
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ] && [ "${plugin}" != pgoutput ]; then
+        echo "SKIP: ${plugin} has no performance mode"
+        continue
+    fi
     prepare "multi_insert_${plugin}" "${plugin}"
     start_follow
 
@@ -184,6 +203,25 @@ for plugin in pgoutput test_decoding wal2json; do
     poll "xid ${xid_a} in output.db" 120 committed "${xid_a}"
     poll 'apply to block on X' 60 tx_lock "not l.granted"
 
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+        # Receive skips a complete transaction that is sent again, by its
+        # final_lsn, so the raw form of the re-send is that it changed
+        # nothing: A keeps one index record with every row of the COPY, while
+        # a transaction committed after the reconnect proves that receive
+        # streamed past A a second time.
+        poll 'an active walsender' 60 slot_active
+        before_pid=$(source_sql "select active_pid from pg_replication_slots where slot_name = 'pgcopydb'")
+        source_sql "select pg_terminate_backend(${before_pid})" > /dev/null
+        walsender_replaced() {
+            local now
+            now=$(source_sql "select coalesce(active_pid, 0) from pg_replication_slots where slot_name = 'pgcopydb'")
+            test "${now}" -ne 0 && test "${now}" != "${before_pid}"
+        }
+        poll "the walsender of ${before_pid} to be replaced" 120 walsender_replaced
+        xid_pad=$(source_sql "begin; select txid_current(); insert into t_ins values (-1, 'pad'); commit")
+        poll "the pad transaction ${xid_pad} after the reconnect" 180 committed "${xid_pad}"
+        check_spool t_resend "${xid_a}" shared
+    else
     IFS='|' read -r commit_before _ <<<"$(txn "${xid_a}")"
     poll 'an active walsender' 60 slot_active
     source_sql "select pg_terminate_backend(active_pid) from pg_replication_slots where slot_name = 'pgcopydb'" > /dev/null
@@ -195,6 +233,7 @@ for plugin in pgoutput test_decoding wal2json; do
     poll "receive to send xid ${xid_a} again" 120 resent
     check_spool t_resend "${xid_a}" shared
     check_orphans
+    fi
 
     kill "${lock_pid}"
     lock_pid=
@@ -207,6 +246,8 @@ for plugin in pgoutput test_decoding wal2json; do
     echo "PASS: ${plugin}"
 done
 
+# The raw spool has no SQLite store to upgrade, so this case is sqlite only.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 # An output.db written before seq existed keys its rows on (action, lsn).
 # The resume upgrades it while apply opens it too; the file is large enough
 # that the index build overlaps apply's open.
@@ -248,3 +289,4 @@ grep 'Adding column output.seq' "${TMPDIR}/follow.log" | cut -d' ' -f3-
 test "$(grep -c 'Adding column output.seq' "${TMPDIR}/follow.log")" = 1 || fail 'the upgrade did not run once'
 pgcopydb stream cleanup
 echo "PASS: ${plugin}"
+fi
