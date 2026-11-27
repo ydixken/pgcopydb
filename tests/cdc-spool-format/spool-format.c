@@ -2938,6 +2938,29 @@ test_start_cut(const char *dir)
 		  "after the cut of the index tail, a reader reads the next transaction");
 	kill_writer(&opened);
 
+	/* a power loss kept the page of a later record and not the one of the record before */
+	made = make_spool(&writer, dir) &&
+		   put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, zeroes, 64) &&
+		   put_bytes(idx, -1, zeroes, SPOOL_INDEX_RECORD_SIZE - 64) &&
+		   put_bytes(idx, -1, record, sizeof(record)) &&
+		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), -1, junk, sizeof(junk));
+	sformat(log, sizeof(log), "%s/" SPOOL_RELATION_LOG, writer.dirname);
+	made = made && put_bytes(log, -1, junk, 10);
+
+	int64_t logBefore = file_size(log);
+
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds no valid index record at offset %d",
+			idx, 2 * SPOOL_INDEX_RECORD_SIZE);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+
+	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  file_size(idx) == 4 * SPOOL_INDEX_RECORD_SIZE &&
+		  file_size(seg) == (int64_t) (SECOND_END + sizeof(junk)) &&
+		  file_size(log) == logBefore,
+		  "an invalid index record before a valid one ends the start with an error that names its offset, and nothing is cut");
+
 	/* frames of a transaction cut off, a keepalive marker, and junk */
 	static char tail[512];
 	uint64_t tailSize = frame(tail, thirdTxn[0].bytes, thirdTxn[0].length);
@@ -3373,7 +3396,7 @@ test_start_failures(const char *dir)
 	check(ok,
 		  "a cut that cannot sync its file fails the start with an ERROR line that names it");
 
-	/* the header, the last index record, and the frames of its transaction */
+	/* the header, the index records, and the frames of the last transaction */
 	ok = true;
 
 	for (int call = 0; call <= 3; call++)

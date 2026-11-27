@@ -1890,13 +1890,13 @@ spool_tail_close(SpoolTail *tail)
 
 /*
  * spool_tail_read opens segment seq, reads its header, and the last valid
- * record of its index file, from the end: a torn write leaves invalid records
- * only after the last record that receive synced.
+ * record of its index file, after which only invalid records may follow.
  */
 static bool
 spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed)
 {
 	struct stat st = { 0 };
+	char bytes[SPOOL_READER_CHUNK * SPOOL_INDEX_RECORD_SIZE];
 	uint64_t done = 0;
 
 	*tail = (SpoolTail) {
@@ -1927,22 +1927,33 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 		return false;
 	}
 
-	for (uint64_t end = (uint64_t) st.st_size - (uint64_t) st.st_size %
-						SPOOL_INDEX_RECORD_SIZE;
-		 end >= SPOOL_INDEX_RECORD_SIZE; end -= SPOOL_INDEX_RECORD_SIZE)
+	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
 	{
-		char record[SPOOL_INDEX_RECORD_SIZE];
-
-		if (!spool_pread(tail->indexFd, tail->index, record, sizeof(record),
-						 end - sizeof(record), &done))
+		if (!spool_pread(tail->indexFd, tail->index, bytes,
+						 Min(sizeof(bytes), (uint64_t) st.st_size - at), at, &done))
 		{
 			return false;
 		}
 
-		if (spool_index_decode(record, done, &tail->last))
+		for (uint64_t i = 0; i < done; i += SPOOL_INDEX_RECORD_SIZE)
 		{
-			tail->keep = end;
-			break;
+			if (!spool_index_decode(bytes + i, done - i, &tail->last))
+			{
+				continue;
+			}
+
+			/*
+			 * A power loss can keep a later record of a write and not an earlier
+			 * one, and a cut cannot tell that from damage of synced records.
+			 */
+			if (at + i > tail->keep)
+			{
+				log_error("Spool file \"%s\" holds no valid index record at "
+						  "offset %" PRIu64, tail->index, tail->keep);
+				return false;
+			}
+
+			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
 		}
 	}
 
