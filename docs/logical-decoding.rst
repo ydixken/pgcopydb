@@ -323,7 +323,7 @@ Raw spool (performance mode)
 ----------------------------
 
 With ``--follow-mode performance`` and ``--plugin pgoutput``, receive writes no SQLite spool.
-It appends the replication stream to segment files in the CDC directory and keeps two side files:
+It appends the replication stream to numbered segment files in the CDC directory, and keeps an index beside each segment and one relation log for the spool:
 
 - ``<seq>.seg`` holds the stream as frames. A frame is the length of the message, the message, and the CRC-32C of both.
   Kind ``w`` is the CopyData message as it arrived, the 25-byte XLogData header followed by the ``pgoutput`` message.
@@ -335,9 +335,9 @@ It appends the replication stream to segment files in the CDC directory and keep
 Receive syncs in this order, and only then reports a flush position: the segment, the relation log, then the index record.
 A reader therefore never meets an index record whose frames or relation definitions are missing.
 ``pgcopydb list spool`` prints the index records of a work directory and reads no frame.
-``pgcopydb stream prune`` removes the three files of a closed segment once the stored low-water mark is above its last commit.
+``pgcopydb stream prune`` removes a closed segment, the index file first so that every index file left has its segment, once the stored low-water mark is above that segment's last commit.
 
-The segment number, not a file pair, is the unit of rotation and of cleanup.
+The segment number, not a file pair, is the unit of rotation and of cleanup, and the relation log stays as long as the spool does.
 Apply holds no cursor in SQLite: it restarts from the target replication origin, skips every transaction at or below it, and stops at the cut.
 
 .. _wal_workers_endpos:

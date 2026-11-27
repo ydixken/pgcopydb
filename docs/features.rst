@@ -107,7 +107,7 @@ The mode belongs to the work directory: a run that resumes a directory of the
 other mode is refused before it writes anything. A directory written before
 this option existed is a ``sqlite`` directory, so every run in flight resumes
 unchanged. ``performance`` requires ``--plugin pgoutput``, it is not
-compatible with ``--wal-high-traffic-tables``, and it currently requires
+compatible with ``--wal-high-traffic-tables``, and it requires
 ``--wal-workers 1``.
 
 Both modes apply whole source transactions in commit order, and for most

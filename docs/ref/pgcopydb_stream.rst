@@ -139,8 +139,8 @@ The follow process also runs ``stream prune`` automatically every 300 seconds
 is optional during a live follow operation.
 
 In performance mode the unit is a spool segment, not a file pair.
-``stream prune`` deletes the index file, the segment and, once no earlier segment is left, nothing else of a closed segment whose last commit position is below the stored low-water mark.
-The relation log is never deleted while the spool exists, because apply reads it after every restart.
+``stream prune`` deletes a closed segment whose last commit position is below the stored low-water mark, and it unlinks the index file before the segment, so that every index file left has its segment.
+The relation log is not deleted while the spool exists, because apply reads it after every restart.
 
 .. include:: ../include/stream-prune.rst
 
