@@ -176,6 +176,9 @@ wal-workers-assign:
 cdc-spool-format:
 	$(MAKE) -C $@
 
+cdc-parallel-crash: build
+	$(MAKE) -C $@
+
 follow-pgoutput: build
 	$(MAKE) -C $@
 
@@ -298,7 +301,7 @@ clean-images:
 .PHONY: cdc-receive-reconnect-dying-source cdc-receive-status-interval cdc-apply-wakeup
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
-.PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format
+.PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format cdc-parallel-crash
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
 .PHONY: cdc-pgoutput-performance cdc-low-level-performance cdc-filtering-pgoutput-performance
 .PHONY: cdc-replica-identity-full-performance cdc-truncate-multi-performance cdc-receive-drain-error-performance

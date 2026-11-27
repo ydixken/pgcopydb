@@ -1,0 +1,23 @@
+Mutant: the flush writes its index records before it syncs the segment they name. Must fail: the start refused what the power loss left, a cut to the last sync of every file being a prefix that the format promises to read.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1462,7 +1462,7 @@
+ {
+ 	PQExpBuffer pending = &writer->pendingIndex;
+ 
+-	if (!spool_sync(&writer->segment) || !spool_sync(&writer->relationLog))
++	if (!spool_sync(&writer->relationLog))
+ 	{
+ 		return false;
+ 	}
+@@ -1500,7 +1500,7 @@
+ 	}
+ 
+ 	if (!spool_put(&writer->index, pending->data, pending->len) ||
+-		!spool_sync(&writer->index))
++		!spool_sync(&writer->index) || !spool_sync(&writer->segment))
+ 	{
+ 		return false;
+ 	}

@@ -313,9 +313,23 @@ Transactions already acknowledged during prefetch remain available in that spool
 The BEGIN cursor uses ``>=`` so it includes a next transaction beginning exactly at the previous COMMIT LSN.
 An incomplete transaction can be completed by redelivery without advancing the apply cursor past its missing COMMIT.
 
-In performance mode a complete transaction is one index record, and an incomplete one has none, so there is nothing to complete by redelivery.
-A record is written after the frames it points at are durable, which makes a valid record proof that its transaction can be read again.
+In performance mode the answer is a different one, because the spool is a set of files and not an SQLite store.
+A complete transaction is one index record, and an incomplete one has none, so there is nothing to complete by redelivery.
 Receive skips a BEGIN whose ``final_lsn`` is at or below the last complete transaction, which is how it drops what the walsender sends a second time.
+
+Receive syncs a segment, then the relation log, and only then writes and syncs the index records of that batch, so an index record that reads back proves that the frames it names and the relation records before it are on disk.
+A kill leaves at most frames that no index record names, and the next start cuts the segment back to the last record it can read, which the source sends again.
+A power loss can also drop bytes that were written and not yet synced, and a file whose directory entry was never synced.
+The start cuts those tails too, and it refuses the spool when such a cut would fall below the position the replication slot confirmed as flushed, because the source no longer sends what is below it.
+
+Segment cleanup deletes a segment only when the segment after it ends at or below the stored replay position, and it unlinks the index file before the segment.
+A kill inside a pass therefore leaves at most the lowest segment without its index file.
+The next start removes that leftover, but only when the stored replay position says the target applied every transaction of the segment after it.
+Otherwise the leftover is damage and not a leftover, and the start refuses it with both positions in the message.
+
+The one worker commits a group and then stores its replay position, so a kill between the two leaves the target origin ahead of the stored position.
+The next run reads that origin, and it reads it only after it took the origin session, which succeeds once the backend of the killed run is gone and its last commit is settled.
+A start whose origin is below the stored replay position is refused: the target lost commits that the spool no longer holds.
 
 .. _raw_spool:
 
