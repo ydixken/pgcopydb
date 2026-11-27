@@ -5587,6 +5587,37 @@ test_statements(const char *dir)
 		  captured.stmts[1].action == STREAM_ACTION_COMMIT,
 		  "a transaction of definitions only comes as BEGIN and COMMIT");
 
+	/* an UPDATE that changes no value, of a table with REPLICA IDENTITY FULL */
+	Msg noOp[] = {
+		begin_msg(0x4510, 0x4600, 907),
+		rel_msg(T2, "public", "t2", 'f', "*id,*v"),
+		change_msg(0x4520, 'U', T2, 'O', ROW("1", "x"), ROW("1", "x")),
+		commit_msg(0x4630, 0x4600, 0x4630, COMMIT_TIME)
+	};
+	const char *const noSQL[][2] = {
+		{ NULL, NULL }
+	};
+	const char *const noOpWant[][2] = {
+		{
+			"UPDATE ONLY \"public\".\"t2\" SET \"id\" = $1, \"v\" = $2 "
+			"WHERE \"id\" = $3 and \"v\" = $4",
+			"[\"1\",\"x\",\"1\",\"x\"]"
+		}
+	};
+
+	made = txn_spool(&writer, dir, noOp, lengthof(noOp));
+	built = made && statements(writer.dirname, new_specs(), &captured);
+	check(built && captured.count == 3 &&
+		  captured.stmts[1].action == STREAM_ACTION_UPDATE &&
+		  dml_is(&captured, 1, noSQL, 1),
+		  "a no-op UPDATE comes as an UPDATE with no SQL, as at 9d8b660");
+
+	specs = new_specs();
+	specs->replayNoOpUpdates = true;
+	built = made && statements(writer.dirname, specs, &captured);
+	check(built && captured.count == 3 && dml_is(&captured, 1, noOpWant, 1),
+		  "with replayNoOpUpdates, a no-op UPDATE has the SQL and arguments of 9d8b660");
+
 	/* the check of the key, a difference of performance mode */
 	Msg toasted[] = {
 		begin_msg(0x5010, 0x5100, 904),

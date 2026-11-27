@@ -1,0 +1,14 @@
+Mutant: the statement source builds a no-op UPDATE against the setting of replayNoOpUpdates. Must fail: a no-op UPDATE comes as an UPDATE with no SQL, as at 9d8b660.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3288,7 +3288,7 @@
+ 
+ 	strlcpy(stmt.timestamp, waiting->timestamp, sizeof(stmt.timestamp));
+ 
+-	return stream_write_statement(spooled->specs->replayNoOpUpdates, &stmt, waiting) &&
++	return stream_write_statement(!spooled->specs->replayNoOpUpdates, &stmt, waiting) &&
+ 		   stream_spool_hand(spooled, &stmt);
+ }
+ 
