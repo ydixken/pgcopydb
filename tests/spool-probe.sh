@@ -60,3 +60,19 @@ spool_apply_shape() {
     awk '/^(BEGIN|COMMIT|ROLLBACK)$/ || /^PREPARE / { print; next }
          /^EXECUTE / { print $1, $2 }' <<<"${out}"
 }
+
+# spool_zero_final_lsns: index records of the raw spool whose final_lsn is 0/0.
+# A spool without an index record is a failure, so the count is never 0 for
+# want of a record to read.
+spool_zero_final_lsns() {
+    local records
+    records=$(timeout 60s pgcopydb list spool --json) || {
+        echo "FAIL: cannot read the raw spool" >&2
+        return 1
+    }
+    test "$(jq 'length' <<<"${records}")" -gt 0 || {
+        echo "FAIL: the raw spool holds no index record" >&2
+        return 1
+    }
+    jq '[.[] | select(.final_lsn == "0/0")] | length' <<<"${records}"
+}

@@ -246,7 +246,7 @@ Shared files (compose auto-loads the env files):
 | `tests/postgres.env` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST_AUTH_METHOD` |
 | `tests/uris.env` | `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, `PGSSLMODE` |
 | `tests/paths.env` | `TMPDIR=/var/run/pgcopydb`, `XDG_DATA_HOME=/var/run/pgcopydb/cdc` |
-| `tests/spool-probe.sh` | `spool_stmts` and `spool_apply_shape`, read from `pgcopydb stream apply --target -`; a suite sources `/var/lib/postgres/spool-probe.sh` of the pagila image |
+| `tests/spool-probe.sh` | `spool_stmts` and `spool_apply_shape`, read from `pgcopydb stream apply --target -`, and `spool_zero_final_lsns`, read from `pgcopydb list spool`; a suite sources `/var/lib/postgres/spool-probe.sh` of the pagila image |
 
 ### Run tests
 

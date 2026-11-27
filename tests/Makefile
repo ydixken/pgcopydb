@@ -157,6 +157,10 @@ cdc-endpos-before-txn: build
 cdc-origin-source: build
 	$(MAKE) -C $@
 
+# the performance pass of cdc-origin-source, which reads the raw spool
+cdc-origin-source-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-source
+
 cdc-spool-resend: build
 	$(MAKE) -C $@
 
@@ -253,7 +257,7 @@ clean-images:
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
 .PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format
-.PHONY: cdc-spool-resend cdc-spool-relation
+.PHONY: cdc-origin-source-performance cdc-spool-resend cdc-spool-relation
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases

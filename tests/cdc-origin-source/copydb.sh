@@ -30,6 +30,9 @@ source_sql() { timeout 60s psql -AtqX -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_P
 target_sql() { timeout 60s psql -AtqX -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI}" -c "$1"; }
 rows() { target_sql "select coalesce(string_agg(id::text, ',' order by id), '') from t"; }
 
+# the performance pass reads the raw spool through the shared probe
+. /var/lib/postgres/spool-probe.sh
+
 # origin_sql <sql>: run sql in a session whose commits carry the origin g5
 origin_sql() {
     timeout 60s psql -AtqX -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" \
@@ -125,7 +128,11 @@ run_case() {
     follow_to "${name}"
     check "${name} follow exit status" 0 "${rc}"
     check "${name} rows on the target" "${expected}" "$(rows)"
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     check "${name} BEGIN rows at 0/0 in output.db" 0 "$(zero_begins)"
+    else
+        check "${name} index records with final_lsn 0/0" 0 "$(spool_zero_final_lsns)"
+    fi
     pgcopydb stream cleanup > "${TMPDIR}/cleanup.log" 2>&1
 }
 
