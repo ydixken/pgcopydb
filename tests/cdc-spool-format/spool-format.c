@@ -3288,6 +3288,23 @@ test_start_cut(const char *dir)
 		  file_size(seg) == (int64_t) (SECOND_END + sizeof(junk)) &&
 		  file_size(log) == logSize + 10,
 		  "a spool of another source system ends the start with an error that names both, and nothing is cut");
+
+	/* the same behind a torn last segment, whose removal leads to the header before it */
+	made = make_rotated(&writer, dir, false) &&
+		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
+		   put_bytes(spool_file(first, writer.dirname, 5, ".seg"), -1, junk,
+					 sizeof(junk));
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds the changes of source system 7, and the source is system 8",
+			first);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 8, 2, 50);
+
+	check(made && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  file_size(first) == (int64_t) (SECOND_END + sizeof(junk)) &&
+		  file_size(spool_file(idx, writer.dirname, 5, ".idx")) == 2 *
+		  SPOOL_INDEX_RECORD_SIZE,
+		  "a spool of another source system behind a torn last segment ends the start with an error that names both, and the segment before it is not cut");
 }
 
 
