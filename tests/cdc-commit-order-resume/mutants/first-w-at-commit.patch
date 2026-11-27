@@ -1,0 +1,24 @@
+Mutant: the worker stores its replay position at the first group COMMIT and not before its first statement. Must fail: the first-w-lock case, where the sentinel replay_lsn is 0/0 while the first transaction waits for the target lock.
+Apply from the repository root with git apply, and never commit it applied.
+
+diff --git a/src/bin/pgcopydb/ld_apply.c b/src/bin/pgcopydb/ld_apply.c
+index ff05fb1..4761d00 100644
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -4355,15 +4355,7 @@ stream_apply_spool_session(StreamApplyContext *context)
+ 
+ 	context->previousLSN = originLSN;
+ 
+-	/* segment cleanup reads the stored position, so a failed write ends here */
+-	if (!stream_apply_store_lsn(context, originLSN, &sentinel))
+-	{
+-		log_error("Failed to store the replay position %X/%X of this run",
+-				  LSN_FORMAT_ARGS(originLSN));
+-		return false;
+-	}
+-
+-	context->sentinelWrittenLSN = originLSN;
++	/* the first group COMMIT stores the position that this run starts from */
+ 	context->sentinelSyncTime = (uint64_t) time(NULL);
+ 
+ 	log_info("Applying from the raw spool as replication origin \"%s\", "

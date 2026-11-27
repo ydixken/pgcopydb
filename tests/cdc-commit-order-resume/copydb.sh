@@ -65,6 +65,16 @@ lsn_txt="printf('%X/%X', lsn >> 32, lsn & 4294967295)"
 commit_of() { lite output "select ${lsn_txt} from output where action = 'C' and xid = $1"; }
 last_commit() { lite output "select ${lsn_txt} from output where action = 'C' order by lsn desc limit 1"; }
 
+. /var/lib/postgres/spool-probe.sh
+
+# The raw spool keeps no SQLite store, and its index answers both positions:
+# a commit position is the end LSN of the commit record, which is what the
+# origin records. The sqlite pass keeps the two readers above.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+    commit_of() { spool_commit_lsn "$1"; }
+    last_commit() { spool_commit_lsns | tail -n 1; }
+fi
+
 count() { target_sql "select count(*) from $1"; }
 origin() { target_sql "select pg_replication_origin_progress('pgcopydb', true)"; }
 
@@ -170,6 +180,7 @@ open_begin() {
     on a commit
 
     prefetch "${endpos}"
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     row=$(lite output "select
         (select max(id) from output where action = 'B') =
         (select max(id) from output where action = 'B' and xid = ${xid_a}),
@@ -177,6 +188,17 @@ open_begin() {
         (select lsn from output where action = 'B' and xid = ${xid_a}) <
         (select lsn from output where action = 'C' and xid = ${xid_b})")
     test "${row}" = '1|0|1' || fail "output.db does not hold A open, newest, below B's COMMIT: ${row}"
+    else
+        # An incomplete transaction gets no index record, so the raw form of
+        # "A open and newest" is: no record of A, one of B, and B's the last
+        # one. No index record carries a BEGIN position; the source put A's
+        # below B's COMMIT by committing B inside A.
+        row=$(spool_records | jq -r --argjson a "${xid_a}" --argjson b "${xid_b}" \
+            '[ (map(select(.xid == $a)) | length),
+               (map(select(.xid == $b)) | length),
+               (if (max_by(.seq) | .xid) == $b then 1 else 0 end) ] | join("|")')
+        test "${row}" = '0|1|1' || fail "the raw spool does not hold B alone and last, with A open: ${row}"
+    fi
 
     catchup "${endpos}"
     test "$(count 'tb where id = 31')" = 1 || fail 'B, committed below endpos, was not applied'
@@ -203,6 +225,17 @@ keepalive_in_txn() {
 
     # with A open, the walsender's keepalives carry an LSN above A's BEGIN
     ctl "select pg_logical_emit_message(false, 'co', 'wal past B')" > /dev/null
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+        # The index records no keepalive. What it answers is that receive got
+        # past B while A was open, and cdc-receive-group-commit pins the group
+        # rule that the keepalive serves on the raw path.
+        deadline=$((SECONDS + 90))
+        until spool_commit_lsn "${xid_b}" > /dev/null 2>&1; do
+            kill -0 "${follow_pid}" || fail 'follow exited while A was open'
+            test "${SECONDS}" -lt "${deadline}" || fail 'B never reached the raw spool while A was open'
+            sleep 0.5
+        done
+    else
     deadline=$((SECONDS + 90))
     until test "$(lite output "select count(*) from output k
                     join output c on c.action = 'C' and c.xid = ${xid_b}
@@ -211,6 +244,7 @@ keepalive_in_txn() {
         test "${SECONDS}" -lt "${deadline}" || fail 'no KEEPALIVE above B while A was open'
         sleep 0.5
     done
+    fi
     on a "insert into ta values (402, 'A last')"
     on a commit
     on b "insert into tb values (42, 'after A')"
@@ -224,6 +258,18 @@ keepalive_in_txn() {
     wait "${follow_pid}" || fail "follow exited $?"
     follow_pid=
 
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+        # Each of A and B has one record, and B's sequence number is below A's:
+        # the apply reads them in commit order whatever their BEGIN positions.
+        inside=$(spool_records | jq -r --argjson a "${xid_a}" --argjson b "${xid_b}" \
+            '[ (map(select(.xid == $a)) | length),
+               (map(select(.xid == $b)) | length),
+               (if (map(select(.xid == $b)) | .[0].seq) <
+                   (map(select(.xid == $a)) | .[0].seq) then 1 else 0 end) ] | join("|")')
+        test "${inside}" = '1|1|1' || fail "the raw spool does not hold B before A, each once: ${inside}"
+        end_case
+        return
+    fi
     inside=$(lite output "select count(*) from output k
                 join output b on b.action = 'B' and b.xid = ${xid_a}
                 join output c on c.action = 'C' and c.xid = ${xid_a}
@@ -462,6 +508,170 @@ replay_index_upgrade() {
     done
     end_case
 }
+
+# A DELETE of a row that the target never had is the only member of its group:
+# it changes no row there, so only the group's own transaction id writes a
+# commit record and moves the origin. A kill before that commit leaves the
+# origin where it was, and the resume after it is not refused.
+void_delete() {
+    begin_case void-delete
+    local xid end origin0 replay
+    on a "insert into ta values (1200, 'keep')"
+    on a "insert into ta values (1201, 'void')"
+    on b "insert into tb values (1200, 'keep')"
+    prefetch "$(wal_lsn)"
+    catchup "$(last_commit)"
+    test "$(count 'ta where id = 1201')" = 1 || fail 'the row to delete never reached the target'
+
+    # the target loses the row, so the DELETE that follows changes nothing
+    target_sql 'delete from ta where id = 1201' > /dev/null
+    on a begin
+    on a "delete from ta where id = 1201"
+    xid=$(xid_of a)
+    on a commit
+
+    prefetch "$(wal_lsn)"
+    end=$(last_commit)
+    test "${end}" = "$(spool_commit_lsn "${xid}" 1)" ||
+        fail "the void DELETE is not the last commit ${end} with one change"
+    origin0=$(origin)
+
+    kill_catchup_at "pgsql_replication_origin_xact_commit if \$_streq(origin_lsn, \"${end}\")" 0 "${end}"
+    test "$(origin)" = "${origin0}" || fail "origin $(origin) moved before the group COMMIT"
+
+    catchup "${end}"
+    test "$(origin)" = "${end}" || fail "origin $(origin) is not the void DELETE's commit ${end}"
+    replay=$(timeout 15s pgcopydb stream sentinel get --replay-lsn)
+    test "${replay}" = "${end}" || fail "sentinel replay_lsn ${replay} is not ${end}"
+    test "$(count 'ta where id = 1201')" = 0 || fail 'the deleted row came back on the target'
+
+    # the resume on top of an origin that a void group moved is not refused
+    catchup "${end}"
+    end_case
+}
+
+# the target backends that logged $1 at ERROR or FATAL level
+drift_target_pids() {
+    awk -v pat="$1" '
+        $0 ~ / (ERROR|FATAL) +[^ ]+ +\[TARGET [0-9]+\]/ && index($0, pat) {
+            for (i = 1; i <= NF; i++) if ($i == "[TARGET") { print $(i + 1); break }
+        }' "${TMPDIR}/follow.log" | tr -d ']' | sort -u
+}
+
+# A column of a changed table is dropped on the target: the statement fails
+# with 42703, the run exits non-zero, and the log keeps that error and its
+# context line as ERROR or FATAL lines of one target backend, which is what
+# the operator reads to end the migration.
+schema_drift() {
+    begin_case schema-drift
+    local rc=0 pid42 pidctx
+    on a "insert into ta values (1401, 'before the drift')"
+    on b "insert into tb values (1400, 'keep')"
+    prefetch "$(wal_lsn)"
+    catchup "$(last_commit)"
+    compare
+
+    target_sql 'alter table ta drop column v' > /dev/null
+    on a "insert into ta values (1402, 'after the drift')"
+
+    pgcopydb stream sentinel set endpos --current
+    timeout 180s pgcopydb follow --resume --not-consistent --notice \
+            >> "${TMPDIR}/follow.log" 2>&1 || rc=$?
+    test "${rc}" -ne 0 || fail 'follow exited 0 with the column dropped on the target'
+    echo "follow exited ${rc} with ta.v dropped on the target"
+
+    grep -E ' (ERROR|FATAL) +[^ ]+ +\[TARGET [0-9]+\] (\[42703\]|Context: Failed to receive pipeline sync)' \
+         "${TMPDIR}/follow.log" || fail 'the log holds no ERROR or FATAL line of the refused statement'
+    pid42=$(drift_target_pids '[42703]')
+    pidctx=$(drift_target_pids 'Context: Failed to receive pipeline sync')
+    test -n "${pid42}" || fail 'no ERROR or FATAL line names [42703] on the target'
+    test "${pid42}" = "${pidctx}" ||
+        fail "the 42703 line names backend '${pid42}' and the context line '${pidctx}'"
+
+    pgcopydb stream cleanup > "${TMPDIR}/cleanup.log" 2>&1
+    echo "PASS [${tc}]"
+}
+
+# The first stored W: a lock on the target blocks the first transaction of the
+# run, and while it waits the sentinel replay_lsn already holds the origin
+# position, which the slot's feedback and segment cleanup both read.
+first_w_lock() {
+    begin_case first-w-lock
+    local end origin0 before replay lock_pid deadline
+    on a "insert into ta values (1301, 'blocked by the lock')"
+    on b "insert into tb values (1300, 'keep')"
+    prefetch "$(wal_lsn)"
+    end=$(last_commit)
+    origin0=$(origin)
+    before=$(timeout 15s pgcopydb stream sentinel get --replay-lsn)
+    echo "before the run: origin ${origin0}, sentinel replay_lsn ${before}"
+    test "${before}" != "${origin0}" || fail "the sentinel already holds the origin ${origin0}"
+
+    psql -AtqX -d "${PGCOPYDB_TARGET_PGURI}" \
+         -c 'begin; lock table ta in access exclusive mode; select pg_sleep(3600)' > /dev/null 2>&1 &
+    lock_pid=$!
+    deadline=$((SECONDS + 30))
+    until test "$(target_sql "select count(*) from pg_locks l join pg_class c on c.oid = l.relation
+                               where c.relname = 'ta' and l.mode = 'AccessExclusiveLock' and l.granted")" -ge 1
+    do
+        test "${SECONDS}" -lt "${deadline}" || fail 'the target lock was never granted'
+        sleep 0.2
+    done
+
+    setsid timeout 240s pgcopydb stream catchup --resume --endpos "${end}" --notice \
+           >> "${TMPDIR}/catchup.log" 2>&1 &
+    follow_pid=$!
+
+    # vacuity guard: an apply session is the one waiting for that lock
+    deadline=$((SECONDS + 120))
+    until test "$(target_sql "select count(*) from pg_stat_activity a
+                               join pg_locks l on l.pid = a.pid and not l.granted
+                               join pg_class c on c.oid = l.relation
+                              where c.relname = 'ta' and a.datname = current_database()")" -ge 1
+    do
+        kill -0 "${follow_pid}" 2>/dev/null || fail 'the apply exited before it waited for the lock'
+        test "${SECONDS}" -lt "${deadline}" || fail 'no apply session waits for the lock on ta'
+        sleep 0.5
+    done
+
+    replay=$(timeout 15s pgcopydb stream sentinel get --replay-lsn)
+    echo "while the first transaction waits: origin ${origin0}, sentinel replay_lsn ${replay}"
+    test "${replay}" != 0/0 || fail 'the sentinel replay_lsn is 0/0 while the apply holds the origin'
+    test "${replay}" = "${origin0}" || fail "sentinel replay_lsn ${replay} is not the origin ${origin0}"
+
+    kill "${lock_pid}" 2>/dev/null || true
+    target_sql "select pg_terminate_backend(pid) from pg_stat_activity
+                 where query like '%pg_sleep(3600)%' and pid <> pg_backend_pid()" > /dev/null
+    deadline=$((SECONDS + 180))
+    while kill -0 "${follow_pid}" 2>/dev/null; do
+        test "${SECONDS}" -lt "${deadline}" || fail 'the apply did not reach endpos once the lock went'
+        sleep 0.5
+    done
+    wait "${follow_pid}" || fail "the apply exited $? once the lock went"
+    follow_pid=
+    test "$(origin)" = "${end}" || fail "origin $(origin) is not the last commit ${end}"
+    end_case
+}
+
+# The SQLite layout answers the replay.db and output.db cases, so the
+# performance pass runs the three cases whose contract an index record can
+# answer, and the three cases of the raw path's own rules.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+    for c in ${CASE:-all}; do
+        case "${c}" in
+            all) open_begin; keepalive_in_txn; restart_interleaved
+                 void_delete; first_w_lock; schema_drift ;;
+            open-begin) open_begin ;;
+            keepalive-in-txn) keepalive_in_txn ;;
+            restart-interleaved) restart_interleaved ;;
+            void-delete) void_delete ;;
+            first-w-lock) first_w_lock ;;
+            schema-drift) schema_drift ;;
+            *) fail "case ${c} needs the SQLite layout" ;;
+        esac
+    done
+    exit 0
+fi
 
 for c in ${CASE:-all}; do
     case "${c}" in
