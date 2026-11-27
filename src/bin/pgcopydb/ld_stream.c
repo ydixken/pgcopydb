@@ -739,6 +739,8 @@ startLogicalStreaming(StreamSpecs *specs)
 			return false;
 		}
 
+		stream.pinValueOutput = stream_uses_raw_spool(specs);
+
 		if (!pgsql_start_replication(&stream))
 		{
 			/* errors have already been logged */
