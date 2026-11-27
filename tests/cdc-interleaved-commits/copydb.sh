@@ -39,6 +39,34 @@ interleaved() {
     seen=${n}
 }
 
+. /var/lib/postgres/spool-probe.sh
+
+# The index of the raw spool carries no BEGIN position, so the overlap itself
+# has no raw form here: it is the workload that makes it, and
+# cdc-commit-order-resume pins what the apply does with it. What an index
+# record answers is the commit order, which the sqlite query reads from the
+# row ids: one record per transaction, and the sequence number rising with the
+# commit position.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+    interleaved() {
+        local js n
+        js=$(spool_records) || return 1
+        n=$(jq 'length' <<<"${js}")
+        test "$((n - seen))" -ge "$1" ||
+            { echo "FAIL: ${n} records in the raw spool, ${seen} before, expected $1 more" >&2; return 1; }
+        jq -e '(map(.xid) | unique | length) == length' <<<"${js}" > /dev/null ||
+            { echo 'FAIL: a transaction has more than one index record' >&2; return 1; }
+        local sq lsn cur pseq=-1 prev=-1
+        while read -r sq lsn; do
+            cur=$(( 16#${lsn%%/*} * 4294967296 + 16#${lsn##*/} ))
+            test "${sq}" -gt "${pseq}" -a "${cur}" -gt "${prev}" ||
+                { echo "FAIL: record ${sq} at ${lsn} does not rise above ${pseq}" >&2; return 1; }
+            pseq=${sq} prev=${cur}
+        done < <(jq -r '.[] | "\(.seq) \(.end_lsn)"' <<<"${js}")
+        seen=${n}
+    }
+fi
+
 compare() {
     local t sql
     for t in ta tb; do
@@ -51,6 +79,10 @@ compare() {
 }
 
 for plugin in pgoutput test_decoding; do
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ] && [ "${plugin}" != pgoutput ]; then
+        echo "SKIP: ${plugin} has no performance mode"
+        continue
+    fi
     db=interleave_${plugin}
     export PGCOPYDB_SOURCE_PGURI=${src_base}/${db}
     export PGCOPYDB_TARGET_PGURI=${tgt_base}/${db}

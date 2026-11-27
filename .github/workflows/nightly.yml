@@ -167,6 +167,7 @@ jobs:
           - follow-resume-snapshot-performance
           - cdc-endpos-in-multi-wal-txn
           - cdc-interleaved-commits
+          - cdc-interleaved-commits-performance
           - cdc-resend-after-reconnect
           - cdc-commit-order-resume
           - cdc-commit-order-resume-performance
