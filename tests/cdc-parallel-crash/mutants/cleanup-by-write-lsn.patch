@@ -1,0 +1,14 @@
+Mutant: segment cleanup deletes by the position receive wrote, not by the one the target applied. Must fail: cleanup keeps every segment the target has not applied.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_store.c
++++ b/src/bin/pgcopydb/ld_store.c
+@@ -1421,7 +1421,7 @@
+ 
+ 	if (tagged)
+ 	{
+-		return spool_cleanup(specs->paths.dir, sentinel.replay_lsn, dry_run,
++		return spool_cleanup(specs->paths.dir, sentinel.write_lsn, dry_run,
+ 							 filesDeleted, bytesFreed);
+ 	}
+ 

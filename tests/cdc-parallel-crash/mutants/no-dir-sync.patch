@@ -1,0 +1,18 @@
+Mutant: a new segment does not sync its directory entry. Must fail: every transaction the power loss cut is above the confirmed flush position.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -461,9 +461,10 @@
+ 
+ 	spool_header_encode(header, buf);
+ 
++	(void) spool_sync_directory;
++
+ 	if (!spool_put(segment, buf, SPOOL_HEADER_SIZE) ||
+-		!spool_sync(segment) ||
+-		!spool_sync_directory(dirname))
++		!spool_sync(segment))
+ 	{
+ 		spool_fail(segment);
+ 		return false;

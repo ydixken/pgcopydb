@@ -1,0 +1,14 @@
+Mutant: the start is not refused when the origin is below the stored replay position. Must fail: the start that found lost commits applied nothing.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -4075,7 +4075,7 @@
+ 		return false;
+ 	}
+ 
+-	if (originLSN < sentinel.replay_lsn)
++	if (false)
+ 	{
+ 		log_error("Replication origin \"%s\" is at %X/%X on the target, "
+ 				  "below the stored replay position %X/%X: the target lost "

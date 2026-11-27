@@ -1,0 +1,16 @@
+Mutant: segment cleanup unlinks the segment before its index file. Must fail: the killed cleanup unlinked one index file.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2923,8 +2923,8 @@
+ 		log_info("Would remove spool segment \"%s\" and its index file, "
+ 				 "%" PRIu64 " bytes", segment, bytes);
+ 	}
+-	else if (!unlink_file(index) || !spool_sync_directory(dirname) ||
+-			 !unlink_file(segment) || !spool_sync_directory(dirname))
++	else if (!unlink_file(segment) || !spool_sync_directory(dirname) ||
++			 !unlink_file(index) || !spool_sync_directory(dirname))
+ 	{
+ 		return false;
+ 	}
