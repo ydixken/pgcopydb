@@ -3423,6 +3423,17 @@ test_start_cut(const char *dir)
 	check(made && refused_twice(writer.dirname, 7, 0, line),
 		  "a segment with indexed transactions and a torn header ends every start with an error, and no file changes");
 
+	/* the writer would append to the segment before it, past these transactions */
+	made = make_rotated(&writer, dir, true) &&
+		   flip_byte(spool_file(seg, writer.dirname, 7, ".seg"), 0) &&
+		   put_bytes(log_file(log, writer.dirname), -1, junk, 10);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has no valid header, and its index file holds transactions",
+			seg);
+
+	check(made && refused_twice(writer.dirname, 7, 50, line),
+		  "an indexed last segment with a torn header after another segment ends every start with an error, and no file changes");
+
 	/* the segment before a last one without an indexed transaction holds none either */
 	made = make_rotated(&writer, dir, false) &&
 		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
