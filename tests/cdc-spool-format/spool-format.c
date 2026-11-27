@@ -4195,6 +4195,15 @@ test_reader(const char *dir)
 		  "an invalid index record at the tail of a closed index file fails the reader");
 	spool_reader_close(&reader);
 
+	/* a power loss can keep the length of a record write and not its bytes */
+	char zeroes[SPOOL_INDEX_RECORD_SIZE] = { 0 };
+
+	made = make_spool(&writer, dir) &&
+		   put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, zeroes,
+					 sizeof(zeroes));
+	check(made && reader_holds(writer.dirname, 0, all, 2),
+		  "a whole invalid index record at the tail of the last index file reads as not written yet, and the reader waits");
+
 	/* a bit of the INSERT of the first transaction */
 	made = make_spool(&writer, dir) &&
 		   flip_byte(spool_file(seg, writer.dirname, 5, ".seg"),
