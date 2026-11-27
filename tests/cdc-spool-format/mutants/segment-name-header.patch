@@ -1,0 +1,28 @@
+Mutant: the read pass of a start does not check the header of a segment against the name of its file. Must fail: a last segment, and a segment before the last one, whose header names another transaction than its file name ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2548,22 +2548,6 @@
+ 	 * header of a segment names its first transaction, and the name of its
+ 	 * file repeats that number.
+ 	 */
+-	uint64_t names[] = { seq, start->removed ? before : 0 };
+-	SpoolTail *tails[] = { &start->last, &start->before };
+-
+-	for (int i = 0; i < (int) lengthof(names); i++)
+-	{
+-		if (names[i] > 0 && tails[i]->headed &&
+-			tails[i]->header.firstSeq != names[i])
+-		{
+-			log_error("Spool file \"%s\" names the first transaction %" PRIu64
+-					  " in its header, and %" PRIu64 " in its file name",
+-					  tails[i]->segment.filename, tails[i]->header.firstSeq,
+-					  names[i]);
+-			return false;
+-		}
+-	}
+-
+ 	/* and the removed segment continues the one before it, which ends there */
+ 	if (start->removed && before > 0 && start->last.headed &&
+ 		start->last.header.firstSeq != start->before.last.seq + 1)

@@ -1,19 +1,21 @@
-Mutant: the start keeps an index file whose valid records follow an invalid one. Must fail: an invalid index record before a valid one ends every start with an error that names its offset, and no file changes.
+Mutant: the start keeps the index records that follow an invalid one. Must fail: an invalid index record before a valid one cuts the index file at the record before it, and the start reports that cut.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2007,13 +2007,6 @@
- 			 * A power loss can keep a later record of a write and not an earlier
- 			 * one, and a cut cannot tell that from damage of synced records.
+@@ -2144,13 +2144,8 @@
+ 			 * records: the records before it are kept, and the rule of A47
+ 			 * decides whether that cut is safe.
  			 */
--			if (at + i > tail->keep)
--			{
--				log_error("Spool file \"%s\" holds no valid index record at "
--						  "offset %" PRIu64, tail->index, tail->keep);
--				return false;
--			}
+-			tail->gap = at + i > tail->keep;
 -
- 			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+-			if (!tail->gap)
+-			{
+-				tail->last = record;
+-				tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+-			}
++			tail->last = record;
++			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
  		}
  	}
+ 

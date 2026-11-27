@@ -1,0 +1,14 @@
+Mutant: the flush syncs the directory entry of an index file that exists already, and not of the one it creates. Must fail: the flush syncs the directory entry of the index file it creates, as the rotation does for its segment.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1445,7 +1445,7 @@
+ 	index->size = (uint64_t) st.st_size;
+ 	index->synced = index->size;
+ 
+-	return !fresh || spool_sync_directory(writer->dirname);
++	return fresh || spool_sync_directory(writer->dirname);
+ }
+ 
+ 

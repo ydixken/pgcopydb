@@ -1,0 +1,24 @@
+Mutant: the start removes a last segment without an indexed transaction without checking that its header continues the segment before it. Must fail: a last segment without an indexed transaction whose header does not continue the segment before it ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2562,18 +2562,6 @@
+ 					  names[i]);
+ 			return false;
+ 		}
+-	}
+-
+-	/* and the removed segment continues the one before it, which ends there */
+-	if (start->removed && before > 0 && start->last.headed &&
+-		start->last.header.firstSeq != start->before.last.seq + 1)
+-	{
+-		log_error("Spool file \"%s\" names the first transaction %" PRIu64
+-				  " in its header, and the last transaction of \"%s\" has the "
+-				  "sequence number %" PRIu64,
+-				  start->last.segment.filename, start->last.header.firstSeq,
+-				  start->before.index, start->before.last.seq);
+-		return false;
+ 	}
+ 
+ 	/*

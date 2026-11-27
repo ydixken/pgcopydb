@@ -1,0 +1,14 @@
+Mutant: the flush writes its index records and does not sync them. Must fail: the flush appends the index records of its segment and syncs the index file.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1499,7 +1499,7 @@
+ 	}
+ 
+ 	if (!spool_put(&writer->index, pending->data, pending->len) ||
+-		!spool_sync(&writer->index))
++		!spool_write_block(&writer->index))
+ 	{
+ 		return false;
+ 	}
