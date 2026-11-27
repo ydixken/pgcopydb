@@ -142,9 +142,12 @@ derived=$(awk -F, '
           | (if $end == null or ($f | length) != $r.n or any($f[]; . < $end)
              then "spool flush LSNs \($r.recv_flush_lsns // "-") do not all cover endpos \($r.endpos // "-")" else empty end))
        end) ] as $dq
+  # the phases the variant has: RL never applies, so a missing apply reading is
+  # not a missing reading
+  | (if $rl then ["receive"] else ["receive", "apply"] end) as $phases
   | (if $r.host_cpu_limit == "off" then []
-     elif $r.receive_host_cpu_pct == null or $r.apply_host_cpu_pct == null then ["no host CPU reading"]
-     else [ (["receive", "apply"][] as $p | $r[$p + "_host_cpu_pct"] as $h
+     elif any($phases[]; $r[. + "_host_cpu_pct"] == null) then ["no host CPU reading"]
+     else [ ($phases[] as $p | $r[$p + "_host_cpu_pct"] as $h
        | select($h > ($r.host_cpu_limit // 400)) | "host CPU outside the VM \($h)% during \($p), limit \($r.host_cpu_limit // 400)%") ] end) as $host
   | . + { disqualified: $dq,
           contended_by: ((if .contended == 1 then ["containers \(.others)"] else [] end)
