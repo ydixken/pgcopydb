@@ -1548,6 +1548,20 @@ cli_stream_apply(int argc, char **argv)
 		exit(EXIT_CODE_BAD_STATE);
 	}
 
+	/* a performance work directory holds the spool, and no SQLite file to open */
+	if (stdoutMode && stream_uses_raw_spool(&specs))
+	{
+		if (!stream_init_context(&specs) ||
+			!stream_transform_caches_init(&specs) ||
+			!stream_apply_spool_to_stdout(&specs, stdout))
+		{
+			/* errors have already been logged */
+			exit(EXIT_CODE_INTERNAL_ERROR);
+		}
+
+		return;
+	}
+
 	/*
 	 * Open outputDB (its filename is looked up in the cdc_files table of
 	 * sourceDB) and derive + open replayDB from the outputDB path.

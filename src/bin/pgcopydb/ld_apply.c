@@ -23,6 +23,7 @@
 #include "cli_root.h"
 #include "copydb.h"
 #include "env_utils.h"
+#include "ld_spool.h"
 #include "ld_store.h"
 #include "ld_stream.h"
 #include "lock_utils.h"
@@ -60,6 +61,28 @@ static GUC applySessionSettings17[] = {
 	{ NULL, NULL },
 };
 
+/*
+ * A spool worker sets every setting before its first BEGIN, so that a group
+ * never carries a SET. read committed is the isolation of a group of 9d8b660,
+ * which takes it from the target default; stating it keeps the apply correct
+ * on a target that defaults to repeatable read.
+ */
+static GUC applySpoolSettings[] = {
+	COMMON_GUC_SETTINGS,
+	{ "synchronous_commit", "on" },
+	{ "session_replication_role", "'replica'" },
+	{ "row_security", "off" },
+	{ "default_transaction_isolation", "'read committed'" },
+	{ "lock_timeout", "0" },
+	{ "idle_in_transaction_session_timeout", "0" },
+	{ NULL, NULL },
+};
+
+static GUC applySessionSettings14[] = {
+	{ "idle_session_timeout", "0" },
+	{ NULL, NULL },
+};
+
 static bool readTxnCommitLSN(LogicalMessageMetadata *metadata, const char *dir,
 							 bool *txnCommitLSNFound);
 static bool parseTxnMetadataFile(const char *filename, LogicalMessageMetadata *metadata);
@@ -69,6 +92,11 @@ static bool computeTxnMetadataFilename(uint32_t xid, const char *dir, char *file
 static bool writeTxnCommitMetadata(LogicalMessageMetadata *mesg, const char *dir);
 
 static bool setupConnection(PGSQL *pgsql, StreamApplyContext *context);
+static bool stream_apply_store_lsn(StreamApplyContext *context, uint64_t lsn,
+								   CopyDBSentinel *sentinel);
+static bool stream_apply_spool_session(StreamApplyContext *context);
+static bool stream_apply_spool_group_open(StreamApplyContext *context);
+static bool stream_apply_spool_stmt(void *context, ReplayDBStmt *s);
 static bool stream_apply_load_target_relkinds(StreamApplyContext *context);
 
 static bool stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s);
@@ -114,7 +142,6 @@ static void stream_apply_txn_init(ApplyTxnState *state,
 								  uint64_t commitLSN);
 static bool stream_apply_txn_stmt(ApplyTxnState *state, ReplayDBStmt *s);
 static bool stream_apply_txn_end(ApplyTxnState *state, bool success);
-
 
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
 
@@ -173,7 +200,16 @@ stream_apply_catchup(StreamSpecs *specs)
 	 * mode the main loop will call stream_transform_from_outputdb() again
 	 * as more rows arrive in outputDB).
 	 */
-	if (!stream_transform_context_init(specs))
+	if (context.rawSpool)
+	{
+		/* the statement builders read the two sets, and no target connection */
+		if (!stream_transform_caches_init(specs))
+		{
+			log_error("Failed to prepare the caches of the statement builders");
+			return false;
+		}
+	}
+	else if (!stream_transform_context_init(specs))
 	{
 		log_error("Failed to initialize inline transform context");
 		return false;
@@ -188,7 +224,9 @@ stream_apply_catchup(StreamSpecs *specs)
 	 */
 	(void) pipeline_state_start(specs->sourceDB, "apply", context.previousLSN);
 
-	bool success = stream_apply_replaydb(specs, &context);
+	bool success = context.rawSpool
+				   ? stream_apply_spool(specs, &context)
+				   : stream_apply_replaydb(specs, &context);
 	bool done = success;
 
 	/* a WAL worker records done only once it finished at endpos */
@@ -546,6 +584,402 @@ apply_group_limit(const char *name, int fallback)
 			 name, value, fallback);
 
 	return fallback;
+}
+
+
+/* the idle wait of a pass that found no transaction to send, in ms */
+#define APPLY_SPOOL_IDLE_MS 10
+
+/* how long the worker may send nothing before it holds the pipeline open */
+#define APPLY_SPOOL_IDLE_PING_MS 10000
+
+/* how often a worker with nothing to send reads the catalog */
+#define APPLY_SPOOL_POLL_MS 100
+
+
+/*
+ * stream_apply_spool_open_reader opens the reader of the raw spool at the
+ * position the target committed.
+ *
+ * A receive start unlinks a last segment that holds no transaction and creates
+ * it again, so a worker that kept its reader open would read the unlinked
+ * inode for good. The worker therefore opens the reader again after every
+ * receive start, and after a group that rolled back, whose members it reads
+ * again.
+ */
+bool
+stream_apply_spool_open_reader(StreamApplyContext *context, SpoolReader *reader,
+							   bool *opened)
+{
+	if (*opened)
+	{
+		(void) spool_reader_close(reader);
+		*opened = false;
+	}
+
+	if (!spool_reader_open(reader, context->paths.dir, context->previousLSN))
+	{
+		/* errors have already been logged */
+		(void) spool_reader_close(reader);
+		return false;
+	}
+
+	*opened = true;
+
+	return true;
+}
+
+
+/* opens a group of the raw path: no SET, and an xid for the origin to ride on */
+static bool
+stream_apply_spool_group_open(StreamApplyContext *context)
+{
+	if (!stream_apply_group_open(context, NULL))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/* a target transaction without an xid writes no commit record */
+	if (!pgsql_execute(&(context->applyPgConn), "SELECT txid_current()"))
+	{
+		/* errors have already been logged */
+		(void) stream_apply_group_rollback(context);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * stream_apply_spool_stmt takes one statement from the statement source. A
+ * degrade stops the source, which only a false return does, and the driver
+ * reads the member again in a group of its own.
+ */
+static bool
+stream_apply_spool_stmt(void *context, ReplayDBStmt *s)
+{
+	ApplyTxnState *state = (ApplyTxnState *) context;
+
+	return stream_apply_txn_stmt(state, s) && !state->degrade;
+}
+
+
+/*
+ * stream_apply_spool applies the indexed transactions of the raw spool to the
+ * target, in commit groups, with no SQLite file and no transform pass in the
+ * path. The worker reads the index in commit order and skips every record at
+ * or below its origin, so what it has applied is exactly what its origin says.
+ *
+ * The cut at endpos and the finish are not here: this driver stops on a signal
+ * or on a failure.
+ */
+bool
+stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
+{
+	SpoolReader reader = { 0 };
+	bool opened = false;
+	bool success = true;
+
+	/* the receive run that the reader was opened after */
+	PipelineStateEntry receive = { 0 };
+
+	(void) pipeline_state_get(specs->sourceDB, "receive", &receive);
+
+	/* pipe_rt[0] carries the out-of-band "receive done" lifecycle signal */
+	int pipe_rd = (specs->pipe_rt[0] > 0) ? specs->pipe_rt[0] : -1;
+
+	PipelineStateEntry current = { 0 };
+	strlcpy(current.process_name, "apply", sizeof(current.process_name));
+	current.run_start_lsn = context->previousLSN;
+	current.last_txn_end_lsn = context->previousLSN;
+	current.run_end_lsn = context->previousLSN;
+
+	specs->private.applyState = &current;
+
+	/* PGCOPYDB_APPLY_GROUP_TXNS=1 applies one source transaction per COMMIT */
+	int groupMaxTxns = apply_group_limit("PGCOPYDB_APPLY_GROUP_TXNS", 100);
+	int groupMaxRows = apply_group_limit("PGCOPYDB_APPLY_GROUP_ROWS", 10000);
+	int groupMaxMs = apply_group_limit("PGCOPYDB_APPLY_GROUP_MS", 200);
+
+	log_info("Applying CDC changes from the raw spool \"%s\" after LSN %X/%X, "
+			 "up to %d transactions, %d rows or %d ms per target transaction",
+			 context->paths.dir,
+			 LSN_FORMAT_ARGS(context->previousLSN),
+			 groupMaxTxns, groupMaxRows, groupMaxMs);
+
+	context->groupOpen = false;
+	context->groupCursorLSN = context->previousLSN;
+
+	/* when the worker last sent a statement, which bounds its idle time */
+	int64_t sent = feGetCurrentTimestamp();
+
+	/* when it last read the catalog, which its idle wait is shorter than */
+	int64_t polled = 0;
+
+	/* block on the pipe only after a pass that found nothing to do */
+	bool idle = false;
+
+	for (;;)
+	{
+		if (stream_apply_stopping())
+		{
+			/* the signal interrupts any query, a group COMMIT included */
+			if (context->groupOpen)
+			{
+				log_info("Apply leaves %d transactions after %X/%X "
+						 "uncommitted, the next run applies them again",
+						 context->groupTxns,
+						 LSN_FORMAT_ARGS(context->previousLSN));
+				context->groupOpen = false;
+				context->groupCursorLSN = context->previousLSN;
+			}
+
+			log_info("Apply process received a shutdown signal, stopping");
+			break;
+		}
+
+		/* the lifecycle pipe, which also serves as the idle wait */
+		if (!specs->upstream_done && pipe_rd >= 0)
+		{
+			fd_set rfds;
+			FD_ZERO(&rfds);
+			FD_SET(pipe_rd, &rfds);
+			struct timeval tv = {
+				.tv_sec = 0,
+				.tv_usec = idle ? APPLY_SPOOL_IDLE_MS * 1000 : 0
+			};
+
+			int nready = select(pipe_rd + 1, &rfds, NULL, NULL, &tv);
+
+			if (nready < 0 && errno != EINTR)
+			{
+				log_error("apply select() on pipe: %m");
+				success = false;
+				break;
+			}
+
+			if (nready > 0 && FD_ISSET(pipe_rd, &rfds))
+			{
+				(void) stream_recv_upstream_done(specs, pipe_rd);
+				pipe_rd = -1;
+			}
+		}
+		else if (idle)
+		{
+			pg_usleep(APPLY_SPOOL_IDLE_MS * 1000);
+		}
+
+		idle = false;
+
+		if (!opened &&
+			!stream_apply_spool_open_reader(context, &reader, &opened))
+		{
+			success = false;
+			break;
+		}
+
+		bool found = false;
+
+		if (!spool_reader_next(&reader, &found))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		if (!found)
+		{
+			if (context->groupOpen &&
+				!stream_apply_group_close(context, &current))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			if (feGetCurrentTimestamp() - polled >= APPLY_SPOOL_POLL_MS * 1000LL)
+			{
+				polled = feGetCurrentTimestamp();
+
+				if (!stream_apply_sync_sentinel(context, false))
+				{
+					log_warn("Failed to sync sentinel when caught up "
+							 "with the spool");
+				}
+
+				current.run_end_lsn = context->previousLSN;
+
+				/* a receive start may have replaced the segment it waits in */
+				PipelineStateEntry started = { 0 };
+
+				if (pipeline_state_get(specs->sourceDB, "receive", &started) &&
+					(started.pid != receive.pid ||
+					 started.started_at != receive.started_at))
+				{
+					receive = started;
+
+					if (!stream_apply_spool_open_reader(context, &reader,
+														&opened))
+					{
+						success = false;
+						break;
+					}
+				}
+			}
+
+			/*
+			 * An idle source leaves the pipeline untouched, where the server
+			 * and the network cannot report a broken connection. An empty
+			 * query string returns PGRES_EMPTY_QUERY, which is not a result
+			 * the pipeline sync accepts, so the statement is select 1.
+			 */
+			if (feGetCurrentTimestamp() - sent >= APPLY_SPOOL_IDLE_PING_MS * 1000LL)
+			{
+				if (!pgsql_execute(&(context->applyPgConn), "select 1") ||
+					!pgsql_sync_pipeline(&(context->applyPgConn)))
+				{
+					log_error("Failed to hold the apply pipeline open "
+							  "while the source is idle");
+					success = false;
+					break;
+				}
+
+				sent = feGetCurrentTimestamp();
+			}
+
+			idle = true;
+			continue;
+		}
+
+		SpoolIndexRecord *record = &(reader.record);
+
+		/*
+		 * The transactions this worker has applied are exactly those at or
+		 * below its origin, because it commits them in commit order and every
+		 * group commit moves the origin to its last member.
+		 */
+		if (record->endLSN <= context->previousLSN)
+		{
+			log_debug("Skip already-applied txn %u committing at %X/%X, "
+					  "at or below %X/%X",
+					  record->xid,
+					  LSN_FORMAT_ARGS(record->endLSN),
+					  LSN_FORMAT_ARGS(context->previousLSN));
+			continue;
+		}
+
+		/* a member that could not join the last group starts a new one */
+		if (context->groupOpen &&
+			record->endLSN == context->groupBreakLSN &&
+			!stream_apply_group_close(context, &current))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		current.last_xid = record->xid;
+		current.last_txn_begin_lsn = record->finalLSN;
+		current.last_txn_end_lsn = InvalidXLogRecPtr;
+		current.last_txn_complete = false;
+		current.last_txn_processed = false;
+
+		if (!context->groupOpen && !stream_apply_spool_group_open(context))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		ApplyTxnState state = { 0 };
+
+		(void) stream_apply_txn_init(&state, context,
+									 record->xid, record->endLSN);
+
+		/*
+		 * A record of no change frames, and one whose changes yield no
+		 * statement, reach the group as an empty member: it is applied as an
+		 * origin advance with no DML, merged like any other member.
+		 */
+		bool applied = stream_spool_statements(specs, &reader,
+											   &stream_apply_spool_stmt,
+											   &state);
+
+		if (!stream_apply_txn_end(&state, applied || state.degrade))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		if (state.degrade)
+		{
+			/*
+			 * Either the rows of this member are rolled back with the group
+			 * before it, or that group commits now. Both leave the reader
+			 * above a position it has to read again.
+			 */
+			context->groupBreakLSN = record->endLSN;
+
+			if ((context->groupOpen &&
+				 !stream_apply_group_close(context, &current)) ||
+				!stream_apply_spool_open_reader(context, &reader, &opened))
+			{
+				/* errors have already been logged */
+				success = false;
+				break;
+			}
+
+			continue;
+		}
+
+		if (!applied)
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+
+		sent = feGetCurrentTimestamp();
+
+		current.last_txn_end_lsn = record->endLSN;
+		current.last_txn_complete = true;
+
+		if (context->groupTxns < groupMaxTxns &&
+			context->groupRows < groupMaxRows &&
+			feGetCurrentTimestamp() - context->groupStart < groupMaxMs * 1000LL)
+		{
+			continue;
+		}
+
+		if (!stream_apply_group_close(context, &current))
+		{
+			/* errors have already been logged */
+			success = false;
+			break;
+		}
+	}
+
+	if (opened)
+	{
+		(void) spool_reader_close(&reader);
+	}
+
+	/* publish the replay_lsn that the once-a-second limit still holds back */
+	context->sentinelSyncTime = 0;
+	(void) stream_apply_sync_sentinel(context, false);
+
+	log_info("Applied %lld transactions in %lld target transactions",
+			 (long long) context->groupedTxnsCommitted,
+			 (long long) context->groupsCommitted);
+
+	/* enforce a final durable checkpoint of the in-memory apply state */
+	(void) pipeline_state_sync(specs->sourceDB, &current);
+	specs->private.applyState = NULL;
+
+	return success;
 }
 
 
@@ -2151,7 +2585,17 @@ stream_apply_setup(StreamSpecs *specs, StreamApplyContext *context)
 	 * so we can select the correct starting file when file rotation has
 	 * produced multiple output.db files during prefetch.
 	 */
-	if (!setupReplicationOrigin(context))
+	context->rawSpool = stream_uses_raw_spool(specs);
+
+	if (context->rawSpool)
+	{
+		if (!stream_apply_spool_session(context))
+		{
+			log_error("Failed to set up the apply session for the raw spool");
+			return false;
+		}
+	}
+	else if (!setupReplicationOrigin(context))
 	{
 		log_error("Failed to setup replication origin on the target database");
 		return false;
@@ -2183,33 +2627,36 @@ stream_apply_setup(StreamSpecs *specs, StreamApplyContext *context)
 	 * ld_store_open_outputdb skips its own set_current call when the
 	 * filename is already set.
 	 */
-	if (context->previousLSN != InvalidXLogRecPtr)
+	if (!context->rawSpool)
 	{
-		if (!ld_store_set_cdc_filename_at_lsn(specs, context->previousLSN))
+		if (context->previousLSN != InvalidXLogRecPtr)
+		{
+			if (!ld_store_set_cdc_filename_at_lsn(specs, context->previousLSN))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+		}
+		else
+		{
+			if (!ld_store_set_first_cdc_filename(specs))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+		}
+
+		if (!ld_store_open_outputdb(specs))
 		{
 			/* errors have already been logged */
 			return false;
 		}
-	}
-	else
-	{
-		if (!ld_store_set_first_cdc_filename(specs))
+
+		if (!ld_store_open_replaydb(specs))
 		{
 			/* errors have already been logged */
 			return false;
 		}
-	}
-
-	if (!ld_store_open_outputdb(specs))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
-	if (!ld_store_open_replaydb(specs))
-	{
-		/* errors have already been logged */
-		return false;
 	}
 
 	char *process =
@@ -2382,6 +2829,25 @@ stream_apply_wait_for_sentinel(StreamSpecs *specs, StreamApplyContext *context)
 
 
 /*
+ * stream_apply_store_lsn publishes the position the apply committed. On the
+ * raw path that position is W, which segment cleanup reads, so the guarded
+ * writer of the stored W takes this one call.
+ */
+static bool
+stream_apply_store_lsn(StreamApplyContext *context, uint64_t lsn,
+					   CopyDBSentinel *sentinel)
+{
+	if (!context->rawSpool)
+	{
+		return sentinel_sync_apply(context->sourceDB, lsn, sentinel);
+	}
+
+	return sentinel_update_replay_lsn(context->sourceDB, lsn) &&
+		   sentinel_get(context->sourceDB, sentinel);
+}
+
+
+/*
  * stream_apply_sync_sentinel sync with the pgcopydb sentinel table, sending
  * the current replay LSN position and fetching the maybe new endpos and apply
  * values.
@@ -2425,7 +2891,7 @@ stream_apply_sync_sentinel(StreamApplyContext *context, bool findDurableLSN)
 	CopyDBSentinel sentinel = { 0 };
 
 	bool synced = write ?
-				  sentinel_sync_apply(context->sourceDB, durableLSN, &sentinel) :
+				  stream_apply_store_lsn(context, durableLSN, &sentinel) :
 				  sentinel_get(context->sourceDB, &sentinel);
 
 	if (!synced)
@@ -3500,6 +3966,157 @@ setupReplicationOrigin(StreamApplyContext *context)
 
 
 /*
+ * How many 100 ms passes a spool worker waits for the backend of the previous
+ * run to let go of its replication origin.
+ *
+ * The number is that of APPLY_SLOT_RELEASE_WAIT, which bounds the release of a
+ * source slot in the N-slot finish. The loop here is its own, because the
+ * single-slot code reuses nothing of that finish.
+ */
+#define APPLY_ORIGIN_ACQUIRE_WAIT 300
+
+/* SQLSTATE object_in_use: another session still holds the origin */
+#define APPLY_ORIGIN_IN_USE "55006"
+
+
+/*
+ * stream_apply_spool_session prepares the target for a worker that applies
+ * from the raw spool: the two connections, every session setting a group
+ * needs, the replication origin, and the position the target committed.
+ *
+ * The order carries the exactly-once rules of the design. A successful origin
+ * acquire proves that the backend of the previous run is gone and that its
+ * last commit is settled, so the flushed origin is read after it and not
+ * before. An origin below the stored position means the target lost commits
+ * that this work directory may no longer hold, and the start is refused.
+ */
+static bool
+stream_apply_spool_session(StreamApplyContext *context)
+{
+	PGSQL *applyPgConn = &(context->applyPgConn);
+	CopyDBSentinel sentinel = { 0 };
+	uint64_t originLSN = InvalidXLogRecPtr;
+	uint32_t oid = 0;
+
+	/* the control connection answers what the pipeline cannot: a relkind */
+	if (!setupConnection(applyPgConn, context) ||
+		!setupConnection(&(context->controlPgConn), context))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!pgsql_set_gucs(applyPgConn, applySpoolSettings))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (applyPgConn->pgversion_num >= 140000 &&
+		!pgsql_set_gucs(applyPgConn, applySessionSettings14))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (applyPgConn->pgversion_num >= 170000 &&
+		!pgsql_set_gucs(applyPgConn, applySessionSettings17))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!pgsql_replication_origin_oid(applyPgConn, context->origin, &oid))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (oid == 0)
+	{
+		log_error("Failed to fetch progress for replication origin \"%s\": "
+				  "replication origin not found on target database",
+				  context->origin);
+		return false;
+	}
+
+	for (int attempt = 1;; attempt++)
+	{
+		applyPgConn->sqlstate[0] = '\0';
+
+		if (pgsql_replication_origin_session_setup(applyPgConn, context->origin))
+		{
+			break;
+		}
+
+		if (!streq(applyPgConn->sqlstate, APPLY_ORIGIN_IN_USE) ||
+			attempt >= APPLY_ORIGIN_ACQUIRE_WAIT ||
+			stream_apply_stopping())
+		{
+			log_error("Failed to take replication origin \"%s\" "
+					  "on the target database", context->origin);
+			return false;
+		}
+
+		if (attempt == 1)
+		{
+			log_info("Waiting for the session that still holds replication "
+					 "origin \"%s\" to exit", context->origin);
+		}
+
+		pg_usleep(100 * 1000);
+	}
+
+	if (!pgsql_replication_origin_progress(applyPgConn, context->origin, true,
+										   &originLSN))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!sentinel_get(context->sourceDB, &sentinel))
+	{
+		log_error("Failed to read the stored replay position of the spool");
+		return false;
+	}
+
+	if (originLSN < sentinel.replay_lsn)
+	{
+		log_error("Replication origin \"%s\" is at %X/%X on the target, "
+				  "below the stored replay position %X/%X: the target lost "
+				  "commits that this work directory no longer holds",
+				  context->origin,
+				  LSN_FORMAT_ARGS(originLSN),
+				  LSN_FORMAT_ARGS(sentinel.replay_lsn));
+		return false;
+	}
+
+	context->previousLSN = originLSN;
+
+	/* segment cleanup reads the stored position, so a failed write ends here */
+	if (!stream_apply_store_lsn(context, originLSN, &sentinel))
+	{
+		log_error("Failed to store the replay position %X/%X of this run",
+				  LSN_FORMAT_ARGS(originLSN));
+		return false;
+	}
+
+	context->sentinelWrittenLSN = originLSN;
+	context->sentinelSyncTime = (uint64_t) time(NULL);
+
+	log_info("Applying from the raw spool as replication origin \"%s\", "
+			 "which the target committed up to %X/%X",
+			 context->origin, LSN_FORMAT_ARGS(originLSN));
+
+	/*
+	 * Enter into pipeline mode, SQL statements which expects sync responses
+	 * are not allowed in this connection anymore.
+	 */
+	return pgsql_enable_pipeline_mode(applyPgConn);
+}
+
+
+/*
  * stream_apply_init_context initializes our context from pieces.
  */
 bool
@@ -3925,6 +4542,92 @@ writeTxnCommitMetadata(LogicalMessageMetadata *mesg, const char *dir)
 	}
 
 	return true;
+}
+
+
+/* what stream apply --target - prints of the transactions of the raw spool */
+typedef struct SpoolPrinted
+{
+	FILE *out;
+	StreamPrepared prepared;
+} SpoolPrinted;
+
+
+static bool
+stream_apply_spool_print(void *context, ReplayDBStmt *s)
+{
+	SpoolPrinted *printed = (SpoolPrinted *) context;
+
+	switch (s->action)
+	{
+		case STREAM_ACTION_BEGIN:
+		{
+			fformat(printed->out, "BEGIN\n");
+			return true;
+		}
+
+		case STREAM_ACTION_COMMIT:
+		{
+			fformat(printed->out, "COMMIT\n");
+			return true;
+		}
+
+		default:
+		{
+			return stream_apply_print_stmt(printed->out, s,
+										   &(printed->prepared));
+		}
+	}
+}
+
+
+/*
+ * stream_apply_spool_to_stdout prints the statements of the raw spool as
+ * stream_apply_to_stdout prints those of the SQLite path. It waits for
+ * nothing: a spool that holds no further transaction ends the output.
+ */
+bool
+stream_apply_spool_to_stdout(StreamSpecs *specs, FILE *out)
+{
+	SpoolReader reader = { 0 };
+	SpoolPrinted printed = { .out = out };
+
+	bool ok = spool_reader_open(&reader, specs->paths.dir, InvalidXLogRecPtr);
+
+	while (ok)
+	{
+		bool found = false;
+
+		if (!spool_reader_next(&reader, &found))
+		{
+			/* errors have already been logged */
+			ok = false;
+			break;
+		}
+
+		if (!found)
+		{
+			break;
+		}
+
+		if (!stream_spool_statements(specs, &reader,
+									 &stream_apply_spool_print, &printed))
+		{
+			/* errors have already been logged */
+			ok = false;
+			break;
+		}
+
+		if (specs->endpos != InvalidXLogRecPtr &&
+			specs->endpos <= reader.record.endLSN)
+		{
+			break;
+		}
+	}
+
+	(void) spool_reader_close(&reader);
+
+	return ok;
 }
 
 

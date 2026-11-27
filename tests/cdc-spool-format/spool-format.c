@@ -5876,6 +5876,59 @@ test_prepared_names(void)
 }
 
 
+/*
+ * The reader of the apply worker after a receive start. A start that finds a
+ * last segment without an indexed transaction removes it and creates it again,
+ * so a worker that kept its reader open would read the unlinked inode for
+ * good.
+ */
+static void
+test_reader_reopen(const char *dir)
+{
+	StreamApplyContext context = { 0 };
+	StreamContext stream = { 0 };
+	SpoolWriter writer = { 0 };
+	SpoolWriter started = { 0 };
+	SpoolReader reader = { 0 };
+	bool opened = false;
+	bool found = false;
+	char idx[MAXPGPATH];
+	char empty[1] = { 0 };
+
+	/* segment 7 is headed, holds no transaction, and its index file is empty */
+	bool made = make_rotated(&writer, dir, false) &&
+				put_bytes(spool_file(idx, writer.dirname, 7, ".idx"), -1, empty, 0);
+
+	sformat(context.paths.dir, sizeof(context.paths.dir), "%s", writer.dirname);
+
+	bool read = made &&
+				stream_apply_spool_open_reader(&context, &reader, &opened) &&
+				next_holds(&reader, &stream, firstTxn, lengthof(firstTxn)) &&
+				next_holds(&reader, &stream, secondTxn, lengthof(secondTxn));
+
+	/* the worker waits in segment 7, at the position it committed */
+	read = read && spool_reader_next(&reader, &found) && !found;
+	context.previousLSN = reader.record.endLSN;
+
+	/* the receive start, which writes the next transaction into a new inode */
+	bool receive = read && context.previousLSN == 0xD230 &&
+				   spool_writer_open(&started, writer.dirname, 7, 2, 0) &&
+				   feed(&started, thirdTxn, lengthof(thirdTxn)) &&
+				   write_index(&started);
+
+	kill_writer(&started);
+
+	bool stale = receive && spool_reader_next(&reader, &found) && !found;
+
+	check(stale &&
+		  stream_apply_spool_open_reader(&context, &reader, &opened) &&
+		  next_holds(&reader, &stream, thirdTxn, lengthof(thirdTxn)),
+		  "a worker that opens its reader again after a receive start reads the segment that the start created");
+
+	spool_reader_close(&reader);
+}
+
+
 static void
 test_sqlite_path(void)
 {
@@ -6006,6 +6059,7 @@ main(int argc, char **argv)
 	test_index_chunks(dir);
 	test_statements(dir);
 	test_prepared_names();
+	test_reader_reopen(dir);
 	test_sqlite_path();
 	test_list_spool(dir, argv[2]);
 	test_disk_full(argv[1]);

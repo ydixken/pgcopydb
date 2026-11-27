@@ -939,10 +939,14 @@ bool parseWal2jsonMessage(StreamContext *privateContext,
 /* ld_apply.c */
 bool stream_apply_catchup(StreamSpecs *specs);
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
+bool stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context);
+bool stream_apply_spool_open_reader(StreamApplyContext *context,
+									struct SpoolReader *reader, bool *opened);
 bool stream_apply_prepared(StreamApplyContext *context, uint32_t hash,
 						   const char *sql, PreparedStmt **entry, bool *isNew);
 bool stream_apply_stdin(StreamSpecs *specs, StreamApplyContext *context);
 bool stream_apply_to_stdout(StreamSpecs *specs, FILE *out);
+bool stream_apply_spool_to_stdout(StreamSpecs *specs, FILE *out);
 
 /* a linear scan, as stream apply --target - is a debug path */
 #define STREAM_PRINT_MAX_PREPARED 64
