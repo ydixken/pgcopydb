@@ -1746,6 +1746,9 @@ spool_frames_fill(SpoolFrames *frames, uint64_t need)
 
 	buffer->len = done;
 
+	/* the strndup of decode_tuple reads to a NUL, as libpq ends its buffer */
+	buffer->data[done] = '\0';
+
 	if (done < want)
 	{
 		log_error("Spool file \"%s\" ends at %" PRIu64
