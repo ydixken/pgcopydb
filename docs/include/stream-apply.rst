@@ -1,6 +1,6 @@
 ::
 
-   pgcopydb stream apply: Apply changes from the replayDB to the target database, or stdout
+   pgcopydb stream apply: Apply changes from the CDC store to the target database, or stdout
    usage: pgcopydb stream apply 
    
      --target         Postgres URI to the target database

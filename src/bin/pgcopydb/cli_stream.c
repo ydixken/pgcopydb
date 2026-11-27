@@ -101,7 +101,7 @@ static CommandLine stream_prune_command =
 static CommandLine stream_prefetch_command =
 	make_command(
 		"prefetch",
-		"Stream changes from the source database into the SQLite CDC store",
+		"Stream changes from the source database into the CDC store",
 		"",
 		"  --source         Postgres URI to the source database\n"
 		"  --dir            Work directory to use\n"
@@ -118,7 +118,7 @@ static CommandLine stream_prefetch_command =
 static CommandLine stream_catchup_command =
 	make_command(
 		"catchup",
-		"Transform and apply prefetched changes from the SQLite CDC store to the target",
+		"Apply prefetched changes from the CDC store to the target",
 		"",
 		"  --source              Postgres URI to the source database\n"
 		"  --target              Postgres URI to the target database\n"
@@ -176,7 +176,7 @@ static CommandLine stream_receive_command =
 static CommandLine stream_apply_command =
 	make_command(
 		"apply",
-		"Apply changes from the replayDB to the target database, or stdout",
+		"Apply changes from the CDC store to the target database, or stdout",
 		"",
 		"  --target         Postgres URI to the target database\n"
 		"                   Use '-' to emit SQL to stdout without connecting\n"

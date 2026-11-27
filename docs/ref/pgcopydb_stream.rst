@@ -59,6 +59,13 @@ step.
    writes the resulting statements to the CDC *replay* database before
    applying them to the target.
 
+   This describes the default follow mode, ``sqlite``. With ``--follow-mode
+   performance`` the same four sub-commands work on the raw spool of
+   :ref:`raw_spool`: ``receive`` appends the replication stream to segment
+   files and indexes the transactions it completed, and ``apply`` decodes
+   those frames and sends the statements to the target. There is no transform
+   step and no SQLite store on that path.
+
 .. _pgcopydb_stream_setup:
 
 pgcopydb stream setup
@@ -131,6 +138,10 @@ The follow process also runs ``stream prune`` automatically every 300 seconds
 (matching PostgreSQL's default ``checkpoint_timeout``), so manual invocation
 is optional during a live follow operation.
 
+In performance mode the unit is a spool segment, not a file pair.
+``stream prune`` deletes the index file, the segment and, once no earlier segment is left, nothing else of a closed segment whose last commit position is below the stored low-water mark.
+The relation log is never deleted while the spool exists, because apply reads it after every restart.
+
 .. include:: ../include/stream-prune.rst
 
 .. _pgcopydb_stream_prefetch:
@@ -138,7 +149,7 @@ is optional during a live follow operation.
 pgcopydb stream prefetch
 ------------------------
 
-pgcopydb stream prefetch - Stream changes from the source database into the SQLite CDC store
+pgcopydb stream prefetch - Stream changes from the source database into the CDC store
 
 The command ``pgcopydb stream prefetch`` connects to the source database
 using the logical replication protocol and the given replication slot.
