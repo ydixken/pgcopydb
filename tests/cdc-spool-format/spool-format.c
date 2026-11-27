@@ -3378,6 +3378,15 @@ test_start_cut(const char *dir)
 	check(made && refused_twice(name, 7, 0, line),
 		  "a relation log that holds records in a directory without a segment ends every start with an error that names it, and no file changes");
 
+	sformat(name, sizeof(name), "%s/junklog", dir);
+	made = mkdir(name, 0700) == 0 && put_bytes(log_file(log, name), -1, junk, 10);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds 10 bytes, but the spool has no segment with a valid header",
+			log);
+
+	check(made && refused_twice(name, 7, 0, line),
+		  "a relation log of bytes that hold no record, in a directory without a segment, ends every start with an error that names it, and no file changes");
+
 	/* a first segment with a torn header beside a record of the relation log */
 	sformat(name, sizeof(name), "%s/tornlog", dir);
 	made = mkdir(name, 0700) == 0 &&
