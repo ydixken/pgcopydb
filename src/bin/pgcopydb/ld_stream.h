@@ -864,6 +864,14 @@ bool stream_write_statement(bool replayNoOpUpdates,
 							struct ReplayDBStmt *replayStmt,
 							LogicalTransactionStatement *stmt);
 
+struct SpoolReader;
+
+/* takes one statement of a spooled transaction, in the form of a replay row */
+typedef bool (StreamStatementHook)(void *context, struct ReplayDBStmt *stmt);
+
+bool stream_spool_statements(StreamSpecs *specs, struct SpoolReader *reader,
+							 StreamStatementHook *hook, void *context);
+
 bool stream_transform_from_outputdb(StreamSpecs *specs,
 									uint64_t previousLSN,
 									uint64_t keepaliveLSN);

@@ -1,7 +1,8 @@
 /*
  * The spool format of performance mode: the checksum, the segment header and
- * frame codecs, the writer with its sync order, the transaction index, and the
- * relation log with its cursor.
+ * frame codecs, the writer with its sync order, the transaction index, the
+ * relation log with its cursor, the start and the reader, pgcopydb list spool,
+ * and the statements that the builders of 9d8b660 make of a spooled transaction.
  */
 #include <dirent.h>
 #include <dlfcn.h>
@@ -21,6 +22,7 @@
 
 #include "file_utils.h"
 #include "ld_spool.h"
+#include "ld_store.h"
 #include "ld_stream.h"
 #include "log.h"
 #include "parson.h"
@@ -4920,6 +4922,530 @@ test_release_full(const char *dir)
 }
 
 
+/* the pgoutput part of a message that a check builds */
+typedef struct Body
+{
+	char bytes[100];
+	int n;
+} Body;
+
+
+static void
+put8(Body *body, uint8_t value)
+{
+	body->bytes[body->n++] = (char) value;
+}
+
+
+static void
+put32(Body *body, uint32_t value)
+{
+	be32(body->bytes + body->n, value);
+	body->n += 4;
+}
+
+
+static void
+put_name(Body *body, const char *name)
+{
+	body->n += sformat(body->bytes + body->n, sizeof(body->bytes) - body->n,
+					   "%s", name) + 1;
+}
+
+
+/* a column value that the tuple sends with status u, unchanged TOAST data */
+static const char unchanged[] = "unchanged";
+
+/* the column count and values of a tuple; NULL is status n */
+#define ROW(...) \
+	lengthof(((const char *[]) { __VA_ARGS__ })), ((const char *[]) { __VA_ARGS__ })
+
+
+static void
+put_tuple(Body *body, int n, const char *const *values)
+{
+	put8(body, (uint8_t) (n >> 8));
+	put8(body, (uint8_t) n);
+
+	for (int i = 0; i < n; i++)
+	{
+		if (values[i] == NULL || values[i] == unchanged)
+		{
+			put8(body, values[i] == NULL ? 'n' : 'u');
+			continue;
+		}
+
+		put8(body, 't');
+		put32(body, (uint32_t) strlen(values[i]));
+		body->n += sformat(body->bytes + body->n, sizeof(body->bytes) - body->n,
+						   "%s", values[i]);
+	}
+}
+
+
+/* a RELATION of nspname.relname; columns is a list like "*id,name", * marks a key */
+static Msg
+rel_msg(uint32_t oid, const char *nspname, const char *relname, char replident,
+		const char *columns)
+{
+	Body body = { 0 };
+	char list[64];
+	int natts = 1;
+
+	strlcpy(list, columns, sizeof(list));
+
+	for (const char *p = list; *p != '\0'; p++)
+	{
+		natts += *p == ',';
+	}
+
+	put8(&body, 'R');
+	put32(&body, oid);
+	put_name(&body, nspname);
+	put_name(&body, relname);
+	put8(&body, (uint8_t) replident);
+	put8(&body, 0);
+	put8(&body, (uint8_t) natts);
+
+	for (char *name = strtok(list, ","); name != NULL; name = strtok(NULL, ","))
+	{
+		put8(&body, name[0] == '*' ? 1 : 0);
+		put_name(&body, name[0] == '*' ? name + 1 : name);
+		put32(&body, 25);
+		put32(&body, 0xFFFFFFFF);
+	}
+
+	return xlog(0, body.bytes, body.n);
+}
+
+
+/* an INSERT, UPDATE or DELETE; oldType is K, O, or 0 for no old tuple */
+static Msg
+change_msg(uint64_t lsn, char type, uint32_t oid, char oldType,
+		   int nold, const char *const *old, int nnew, const char *const *new)
+{
+	Body body = { 0 };
+
+	put8(&body, (uint8_t) type);
+	put32(&body, oid);
+
+	if (oldType != 0)
+	{
+		put8(&body, (uint8_t) oldType);
+		put_tuple(&body, nold, old);
+	}
+
+	if (type != 'D')
+	{
+		put8(&body, 'N');
+		put_tuple(&body, nnew, new);
+	}
+
+	return xlog(lsn, body.bytes, body.n);
+}
+
+
+/* a TRUNCATE of two relations */
+static Msg
+truncate_msg(uint64_t lsn, uint8_t flags, uint32_t first, uint32_t second)
+{
+	Body body = { 0 };
+
+	put8(&body, 'T');
+	put32(&body, 2);
+	put8(&body, flags);
+	put32(&body, first);
+	put32(&body, second);
+
+	return xlog(lsn, body.bytes, body.n);
+}
+
+
+#define T1 16500
+#define T2 16501
+#define S1 16502
+#define T3 16503
+#define K1 16504
+#define G1 16505
+
+/* commit times that differ from the send time of every message */
+#define COMMIT_TIME 0x2E3B4C5D0001
+#define COMMIT_TIME2 0x2E3B4C000002
+
+/* the statements that the statement source handed over */
+typedef struct Captured
+{
+	ReplayDBStmt stmts[16];
+	uint64_t changes[16];       /* change frames that the reader had returned */
+	int count;
+	int failAt;                 /* the call, counted from 1, that fails; 0 none */
+	SpoolReader *reader;
+} Captured;
+
+
+static bool
+capture(void *context, ReplayDBStmt *stmt)
+{
+	Captured *captured = (Captured *) context;
+
+	if (captured->count >= (int) lengthof(captured->stmts))
+	{
+		return false;
+	}
+
+	captured->changes[captured->count] = captured->reader->changes;
+	captured->stmts[captured->count++] = *stmt;
+
+	return captured->failAt != captured->count;
+}
+
+
+/* one indexed segment of msgs, in a directory of its own under dir */
+static bool
+txn_spool(SpoolWriter *writer, const char *dir, const Msg *msgs, int n)
+{
+	SpoolHeader header = { .firstSeq = 1, .systemId = 7, .timeline = 1 };
+	bool made = new_writer(writer, dir, &header, 0) && feed(writer, msgs, n) &&
+				write_index(writer);
+
+	kill_writer(writer);
+
+	return made;
+}
+
+
+/* the statements of the first transaction of the spool in dirname */
+static bool
+statements(const char *dirname, StreamSpecs *specs, Captured *captured)
+{
+	SpoolReader reader = { 0 };
+	bool found = false;
+
+	captured->count = 0;
+	captured->reader = &reader;
+
+	bool built = spool_reader_open(&reader, dirname, 0) &&
+				 spool_reader_next(&reader, &found) && found &&
+				 stream_spool_statements(specs, &reader, &capture, captured);
+
+	spool_reader_close(&reader);
+
+	return built;
+}
+
+
+/* the specs of a new apply, with no generated column and no keyless table */
+static StreamSpecs *
+new_specs(void)
+{
+	static StreamSpecs specs;
+
+	memset(&specs, 0, sizeof(specs));
+
+	return &specs;
+}
+
+
+static bool
+same_text(const char *got, const char *want)
+{
+	return (got == NULL && want == NULL) ||
+		   (got != NULL && want != NULL && strcmp(got, want) == 0);
+}
+
+
+/* true when the DML statements from first on are want, SQL and arguments */
+static bool
+dml_is(const Captured *captured, int first, const char *const (*want)[2], int n)
+{
+	bool same = captured->count >= first + n;
+
+	for (int i = 0; same && i < n; i++)
+	{
+		const ReplayDBStmt *stmt = &captured->stmts[first + i];
+
+		same = same_text(stmt->stmt, want[i][0]) && same_text(stmt->data, want[i][1]);
+
+		if (!same)
+		{
+			printf("statement %d: %s %s\n", first + i,
+				   stmt->stmt ? stmt->stmt : "(null)",
+				   stmt->data ? stmt->data : "(null)");
+		}
+	}
+
+	return same;
+}
+
+
+static bool
+is_time(const char *timestamp, uint64_t time)
+{
+	char want[PG_MAX_TIMESTAMP];
+
+	return pgsql_timestamptz_to_string((TimestampTz) time, want, sizeof(want)) &&
+		   strcmp(timestamp, want) == 0;
+}
+
+
+/* rewrites the frame at offset with msg, its CRC-32C included */
+static bool
+put_frame(const char *path, uint64_t offset, const Msg *msg)
+{
+	char buf[SPOOL_FRAME_SIZE(sizeof(msg->bytes))];
+	uint64_t size = frame(buf, msg->bytes, msg->length);
+
+	return put_bytes(path, (int64_t) offset, buf, size);
+}
+
+
+static void
+test_statements(const char *dir)
+{
+	SpoolWriter writer = { 0 };
+	Captured captured = { 0 };
+	StreamSpecs *specs = new_specs();
+	char path[MAXPGPATH];
+
+	Msg one[] = {
+		begin_msg(0x1010, 0x1100, 900),
+		rel_msg(T1, "public", "t1", 'd', "*id,name,note"),
+		rel_msg(T2, "public", "t2", 'f', "*id,*v"),
+		rel_msg(T3, "public", "t3", 'd', "*id"),
+		rel_msg(S1, "pgcopydb", "s1", 'd', "*id"),
+		change_msg(0x1020, 'I', T1, 0, 0, NULL, ROW("1", "a", NULL)),
+		change_msg(0x1030, 'I', T1, 0, 0, NULL, ROW("2", "b", "x")),
+		change_msg(0x1040, 'I', S1, 0, 0, NULL, ROW("1")),
+		change_msg(0x1050, 'I', T1, 0, 0, NULL, ROW("3", "c", "y")),
+		change_msg(0x1060, 'U', T1, 'K', ROW("3", NULL, NULL), ROW("4", "c", "y")),
+		change_msg(0x1070, 'U', T1, 0, 0, NULL, ROW("4", "d", "y")),
+		change_msg(0x1080, 'U', T2, 'O', ROW("1", NULL), ROW("1", "v")),
+		change_msg(0x1090, 'D', T1, 'K', ROW("4", NULL, NULL), 0, NULL),
+		change_msg(0x10A0, 'D', T1, 'K', ROW("2", NULL, NULL), 0, NULL),
+		truncate_msg(0x10B0, 2, T1, T3),
+		commit_msg(0x1130, 0x1100, 0x1130, COMMIT_TIME)
+	};
+	const char *const oneWant[][2] = {
+		{
+			"INSERT INTO \"public\".\"t1\" (\"id\", \"name\", \"note\") "
+			"overriding system value VALUES ($1, $2, $3), ($4, $5, $6), ($7, $8, $9)",
+			"[\"1\",\"a\",null,\"2\",\"b\",\"x\",\"3\",\"c\",\"y\"]"
+		},
+		{
+			"UPDATE ONLY \"public\".\"t1\" SET \"id\" = $1, \"name\" = $2, "
+			"\"note\" = $3 WHERE \"id\" = $4",
+			"[\"4\",\"c\",\"y\",\"3\"]"
+		},
+		{
+			"UPDATE ONLY \"public\".\"t1\" SET \"name\" = $1, \"note\" = $2 "
+			"WHERE \"id\" = $3",
+			"[\"d\",\"y\",\"4\"]"
+		},
+		{
+			"UPDATE ONLY \"public\".\"t2\" SET \"v\" = $1 "
+			"WHERE \"id\" = $2 and \"v\" IS NULL",
+			"[\"v\",\"1\"]"
+		},
+		{
+			"DELETE FROM ONLY \"public\".\"t1\" WHERE \"id\" IN ($1, $2)",
+			"[\"4\",\"2\"]"
+		},
+		{
+			"TRUNCATE ONLY \"public\".\"t1\", ONLY \"public\".\"t3\" RESTART IDENTITY\n",
+			NULL
+		}
+	};
+	uint64_t oneChanges[] = { 5, 5, 6, 7, 8, 10, 10, 10 };
+
+	bool made = txn_spool(&writer, dir, one, lengthof(one));
+	bool built = made && statements(writer.dirname, specs, &captured);
+	ReplayDBStmt *begin = &captured.stmts[0];
+	ReplayDBStmt *commit = &captured.stmts[Max(captured.count - 1, 0)];
+
+	check(built && captured.count == 8 && dml_is(&captured, 1, oneWant, 6),
+		  "the statements of a spooled transaction have the SQL and arguments of 9d8b660");
+	check(built && captured.count == 8 &&
+		  begin->action == STREAM_ACTION_BEGIN && begin->xid == 900 &&
+		  begin->lsn == 0x1010 && begin->endlsn == 0x1130 &&
+		  commit->action == STREAM_ACTION_COMMIT && commit->xid == 900 &&
+		  commit->lsn == 0x1130,
+		  "a spooled transaction comes as BEGIN with its LSN and end LSN, its changes, and COMMIT");
+	check(built && captured.count == 8 &&
+		  is_time(begin->timestamp, COMMIT_TIME) && is_time(commit->timestamp,
+															COMMIT_TIME),
+		  "BEGIN and COMMIT of a spooled transaction carry the commit time of its index record");
+	check(built && captured.count == 8 &&
+		  memcmp(captured.changes, oneChanges, sizeof(oneChanges)) == 0,
+		  "a statement is handed over once the next change cannot merge with it, before the COMMIT");
+
+	captured.failAt = 2;
+	check(made && !statements(writer.dirname, new_specs(), &captured) && captured.count ==
+		  2,
+		  "a statement that the callback refuses ends the transaction, and no statement follows");
+	captured.failAt = 0;
+
+	/* a BEGIN at 0/0, as with a replication origin, and a pgcopydb change first */
+	Msg two[] = {
+		begin_msg(0, 0x2100, 901),
+		other_msg(0x2010, 'O'),
+		rel_msg(S1, "pgcopydb", "s1", 'd', "*id"),
+		rel_msg(T3, "public", "t3", 'd', "*id"),
+		change_msg(0x2010, 'I', S1, 0, 0, NULL, ROW("2")),
+		change_msg(0x2020, 'I', T3, 0, 0, NULL, ROW("5")),
+		commit_msg(0x2130, 0x2100, 0x2130, COMMIT_TIME2)
+	};
+	const char *const twoWant[][2] = {
+		{
+			"INSERT INTO \"public\".\"t3\" (\"id\") overriding system value VALUES ($1)",
+			"[\"5\"]"
+		}
+	};
+
+	built = txn_spool(&writer, dir, two, lengthof(two)) &&
+			statements(writer.dirname, new_specs(), &captured);
+	check(built && captured.count == 3 && dml_is(&captured, 1, twoWant, 1) &&
+		  captured.stmts[0].lsn == 0x2020 && captured.stmts[2].lsn == 0x2130 &&
+		  is_time(captured.stmts[0].timestamp, COMMIT_TIME2),
+		  "a BEGIN at 0/0 takes the LSN of the first change that gives a statement");
+
+	/* the two sets of the source catalog */
+	static KeylessTable keyless = { .nspname = "\"public\"", .relname = "\"k1\"" };
+	static GeneratedColumnSet total = { .attname = "\"total\"" };
+	static GeneratedColumnsCache generated = {
+		.nspname = "\"public\"", .relname = "\"g1\""
+	};
+	KeylessTable *keylessTable = &keyless;
+	GeneratedColumnSet *totalColumn = &total;
+	GeneratedColumnsCache *generatedTable = &generated;
+
+	specs = new_specs();
+	generated.columns = NULL;
+	HASH_ADD_STR(generatedTable->columns, attname, totalColumn);
+	HASH_ADD(hh, specs->private.generatedColumnsCache, nspname,
+			 sizeof(generated.nspname) + sizeof(generated.relname), generatedTable);
+	HASH_ADD(hh, specs->private.keylessTables, nspname,
+			 sizeof(keyless.nspname) + sizeof(keyless.relname), keylessTable);
+
+	Msg three[] = {
+		begin_msg(0x3010, 0x3100, 902),
+		rel_msg(K1, "public", "k1", 'f', "*a,*b"),
+		rel_msg(G1, "public", "g1", 'd', "*id,total"),
+		change_msg(0x3020, 'D', K1, 'O', ROW("1", "x"), 0, NULL),
+		change_msg(0x3030, 'D', K1, 'O', ROW("1", "x"), 0, NULL),
+		change_msg(0x3040, 'I', G1, 0, 0, NULL, ROW("1", "10")),
+		commit_msg(0x3130, 0x3100, 0x3130, COMMIT_TIME)
+	};
+	const char *keylessDelete =
+		"DELETE FROM ONLY \"public\".\"k1\" WHERE (tableoid, ctid) = "
+		"(SELECT tableoid, ctid FROM ONLY \"public\".\"k1\" "
+		"WHERE \"a\" = $1 and \"b\" = $2 LIMIT 1)";
+	const char *const keylessWant[][2] = {
+		{ keylessDelete, "[\"1\",\"x\"]" },
+		{ keylessDelete, "[\"1\",\"x\"]" }
+	};
+	const char *const generatedWant[][2] = {
+		{
+			"INSERT INTO \"public\".\"g1\" (\"id\") overriding system value VALUES ($1)",
+			"[\"1\"]"
+		}
+	};
+
+	built = txn_spool(&writer, dir, three, lengthof(three)) &&
+			statements(writer.dirname, specs, &captured);
+	check(built && captured.count == 5 && dml_is(&captured, 1, keylessWant, 2),
+		  "a DELETE on a table without a key touches one row and merges with no other");
+	check(built && captured.count == 5 && dml_is(&captured, 3, generatedWant, 1),
+		  "an INSERT leaves out a generated column of the source catalog");
+
+	Msg schema[] = {
+		begin_msg(0x4010, 0x4100, 903),
+		rel_msg(T1, "public", "t1", 'd', "*id,name,note"),
+		commit_msg(0x4130, 0x4100, 0x4130, COMMIT_TIME)
+	};
+
+	built = txn_spool(&writer, dir, schema, lengthof(schema)) &&
+			statements(writer.dirname, new_specs(), &captured);
+	check(built && captured.count == 2 &&
+		  captured.stmts[0].action == STREAM_ACTION_BEGIN &&
+		  captured.stmts[0].lsn == 0x4010 &&
+		  captured.stmts[1].action == STREAM_ACTION_COMMIT,
+		  "a transaction of definitions only comes as BEGIN and COMMIT");
+
+	/* the check of the key, a difference of performance mode */
+	Msg toasted[] = {
+		begin_msg(0x5010, 0x5100, 904),
+		rel_msg(T1, "public", "t1", 'd', "*id,name,note"),
+		change_msg(0x5020, 'U', T1, 0, 0, NULL, ROW(unchanged, "d", "y")),
+		commit_msg(0x5130, 0x5100, 0x5130, COMMIT_TIME)
+	};
+
+	long mark = log_mark();
+
+	built = txn_spool(&writer, dir, toasted, lengthof(toasted)) &&
+			statements(writer.dirname, new_specs(), &captured);
+	check(!built && captured.count == 0 &&
+		  one_line(logged_since(mark), "public.t1", "column \"id\""),
+		  "an UPDATE whose key column is unchanged TOAST data is an error that names relation and column");
+
+	/* an unknown message type, in a frame with a valid CRC-32C */
+	Msg unknown[] = {
+		begin_msg(0x6010, 0x6100, 905),
+		rel_msg(T1, "public", "t1", 'd', "*id,name,note"),
+		change_msg(0x6020, 'I', T1, 0, 0, NULL, ROW("1", "a", "b")),
+		commit_msg(0x6130, 0x6100, 0x6130, COMMIT_TIME)
+	};
+	Msg message = unknown[2];
+
+	message.bytes[SPOOL_XLOGDATA_HEADER_SIZE] = 'M';
+	made = txn_spool(&writer, dir, unknown, lengthof(unknown)) &&
+		   put_frame(spool_file(path, writer.dirname, 1, ".seg"),
+					 SPOOL_HEADER_SIZE + frames_size(unknown, 2), &message);
+	mark = log_mark();
+	built = made && statements(writer.dirname, new_specs(), &captured);
+	check(made && !built && captured.count == 0 &&
+		  strstr(logged_since(mark), "message type 'M'") != NULL,
+		  "a frame of an unknown pgoutput message type is an error, and no statement comes");
+
+	made = txn_spool(&writer, dir, unknown, lengthof(unknown)) &&
+		   flip_byte(spool_file(path, writer.dirname, 1, ".seg"),
+					 SPOOL_HEADER_SIZE + frames_size(unknown, 2) + 30);
+	built = made && statements(writer.dirname, new_specs(), &captured);
+	check(made && !built && captured.count == 0,
+		  "a damaged frame of a spooled transaction is an error, and no statement comes");
+
+	/* an index record that ends before the COMMIT frame of its transaction */
+	char bytes[SPOOL_INDEX_RECORD_SIZE];
+	SpoolIndexRecord record = { 0 };
+	int fd = -1;
+
+	made = txn_spool(&writer, dir, unknown, lengthof(unknown)) &&
+		   (fd = open(spool_file(path, writer.dirname, 1, ".idx"), O_RDONLY)) >= 0 &&
+		   read(fd, bytes, sizeof(bytes)) == sizeof(bytes) &&
+		   spool_index_decode(bytes, sizeof(bytes), &record);
+	(void) close(fd);
+	record.endOffset -= SPOOL_FRAME_SIZE(unknown[3].length);
+	spool_index_encode(&record, bytes);
+	made = made && put_bytes(path, 0, bytes, sizeof(bytes));
+	mark = log_mark();
+	built = made && statements(writer.dirname, new_specs(), &captured);
+	check(made && !built && captured.count < 3 &&
+		  strstr(logged_since(mark), "without a COMMIT") != NULL,
+		  "the frames of an index record that hold no COMMIT are an error, and no COMMIT comes");
+
+	/* a change of a relation that the relation log does not define */
+	Msg undefined[] = {
+		begin_msg(0x7010, 0x7100, 906),
+		change_msg(0x7020, 'I', 16999, 0, 0, NULL, ROW("1")),
+		commit_msg(0x7130, 0x7100, 0x7130, COMMIT_TIME)
+	};
+
+	built = txn_spool(&writer, dir, undefined, lengthof(undefined)) &&
+			statements(writer.dirname, new_specs(), &captured);
+	check(!built && captured.count == 0,
+		  "a change of a relation that the relation log does not define is an error");
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -4972,6 +5498,7 @@ main(int argc, char **argv)
 	test_reader(dir);
 	test_reader_failures(dir);
 	test_index_chunks(dir);
+	test_statements(dir);
 	test_list_spool(dir, argv[2]);
 	test_disk_full(argv[1]);
 	test_release_full(argv[1]);

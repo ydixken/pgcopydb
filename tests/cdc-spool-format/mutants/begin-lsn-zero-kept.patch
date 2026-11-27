@@ -1,0 +1,14 @@
+Mutant: a BEGIN at 0/0 keeps LSN 0. Must fail: a BEGIN at 0/0 takes the LSN of the first change that gives a statement.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3398,7 +3398,7 @@
+ 				}
+ 
+ 				/* a BEGIN with a replication origin comes at 0/0, as at 9d8b660 */
+-				if (spooled.begin.lsn == InvalidXLogRecPtr)
++				if (false)
+ 				{
+ 					spooled.begin.lsn = lsn;
+ 				}

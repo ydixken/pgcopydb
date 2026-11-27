@@ -1,0 +1,14 @@
+Mutant: the statement source hands a BEGIN over before every statement. Must fail: a spooled transaction comes as BEGIN with its LSN and end LSN, its changes, and COMMIT.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3250,7 +3250,7 @@
+ {
+ 	if (!spooled->begun)
+ 	{
+-		spooled->begun = true;
++		spooled->begun = false;
+ 
+ 		if (!(*spooled->hook)(spooled->context, &spooled->begin))
+ 		{

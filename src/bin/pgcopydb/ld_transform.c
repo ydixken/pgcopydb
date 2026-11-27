@@ -27,6 +27,7 @@
 #include "copydb.h"
 #include "env_utils.h"
 #include "ld_pgoutput.h"
+#include "ld_spool.h"
 #include "ld_store.h"
 #include "ld_stream.h"
 #include "lock_utils.h"
@@ -3228,4 +3229,226 @@ markRowsMayRepeat(StreamContext *privateContext, LogicalTransactionStatement *st
 			  sizeof(key.nspname) + sizeof(key.relname), item);
 
 	*rowsMayRepeat = item != NULL;
+}
+
+
+/* the statements of one spooled transaction, on their way to the hook */
+typedef struct SpoolStatements
+{
+	StreamSpecs *specs;
+	StreamStatementHook *hook;
+	void *context;
+	ReplayDBStmt begin;         /* handed over before the first change */
+	bool begun;
+	LogicalTransaction txn;     /* first is the one statement that waits */
+} SpoolStatements;
+
+
+/* hands stmt over, after the BEGIN when it is the first */
+static bool
+stream_spool_hand(SpoolStatements *spooled, ReplayDBStmt *stmt)
+{
+	if (!spooled->begun)
+	{
+		spooled->begun = true;
+
+		if (!(*spooled->hook)(spooled->context, &spooled->begin))
+		{
+			return false;
+		}
+	}
+
+	return (*spooled->hook)(spooled->context, stmt);
+}
+
+
+/* builds the waiting statement and hands it over */
+static bool
+stream_spool_hand_waiting(SpoolStatements *spooled)
+{
+	LogicalTransactionStatement *waiting = spooled->txn.first;
+	GeneratedColumnsCache *cache = spooled->specs->private.generatedColumnsCache;
+
+	if (waiting == NULL)
+	{
+		return true;
+	}
+
+	if (cache != NULL && !markGeneratedColumnsFromStatement(cache, waiting))
+	{
+		log_error("Failed to mark generated columns from transaction");
+		return false;
+	}
+
+	ReplayDBStmt stmt = {
+		.action = waiting->action,
+		.xid = waiting->xid,
+		.lsn = waiting->lsn
+	};
+
+	strlcpy(stmt.timestamp, waiting->timestamp, sizeof(stmt.timestamp));
+
+	return stream_write_statement(spooled->specs->replayNoOpUpdates, &stmt, waiting) &&
+		   stream_spool_hand(spooled, &stmt);
+}
+
+
+/*
+ * stream_spool_statements decodes the transaction that spool_reader_next
+ * returned frame by frame, and hands its statements to hook as replay rows:
+ * BEGIN, the changes, COMMIT. Only the last change waits, for one to merge.
+ */
+bool
+stream_spool_statements(StreamSpecs *specs, SpoolReader *reader,
+						StreamStatementHook *hook, void *context)
+{
+	StreamContext *privateContext = &(specs->private);
+	SpoolIndexRecord *record = &(reader->record);
+	SpoolStatements spooled = {
+		.specs = specs,
+		.hook = hook,
+		.context = context,
+		.begin = {
+			.action = STREAM_ACTION_BEGIN,
+			.xid = record->xid,
+			.endlsn = record->endLSN
+		}
+	};
+
+	/* the time of the source commit, where 9d8b660 takes the send time */
+	if (!pgsql_timestamptz_to_string((TimestampTz) record->commitTime,
+									 spooled.begin.timestamp,
+									 sizeof(spooled.begin.timestamp)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	for (;;)
+	{
+		const char *message = NULL;
+		uint32_t length = 0;
+		bool done = false;
+
+		if (!spool_reader_frame(reader, privateContext, &message, &length, &done))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		if (done)
+		{
+			log_error("BUG: spooled transaction %" PRIu64 " ends at offset %"
+					  PRIu64 " without a COMMIT", record->seq, record->endOffset);
+			return false;
+		}
+
+		int pos = 1;
+		uint64_t lsn = pgout_u64(message, &pos, (int) length);
+		const char *buf = message + SPOOL_XLOGDATA_HEADER_SIZE;
+		int bufLen = (int) length - SPOOL_XLOGDATA_HEADER_SIZE;
+
+		switch (buf[0])
+		{
+			case 'B':
+			{
+				spooled.begin.lsn = lsn;
+				break;
+			}
+
+			/* the relation log feeds the relation cache, see spool_reader_frame */
+			case 'R':
+			case 'Y':
+			case 'O':
+			{
+				break;
+			}
+
+			case 'I':
+			case 'U':
+			case 'D':
+			case 'T':
+			{
+				LogicalTransactionStatement *stmt = calloc(1, sizeof(*stmt));
+				bool skip = false;
+
+				if (stmt == NULL)
+				{
+					log_error(ALLOCATION_FAILED_ERROR);
+					return false;
+				}
+
+				stmt->action = (StreamAction) buf[0];
+				stmt->xid = record->xid;
+				stmt->lsn = lsn;
+				strlcpy(stmt->timestamp, spooled.begin.timestamp,
+						sizeof(stmt->timestamp));
+
+				if (!pgoutput_spool_change(privateContext, buf, bufLen, stmt, &skip))
+				{
+					log_error("Failed to decode the change at %X/%X of spooled "
+							  "transaction %" PRIu64, LSN_FORMAT_ARGS(lsn),
+							  record->seq);
+					return false;
+				}
+
+				if (skip)
+				{
+					break;
+				}
+
+				/* a BEGIN with a replication origin comes at 0/0, as at 9d8b660 */
+				if (spooled.begin.lsn == InvalidXLogRecPtr)
+				{
+					spooled.begin.lsn = lsn;
+				}
+
+				markRowsMayRepeat(privateContext, stmt);
+
+				if (!streamLogicalTransactionAppendStatement(&spooled.txn, stmt))
+				{
+					/* errors have already been logged */
+					return false;
+				}
+
+				/* stmt did not merge with the waiting one, which is complete */
+				if (spooled.txn.first != spooled.txn.last)
+				{
+					if (!stream_spool_hand_waiting(&spooled))
+					{
+						return false;
+					}
+
+					spooled.txn.first = spooled.txn.last;
+					spooled.txn.first->prev = NULL;
+				}
+
+				break;
+			}
+
+			case 'C':
+			{
+				ReplayDBStmt commit = {
+					.action = STREAM_ACTION_COMMIT,
+					.xid = record->xid,
+					.lsn = record->endLSN
+				};
+
+				strlcpy(commit.timestamp, spooled.begin.timestamp,
+						sizeof(commit.timestamp));
+
+				return stream_spool_hand_waiting(&spooled) &&
+					   stream_spool_hand(&spooled, &commit);
+			}
+
+			default:
+			{
+				log_error("Unknown pgoutput message type '%c' (0x%02x) at %X/%X "
+						  "in spooled transaction %" PRIu64,
+						  buf[0], (unsigned char) buf[0], LSN_FORMAT_ARGS(lsn),
+						  record->seq);
+				return false;
+			}
+		}
+	}
 }

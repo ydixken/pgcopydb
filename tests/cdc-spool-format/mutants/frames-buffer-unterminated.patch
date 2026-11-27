@@ -1,0 +1,15 @@
+Mutant: the reader leaves the frame buffer without a NUL after its last byte, which the strndup of decode_tuple reads up to. Must fail: the suite under SANITIZE=address, with a heap-buffer-overflow in decode_tuple at the first spooled transaction that test_statements decodes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1746,9 +1746,6 @@
+ 
+ 	buffer->len = done;
+ 
+-	/* the strndup of decode_tuple reads to a NUL, as libpq ends its buffer */
+-	buffer->data[done] = '\0';
+-
+ 	if (done < want)
+ 	{
+ 		log_error("Spool file \"%s\" ends at %" PRIu64

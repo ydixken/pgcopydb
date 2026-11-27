@@ -1,0 +1,14 @@
+Mutant: the statement source does not mark a change of a table without a key. Must fail: a DELETE on a table without a key touches one row and merges with no other.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3402,8 +3402,6 @@
+ 				{
+ 					spooled.begin.lsn = lsn;
+ 				}
+-
+-				markRowsMayRepeat(privateContext, stmt);
+ 
+ 				if (!streamLogicalTransactionAppendStatement(&spooled.txn, stmt))
+ 				{

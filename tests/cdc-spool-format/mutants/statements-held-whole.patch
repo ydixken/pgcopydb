@@ -1,0 +1,38 @@
+Mutant: the statement source keeps every statement of a transaction and hands them over at its COMMIT. Must fail: a statement is handed over once the next change cannot merge with it, before the COMMIT.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3412,7 +3412,7 @@
+ 				}
+ 
+ 				/* stmt did not merge with the waiting one, which is complete */
+-				if (spooled.txn.first != spooled.txn.last)
++				if (false)
+ 				{
+ 					if (!stream_spool_hand_waiting(&spooled))
+ 					{
+@@ -3437,8 +3437,21 @@
+ 				strlcpy(commit.timestamp, spooled.begin.timestamp,
+ 						sizeof(commit.timestamp));
+ 
+-				return stream_spool_hand_waiting(&spooled) &&
+-					   stream_spool_hand(&spooled, &commit);
++				for (LogicalTransactionStatement *s = spooled.txn.first; s != NULL;)
++				{
++					LogicalTransactionStatement *next = s->next;
++
++					spooled.txn.first = s;
++
++					if (!stream_spool_hand_waiting(&spooled))
++					{
++						return false;
++					}
++
++					s = next;
++				}
++
++				return stream_spool_hand(&spooled, &commit);
+ 			}
+ 
+ 			default:

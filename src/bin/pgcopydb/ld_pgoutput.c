@@ -1346,6 +1346,88 @@ parsePgoutputMessage(StreamContext *privateContext,
 
 
 /*
+ * pgoutput_spool_change is parsePgoutputMessage for performance mode: it fills
+ * in stmt from the change at buf, a pgoutput message from its type byte, or
+ * sets skip for a change that gives no statement.
+ */
+bool
+pgoutput_spool_change(StreamContext *privateContext, const char *buf, int bufLen,
+					  LogicalTransactionStatement *stmt, bool *skip)
+{
+	LogicalStreamContext context = {
+		.private = privateContext, .buffer = buf, .bufferLen = bufLen
+	};
+	PgoutputMessage *msg = &(privateContext->pgoutputMsg);
+
+	*skip = pgoutput_pgcopydb_change(privateContext, buf, bufLen);
+
+	if (*skip)
+	{
+		return true;
+	}
+
+	if (!preparePgoutputMessage(&context))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/* an old tuple sends values for key columns only, and 9d8b660 drops a u */
+	for (int i = 0; i < msg->ncols_old; i++)
+	{
+		if (msg->old_cols[i].status == 'u')
+		{
+			log_error("pgoutput: %s on %s.%s carries no value for replica "
+					  "identity column \"%s\", which is unchanged TOAST data",
+					  msg->action == 'U' ? "UPDATE" : "DELETE",
+					  msg->nspname, msg->relname, msg->old_cols[i].name);
+			return false;
+		}
+	}
+
+	/* the columns as ld_store_insert_pgoutput_message stores them */
+	int count = msg->ncols_old + msg->ncols_new;
+	PgoutputColContext ctx = {
+		.sections = (char (*)[2])calloc(Max(count, 1), 2),
+		.names = (char (*)[PG_NAMEDATALEN])calloc(Max(count, 1), PG_NAMEDATALEN),
+		.statuses = (char (*)[2])calloc(Max(count, 1), 2),
+		.values = (char **) calloc(Max(count, 1), sizeof(char *))
+	};
+
+	if (!ctx.sections || !ctx.names || !ctx.statuses || !ctx.values)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	for (int i = 0; i < count; i++)
+	{
+		bool old = i < msg->ncols_old;
+		int at = old ? i : i - msg->ncols_old;
+		PgoutputColumn *col = old ? &msg->old_cols[at] : &msg->new_cols[at];
+
+		ctx.sections[i][0] = old ? (msg->oldType == 'O' ? 'O' : 'K') :
+							 (msg->action == 'T' ? 'T' : 'N');
+		strlcpy(ctx.names[i], col->name, PG_NAMEDATALEN);
+		ctx.statuses[i][0] = col->status;
+		ctx.values[i] = col->status == 't' ? col->value : NULL;
+	}
+
+	ctx.colCount = count;
+
+	bool built = pgoutput_build_statement(stmt, &ctx, msg->nspname, msg->relname,
+										  msg->oldType);
+
+	free(ctx.sections);
+	free(ctx.names);
+	free(ctx.statuses);
+	free(ctx.values);
+
+	return built;
+}
+
+
+/*
  * pgoutput_build_statement fills in stmt, whose action is set, from the
  * columns of ctx and the relation and old tuple type of its message.
  */
