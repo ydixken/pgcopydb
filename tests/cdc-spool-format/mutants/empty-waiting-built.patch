@@ -1,0 +1,14 @@
+Mutant: the statement source builds a waiting statement when there is none. Must fail: a transaction of definitions only comes as BEGIN and COMMIT.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3269,7 +3269,7 @@
+ 	LogicalTransactionStatement *waiting = spooled->txn.first;
+ 	GeneratedColumnsCache *cache = spooled->specs->private.generatedColumnsCache;
+ 
+-	if (waiting == NULL)
++	if (waiting == NULL && false)
+ 	{
+ 		return true;
+ 	}

@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5114,20 +5115,51 @@ txn_spool(SpoolWriter *writer, const char *dir, const Msg *msgs, int n)
 }
 
 
-/* the statements of the first transaction of the spool in dirname */
+static sigjmp_buf crashJump;
+
+
+static void
+crashed(int signo)
+{
+	siglongjmp(crashJump, signo);
+}
+
+
+/*
+ * The statements of the first transaction of the spool in dirname. A crash of
+ * the source sets count to -1, which no check takes, and the checks go on.
+ */
 static bool
 statements(const char *dirname, StreamSpecs *specs, Captured *captured)
 {
 	SpoolReader reader = { 0 };
 	bool found = false;
+	volatile bool built = false;
+	struct sigaction crash = { .sa_handler = crashed };
+	struct sigaction before;
 
-	captured->count = 0;
+	captured->count = -1;
 	captured->reader = &reader;
 
-	bool built = spool_reader_open(&reader, dirname, 0) &&
-				 spool_reader_next(&reader, &found) && found &&
-				 stream_spool_statements(specs, &reader, &capture, captured);
+	if (sigaction(SIGSEGV, &crash, &before) != 0)
+	{
+		return false;
+	}
 
+	if (sigsetjmp(crashJump, 1) == 0)
+	{
+		captured->count = 0;
+		built = spool_reader_open(&reader, dirname, 0) &&
+				spool_reader_next(&reader, &found) && found &&
+				stream_spool_statements(specs, &reader, &capture, captured);
+	}
+	else
+	{
+		printf("the statement source crashed with SIGSEGV\n");
+		captured->count = -1;
+	}
+
+	(void) sigaction(SIGSEGV, &before, NULL);
 	spool_reader_close(&reader);
 
 	return built;
@@ -5434,7 +5466,7 @@ test_statements(const char *dir)
 	made = made && put_bytes(path, 0, bytes, sizeof(bytes));
 	mark = log_mark();
 	built = made && statements(writer.dirname, new_specs(), &captured);
-	check(made && !built && captured.count < 3 &&
+	check(made && !built && captured.count >= 0 && captured.count < 3 &&
 		  strstr(logged_since(mark), "without a COMMIT") != NULL,
 		  "the frames of an index record that hold no COMMIT are an error, and no COMMIT comes");
 
