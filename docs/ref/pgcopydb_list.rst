@@ -171,8 +171,11 @@ segment, ``final_lsn``, end LSN and commit time.
 
 The command only reads the spool. A record that receive is still writing is
 not listed. A damaged index record ends the command with an error, and so
-does a segment without its index file that a later segment follows. The
-command does not read the frames, and so does not report a damaged one.
+does a segment without its index file that a later segment follows. It also
+ends with an error when it cannot check whether an index file exists, and on
+a segment header of another spool format version, with an error that names
+both versions. The command does not read the frames, and so does not report a
+damaged one.
 
 .. include:: ../include/list-spool.rst
 
