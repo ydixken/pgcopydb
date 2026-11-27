@@ -3973,7 +3973,7 @@ stream_apply_print_stmt(FILE *out, ReplayDBStmt *s, StreamPrepared *prepared)
 	if (js == NULL ||
 		json_value_get_type(js) != JSONArray)
 	{
-		log_error("stream_apply_to_stdout: failed to parse "
+		log_error("stream_apply_print_stmt: failed to parse "
 				  "args JSON for replay id %lld: %s",
 				  (long long) s->id, s->data);
 		json_value_free(js);
