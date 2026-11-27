@@ -3104,7 +3104,17 @@ test_start_cut(const char *dir)
 	/* the create of the next segment was cut short before its header */
 	made = make_rotated(&writer, dir, false) &&
 		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0;
+	sformat(dirLine, sizeof(dirLine), "Synced spool directory \"%s\"", writer.dirname);
+	mark = log_mark();
 	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+	text = logged_since(mark);
+	removal = strstr(text, dirLine);
+
+	char *cut = strstr(text, sync_line(spool_file(line, writer.dirname, 5, ".seg"),
+									   SECOND_END));
+
+	check(started && removal != NULL && cut != NULL && removal < cut,
+		  "the start syncs the directory after it removes a torn last segment, before it cuts the segment before it");
 
 	bool moved = started && access(seg, F_OK) != 0 &&
 				 strcmp(opened.segment.filename,

@@ -1,0 +1,14 @@
+Mutant: the start cuts and appends to the segment before a removed torn last segment without a directory sync of the removal. Must fail: the start syncs the directory after it removes a torn last segment, before it cuts the segment before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2171,7 +2171,7 @@
+ 			return false;
+ 		}
+ 
+-		removed = true;
++		removed = removed || tail.headed || spool_highest_below(indexes, seq) == 0;
+ 
+ 		/* the header gives the last transaction before it, also after cleanup */
+ 		if (tail.headed)

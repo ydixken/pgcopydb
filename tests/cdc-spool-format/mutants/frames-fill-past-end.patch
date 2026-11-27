@@ -6,7 +6,7 @@ Apply from the repository root with git apply, and never commit it applied.
 @@ -1762,7 +1762,7 @@
  		uint64_t size = SPOOL_FRAME_SIZE(pgout_u32(spool_frames_at(frames), &pos,
  												   (int) Min(left, 4)));
-
+ 
 -		if (size <= left && !spool_frames_fill(frames, size))
 +		if (!spool_frames_fill(frames, size))
  		{
