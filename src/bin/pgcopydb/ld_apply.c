@@ -75,7 +75,7 @@ static bool stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s);
 static bool stream_apply_truncate(StreamApplyContext *context, const char *sql);
 static bool stream_apply_prepare(StreamApplyContext *context, const char *name,
 								 const char *sql);
-static bool stream_apply_group_open(StreamApplyContext *context);
+static bool stream_apply_group_open(StreamApplyContext *context, GUC *settings);
 static bool stream_apply_group_rollback(StreamApplyContext *context);
 static bool stream_apply_group_close(StreamApplyContext *context,
 									 PipelineStateEntry *current);
@@ -89,6 +89,32 @@ static bool stream_apply_txn_body(StreamApplyContext *context,
 								  uint64_t begin_id,
 								  uint64_t commitLSN,
 								  bool *degrade);
+
+/*
+ * ApplyTxnState holds what the statements of one source transaction build up
+ * in the open group. The SQLite path pulls them from its iterator and the raw
+ * path is handed them by the statement source, and both run the same rules.
+ */
+typedef struct ApplyTxnState
+{
+	StreamApplyContext *context;
+	uint32_t xid;
+	uint64_t commitLSN;
+	int rows;
+	bool done;                  /* the COMMIT, ROLLBACK or degrade row came */
+	bool rolledBack;
+	bool degrade;
+	char commitTimestamp[PG_MAX_TIMESTAMP];
+	TargetRelkind *sentRefresh;
+} ApplyTxnState;
+
+static void stream_apply_txn_init(ApplyTxnState *state,
+								  StreamApplyContext *context,
+								  uint32_t xid,
+								  uint64_t commitLSN);
+static bool stream_apply_txn_stmt(ApplyTxnState *state, ReplayDBStmt *s);
+static bool stream_apply_txn_end(ApplyTxnState *state, bool success);
+
 
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
 
@@ -1112,7 +1138,8 @@ stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context)
 			current.last_txn_complete = false;
 			current.last_txn_processed = false;
 
-			if (!context->groupOpen && !stream_apply_group_open(context))
+			if (!context->groupOpen &&
+				!stream_apply_group_open(context, applySettingsSync))
 			{
 				/* errors have already been logged */
 				success = false;
@@ -1303,10 +1330,10 @@ stream_apply_commit(StreamApplyContext *context, uint64_t lsn, char *timestamp)
 
 /*
  * stream_apply_group_open opens the target transaction that the next source
- * transactions (the group members) are applied in.
+ * transactions (the group members) are applied in, with settings on it.
  */
 static bool
-stream_apply_group_open(StreamApplyContext *context)
+stream_apply_group_open(StreamApplyContext *context, GUC *settings)
 {
 	PGSQL *applyPgConn = &(context->applyPgConn);
 
@@ -1316,7 +1343,8 @@ stream_apply_group_open(StreamApplyContext *context)
 		return false;
 	}
 
-	if (!pgsql_set_gucs(applyPgConn, applySettingsSync))
+	/* a worker that set every setting on its session passes none here */
+	if (settings != NULL && !pgsql_set_gucs(applyPgConn, settings))
 	{
 		/* errors have already been logged */
 		(void) pgsql_execute(applyPgConn, "ROLLBACK");
@@ -1422,8 +1450,8 @@ stream_apply_txn_body(StreamApplyContext *context,
 					  uint64_t commitLSN,
 					  bool *degrade)
 {
-	PGSQL *applyPgConn = &(context->applyPgConn);
 	DatabaseCatalog *replayDB = context->replayDB;
+	ApplyTxnState state = { 0 };
 
 	*degrade = false;
 
@@ -1440,21 +1468,11 @@ stream_apply_txn_body(StreamApplyContext *context,
 		return false;
 	}
 
+	(void) stream_apply_txn_init(&state, context, xid, commitLSN);
+
 	bool success = true;
-	bool rolledBack = false;
-	int rows = 0;
-	char commitTimestamp[PG_MAX_TIMESTAMP] = { 0 };
 
-	/*
-	 * Per-transaction sent-REFRESH set: when the first DML row targeting a
-	 * matview is detected we immediately queue REFRESH on the pipeline so the
-	 * server can start executing it while the client continues reading the
-	 * remaining DML rows from SQLite.  The hash deduplicates: subsequent DML
-	 * rows for the same matview are skipped without sending another REFRESH.
-	 */
-	TargetRelkind *sentRefresh = NULL;
-
-	for (;;)
+	while (!state.done)
 	{
 		if (!ld_store_iter_replay_txn_next(&iter))
 		{
@@ -1475,129 +1493,7 @@ stream_apply_txn_body(StreamApplyContext *context,
 			break;
 		}
 
-		if (s->action == STREAM_ACTION_BEGIN)
-		{
-			/* skip: the outer loop already processed this */
-			continue;
-		}
-
-		if (s->action == STREAM_ACTION_COMMIT)
-		{
-			strlcpy(commitTimestamp, s->timestamp, sizeof(commitTimestamp));
-			break;
-		}
-
-		if ((s->action == STREAM_ACTION_ROLLBACK ||
-			 s->action == STREAM_ACTION_TRUNCATE) &&
-			context->groupTxns > 0)
-		{
-			log_info("Transaction %u (%X/%X) holds a %s after %d of its rows: "
-					 "%s the %d transactions before it in their own "
-					 "target transaction",
-					 xid, LSN_FORMAT_ARGS(commitLSN),
-					 s->action == STREAM_ACTION_ROLLBACK ? "ROLLBACK" : "TRUNCATE",
-					 rows,
-					 rows > 0 ? "rolling back and re-applying" : "committing",
-					 context->groupTxns);
-			*degrade = true;
-			break;
-		}
-
-		if (s->action == STREAM_ACTION_ROLLBACK)
-		{
-			/*
-			 * Rolled-back transactions are normally not emitted by logical
-			 * decoding, but handle defensively.  We abort the target
-			 * transaction and leave previousLSN unchanged.
-			 */
-			log_notice("Rolling back transaction %u (rollback LSN %X/%X)",
-					   xid, LSN_FORMAT_ARGS(s->lsn));
-			rolledBack = true;
-			break;
-		}
-
-		/* DML row (INSERT / UPDATE / DELETE / TRUNCATE) */
-		++rows;
-
-		/*
-		 * If the target relation is a materialized view, skip the DML and
-		 * issue REFRESH MATERIALIZED VIEW on the first occurrence.  REFRESH
-		 * is queued into the pipeline immediately (no CONCURRENTLY, so it
-		 * runs inside the open transaction) — the server starts executing it
-		 * while the client continues reading the rest of the DML rows from
-		 * SQLite.  Subsequent DML rows for the same matview are silently
-		 * skipped using the sentRefresh deduplication hash.
-		 */
-		if (s->action != STREAM_ACTION_TRUNCATE &&
-			context->targetRelkindCache != NULL &&
-			!IS_EMPTY_STRING_BUFFER(s->nspname))
-		{
-			TargetRelkind lookupKey = { 0 };
-			strlcpy(lookupKey.nspname, s->nspname, sizeof(lookupKey.nspname));
-			strlcpy(lookupKey.relname, s->relname, sizeof(lookupKey.relname));
-
-			unsigned keylen =
-				offsetof(TargetRelkind, relname) +
-				sizeof(lookupKey.relname) -
-				offsetof(TargetRelkind, nspname);
-
-			TargetRelkind *found = NULL;
-
-			HASH_FIND(hh, context->targetRelkindCache,
-					  lookupKey.nspname, keylen, found);
-
-			if (found != NULL && found->relkind == 'm')
-			{
-				TargetRelkind *sent = NULL;
-
-				HASH_FIND(hh, sentRefresh, lookupKey.nspname, keylen, sent);
-
-				if (sent == NULL)
-				{
-					/*
-					 * First DML row for this matview in this transaction:
-					 * send REFRESH now into the pipeline so the server starts
-					 * working on it immediately.
-					 */
-					char refreshSQL[BUFSIZE] = { 0 };
-
-					sformat(refreshSQL, sizeof(refreshSQL),
-							"REFRESH MATERIALIZED VIEW %s.%s",
-							s->nspname, s->relname);
-
-					log_info("Refreshing materialized view %s.%s (xid %u)",
-							 s->nspname, s->relname, xid);
-
-					if (!pgsql_execute(applyPgConn, refreshSQL))
-					{
-						log_error("Failed to queue REFRESH for %s.%s",
-								  s->nspname, s->relname);
-						success = false;
-						break;
-					}
-
-					sent = (TargetRelkind *) calloc(1, sizeof(TargetRelkind));
-
-					if (sent == NULL)
-					{
-						log_error(ALLOCATION_FAILED_ERROR);
-						success = false;
-						break;
-					}
-
-					strlcpy(sent->nspname, s->nspname, sizeof(sent->nspname));
-					strlcpy(sent->relname, s->relname, sizeof(sent->relname));
-					sent->relkind = 'm';
-
-					HASH_ADD(hh, sentRefresh, nspname, keylen, sent);
-				}
-
-				/* skip the DML row — REFRESH covers the matview update */
-				continue;
-			}
-		}
-
-		if (!stream_apply_dml(context, s))
+		if (!stream_apply_txn_stmt(&state, s))
 		{
 			/* errors have already been logged */
 			success = false;
@@ -1607,48 +1503,214 @@ stream_apply_txn_body(StreamApplyContext *context,
 
 	(void) ld_store_iter_replay_txn_finish(&iter);
 
-	/* free the per-transaction sent-REFRESH dedup set */
-	{
-		TargetRelkind *pr, *prTmp;
+	*degrade = state.degrade;
 
-		HASH_ITER(hh, sentRefresh, pr, prTmp)
+	return stream_apply_txn_end(&state, success);
+}
+
+
+/* stream_apply_txn_init starts a member of the open group */
+static void
+stream_apply_txn_init(ApplyTxnState *state, StreamApplyContext *context,
+					  uint32_t xid, uint64_t commitLSN)
+{
+	*state = (ApplyTxnState) {
+		.context = context,
+		.xid = xid,
+		.commitLSN = commitLSN
+	};
+}
+
+
+/*
+ * stream_apply_txn_stmt sends one statement of the member into the open group,
+ * and sets state->done at the row that ends it: its COMMIT, a ROLLBACK, or the
+ * row that makes the group degrade.
+ */
+static bool
+stream_apply_txn_stmt(ApplyTxnState *state, ReplayDBStmt *s)
+{
+	StreamApplyContext *context = state->context;
+	PGSQL *applyPgConn = &(context->applyPgConn);
+
+	if (s->action == STREAM_ACTION_BEGIN)
+	{
+		/* skip: the outer loop already processed this */
+		return true;
+	}
+
+	if (s->action == STREAM_ACTION_COMMIT)
+	{
+		strlcpy(state->commitTimestamp, s->timestamp,
+				sizeof(state->commitTimestamp));
+		state->done = true;
+		return true;
+	}
+
+	if ((s->action == STREAM_ACTION_ROLLBACK ||
+		 s->action == STREAM_ACTION_TRUNCATE) &&
+		context->groupTxns > 0)
+	{
+		log_info("Transaction %u (%X/%X) holds a %s after %d of its rows: "
+				 "%s the %d transactions before it in their own "
+				 "target transaction",
+				 state->xid, LSN_FORMAT_ARGS(state->commitLSN),
+				 s->action == STREAM_ACTION_ROLLBACK ? "ROLLBACK" : "TRUNCATE",
+				 state->rows,
+				 state->rows > 0 ? "rolling back and re-applying" : "committing",
+				 context->groupTxns);
+		state->degrade = true;
+		state->done = true;
+		return true;
+	}
+
+	if (s->action == STREAM_ACTION_ROLLBACK)
+	{
+		/*
+		 * Rolled-back transactions are normally not emitted by logical
+		 * decoding, but handle defensively.  We abort the target
+		 * transaction and leave previousLSN unchanged.
+		 */
+		log_notice("Rolling back transaction %u (rollback LSN %X/%X)",
+				   state->xid, LSN_FORMAT_ARGS(s->lsn));
+		state->rolledBack = true;
+		state->done = true;
+		return true;
+	}
+
+	/* DML row (INSERT / UPDATE / DELETE / TRUNCATE) */
+	++state->rows;
+
+	/*
+	 * If the target relation is a materialized view, skip the DML and
+	 * issue REFRESH MATERIALIZED VIEW on the first occurrence.  REFRESH
+	 * is queued into the pipeline immediately (no CONCURRENTLY, so it
+	 * runs inside the open transaction), so the server starts executing it
+	 * while the client continues reading the rest of the DML rows.
+	 * Subsequent DML rows for the same matview are silently skipped using
+	 * the sentRefresh deduplication hash.
+	 */
+	if (s->action != STREAM_ACTION_TRUNCATE &&
+		context->targetRelkindCache != NULL &&
+		!IS_EMPTY_STRING_BUFFER(s->nspname))
+	{
+		TargetRelkind lookupKey = { 0 };
+		strlcpy(lookupKey.nspname, s->nspname, sizeof(lookupKey.nspname));
+		strlcpy(lookupKey.relname, s->relname, sizeof(lookupKey.relname));
+
+		unsigned keylen =
+			offsetof(TargetRelkind, relname) +
+			sizeof(lookupKey.relname) -
+			offsetof(TargetRelkind, nspname);
+
+		TargetRelkind *found = NULL;
+
+		HASH_FIND(hh, context->targetRelkindCache,
+				  lookupKey.nspname, keylen, found);
+
+		if (found != NULL && found->relkind == 'm')
 		{
-			HASH_DEL(sentRefresh, pr);
-			free(pr);
+			TargetRelkind *sent = NULL;
+
+			HASH_FIND(hh, state->sentRefresh, lookupKey.nspname, keylen, sent);
+
+			if (sent == NULL)
+			{
+				/*
+				 * First DML row for this matview in this transaction:
+				 * send REFRESH now into the pipeline so the server starts
+				 * working on it immediately.
+				 */
+				char refreshSQL[BUFSIZE] = { 0 };
+
+				sformat(refreshSQL, sizeof(refreshSQL),
+						"REFRESH MATERIALIZED VIEW %s.%s",
+						s->nspname, s->relname);
+
+				log_info("Refreshing materialized view %s.%s (xid %u)",
+						 s->nspname, s->relname, state->xid);
+
+				if (!pgsql_execute(applyPgConn, refreshSQL))
+				{
+					log_error("Failed to queue REFRESH for %s.%s",
+							  s->nspname, s->relname);
+					return false;
+				}
+
+				sent = (TargetRelkind *) calloc(1, sizeof(TargetRelkind));
+
+				if (sent == NULL)
+				{
+					log_error(ALLOCATION_FAILED_ERROR);
+					return false;
+				}
+
+				strlcpy(sent->nspname, s->nspname, sizeof(sent->nspname));
+				strlcpy(sent->relname, s->relname, sizeof(sent->relname));
+				sent->relkind = 'm';
+
+				HASH_ADD(hh, state->sentRefresh, nspname, keylen, sent);
+			}
+
+			/* skip the DML row: REFRESH covers the matview update */
+			return true;
 		}
 	}
 
-	if (!success || rolledBack || (*degrade && rows > 0))
+	return stream_apply_dml(context, s);
+}
+
+
+/*
+ * stream_apply_txn_end closes the member: it rolls the group back when rows
+ * were sent that cannot stay, and counts the member into the group otherwise.
+ */
+static bool
+stream_apply_txn_end(ApplyTxnState *state, bool success)
+{
+	StreamApplyContext *context = state->context;
+
+	/* free the per-transaction sent-REFRESH dedup set */
+	TargetRelkind *pr, *prTmp;
+
+	HASH_ITER(hh, state->sentRefresh, pr, prTmp)
+	{
+		HASH_DEL(state->sentRefresh, pr);
+		free(pr);
+	}
+
+	if (!success || state->rolledBack || (state->degrade && state->rows > 0))
 	{
 		bool rollbackSent = stream_apply_group_rollback(context);
 
 		return success && rollbackSent;
 	}
 
-	if (*degrade)
+	if (state->degrade)
 	{
 		return true;
 	}
 
-	if (IS_EMPTY_STRING_BUFFER(commitTimestamp))
+	if (IS_EMPTY_STRING_BUFFER(state->commitTimestamp))
 	{
 		TimestampTz now = feGetCurrentTimestamp();
 
 		(void) pgsql_timestamptz_to_string(now,
-										   commitTimestamp,
-										   sizeof(commitTimestamp));
+										   state->commitTimestamp,
+										   sizeof(state->commitTimestamp));
 	}
 
 	if (context->groupTxns == 0)
 	{
-		context->groupFirstXid = xid;
+		context->groupFirstXid = state->xid;
 	}
 
-	context->groupLastXid = xid;
-	context->groupCursorLSN = commitLSN;
-	strlcpy(context->groupLastTs, commitTimestamp, sizeof(context->groupLastTs));
+	context->groupLastXid = state->xid;
+	context->groupCursorLSN = state->commitLSN;
+	strlcpy(context->groupLastTs, state->commitTimestamp,
+			sizeof(context->groupLastTs));
 	context->groupTxns++;
-	context->groupRows += rows;
+	context->groupRows += state->rows;
 
 	return true;
 }
