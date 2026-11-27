@@ -1,0 +1,43 @@
+Mutant: the replication connection keeps the session settings, which is the state before the pin. Must fail: the performance case check "the timestamptz key text changed across the reconnect".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/pgsql.c
++++ b/src/bin/pgcopydb/pgsql.c
+@@ -4127,21 +4127,6 @@
+ 
+ 
+ /*
+- * The raw spool stores the text the walsender prints, which a role, database
+- * or reload setting changes. The values are the ones the fork's compare pins
+- * for the same reason (compare_open_catalog_session).
+- */
+-static GUC replicationValueSettings[] = {
+-	{ "extra_float_digits", "3" },
+-	{ "IntervalStyle", "'postgres'" },
+-	{ "DateStyle", "'ISO, YMD'" },
+-	{ "bytea_output", "'hex'" },
+-	{ "TimeZone", "'UTC'" },
+-	{ NULL, NULL }
+-};
+-
+-
+-/*
+  * Send the START_REPLICATION logical replication command.
+  */
+ bool
+@@ -4236,15 +4221,6 @@
+ 			log_info("Sending standby status every %d ms, "
+ 					 "wal_sender_timeout is %d ms",
+ 					 interval, context.intVal);
+-		}
+-
+-		if (client->pinValueOutput &&
+-			!pgsql_set_gucs(pgsql, replicationValueSettings))
+-		{
+-			log_error("Failed to set the value output settings on the "
+-					  "replication connection, see above for details");
+-			destroyPQExpBuffer(query);
+-			return false;
+ 		}
+ 	}
+ 

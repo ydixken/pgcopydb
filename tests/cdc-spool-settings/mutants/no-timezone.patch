@@ -1,0 +1,13 @@
+Mutant: TimeZone is left out of the pinned settings. Must fail: the performance case check "the timestamptz key text changed across the reconnect".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/pgsql.c
++++ b/src/bin/pgcopydb/pgsql.c
+@@ -4136,7 +4136,6 @@
+ 	{ "IntervalStyle", "'postgres'" },
+ 	{ "DateStyle", "'ISO, YMD'" },
+ 	{ "bytea_output", "'hex'" },
+-	{ "TimeZone", "'UTC'" },
+ 	{ NULL, NULL }
+ };
+ 

@@ -171,6 +171,7 @@ jobs:
           - cdc-wal-workers-idle
           - wal-workers-assign
           - cdc-spool-format
+          - cdc-spool-settings
         exclude:
           # timescaledb uses timescale/timescaledb:latest-pg13 for both source
           # and target. pg_restore from PG17+ emits "SET transaction_timeout = 0"
@@ -264,6 +265,8 @@ jobs:
           - TEST: wal-workers-assign
             PGVERSION: 16
           - TEST: cdc-spool-format
+            PGVERSION: 16
+          - TEST: cdc-spool-settings
             PGVERSION: 16
     steps:
       - name: Checkout repository

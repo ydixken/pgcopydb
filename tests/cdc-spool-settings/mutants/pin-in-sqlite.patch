@@ -1,0 +1,15 @@
+Mutant: every mode pins the settings, not only the raw path. Must fail: the sqlite case check "the timestamptz key text did not change across the reconnect".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/pgsql.c
++++ b/src/bin/pgcopydb/pgsql.c
+@@ -4238,8 +4238,7 @@
+ 					 interval, context.intVal);
+ 		}
+ 
+-		if (client->pinValueOutput &&
+-			!pgsql_set_gucs(pgsql, replicationValueSettings))
++		if (!pgsql_set_gucs(pgsql, replicationValueSettings))
+ 		{
+ 			log_error("Failed to set the value output settings on the "
+ 					  "replication connection, see above for details");
