@@ -168,6 +168,7 @@ jobs:
           - cdc-spool-format
           - cdc-spool-settings
           - cdc-follow-mode
+          - cdc-layout-refusal
         exclude:
           # timescaledb uses timescale/timescaledb:latest-pg13 for both source
           # and target. pg_restore from PG17+ emits "SET transaction_timeout = 0"
