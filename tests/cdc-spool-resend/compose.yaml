@@ -1,9 +1,6 @@
 services:
-  # restart: always brings the postmaster back after the immediate shutdown of
-  # the resend case, with the data directory of the same container
   source:
     image: postgres:${PGVERSION:-16}
-    restart: always
     expose:
       - 5432
     env_file:
@@ -11,8 +8,6 @@ services:
     command: >
       -c wal_level=logical
       -c wal_sender_timeout=5s
-      -c checkpoint_timeout=1h
-      -c max_wal_size=10GB
       -c ssl=on
       -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
       -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
@@ -20,7 +15,6 @@ services:
   # an old source, whose pgoutput sends BEGIN from the begin callback
   source14:
     image: postgres:14-bullseye
-    restart: always
     expose:
       - 5432
     env_file:
@@ -28,8 +22,6 @@ services:
     command: >
       -c wal_level=logical
       -c wal_sender_timeout=5s
-      -c checkpoint_timeout=1h
-      -c max_wal_size=10GB
       -c ssl=on
       -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
       -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
