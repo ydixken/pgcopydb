@@ -4195,6 +4195,85 @@ test_reader_failures(const char *dir)
 }
 
 
+/* the start and the reader read an index file in chunks of SPOOL_READER_CHUNK records */
+static void
+test_index_chunks(const char *dir)
+{
+	const int total = SPOOL_READER_CHUNK + 6;
+	SpoolHeader header = { .firstSeq = 1, .systemId = 7, .timeline = 2 };
+	SpoolWriter writer = { 0 };
+	SpoolWriter opened = { 0 };
+	Msg txn[3];
+	char idx[MAXPGPATH];
+	char seg[MAXPGPATH];
+	char line[2 * MAXPGPATH];
+	bool made = new_writer(&writer, dir, &header, 0);
+
+	for (int k = 0; made && k < total; k++)
+	{
+		uint64_t base = 0x100000 + (uint64_t) k * 0x100;
+
+		txn[0] = begin_msg(base + 0x10, base + 0x80, 2000 + k);
+		txn[1] = other_msg(base + 0x10, 'I');
+		txn[2] = commit_msg(base + 0x90, base + 0x80, base + 0x90, 100 + k);
+		made = feed(&writer, txn, lengthof(txn));
+	}
+
+	made = made && write_index(&writer);
+	kill_writer(&writer);
+	spool_file(idx, writer.dirname, 1, ".idx");
+	spool_file(seg, writer.dirname, 1, ".seg");
+
+	int64_t segSize = SPOOL_HEADER_SIZE + total * frames_size(txn, lengthof(txn));
+	bool started = made && file_size(idx) == total * SPOOL_INDEX_RECORD_SIZE &&
+				   put_bytes(idx, -1, "torn record", 11) &&
+				   spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+
+	check(started && opened.nextSeq == total + 1 &&
+		  opened.lastEndLSN == 0x100000 + (total - 1) * 0x100 + 0x90 &&
+		  file_size(idx) == total * SPOOL_INDEX_RECORD_SIZE && file_size(seg) == segSize,
+		  "a start on an index file of more records than one read chunk keeps them all, and cuts only its torn tail");
+	kill_writer(&opened);
+
+	SpoolReader reader = { 0 };
+	bool found = true;
+	bool read = made && spool_reader_open(&reader, writer.dirname, 0);
+	int n = 0;
+
+	while (read && (read = spool_reader_next(&reader, &found)) && found)
+	{
+		read = reader.record.seq == (uint64_t) n + 1 &&
+			   reader.record.xid == (uint32_t) (2000 + n);
+		n++;
+	}
+
+	check(read && !found && n == total,
+		  "a reader returns every record of an index file of more than one read chunk in order, then waits");
+	spool_reader_close(&reader);
+
+	char zeroes[SPOOL_INDEX_RECORD_SIZE] = { 0 };
+	int gap = (SPOOL_READER_CHUNK + 1) * SPOOL_INDEX_RECORD_SIZE;
+	int64_t idxSize = file_size(idx);
+	bool gapped = made && put_bytes(idx, gap, zeroes, sizeof(zeroes));
+
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds no valid index record at offset %d", idx, gap);
+
+	long mark = log_mark();
+
+	started = gapped && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+
+	check(gapped && !started && one_line(logged_since(mark), " ERROR ", line) &&
+		  file_size(idx) == idxSize && file_size(seg) == segSize,
+		  "an invalid index record past the first read chunk, before a valid one, ends the start with an error that names its offset, and nothing is cut");
+
+	if (started)
+	{
+		kill_writer(&opened);
+	}
+}
+
+
 /* runs pgcopydb with args, and returns its output and exit status */
 static char *
 run_pgcopydb(const char *binary, const char *args, int *status)
@@ -4342,6 +4421,7 @@ main(int argc, char **argv)
 	test_start_failures(dir);
 	test_reader(dir);
 	test_reader_failures(dir);
+	test_index_chunks(dir);
 	test_list_spool(dir, argv[2]);
 	test_disk_full(argv[1]);
 	test_relation_log_full(argv[1]);

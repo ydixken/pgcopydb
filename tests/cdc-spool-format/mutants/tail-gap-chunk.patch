@@ -1,0 +1,14 @@
+Mutant: the gap test of the start compares offsets in the read chunk, so it sees no gap past the first chunk. Must fail: an invalid index record past the first read chunk, before a valid one, ends the start with an error that names its offset, and nothing is cut.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1946,7 +1946,7 @@
+ 			 * A power loss can keep a later record of a write and not an earlier
+ 			 * one, and a cut cannot tell that from damage of synced records.
+ 			 */
+-			if (at + i > tail->keep)
++			if (i > tail->keep)
+ 			{
+ 				log_error("Spool file \"%s\" holds no valid index record at "
+ 						  "offset %" PRIu64, tail->index, tail->keep);
