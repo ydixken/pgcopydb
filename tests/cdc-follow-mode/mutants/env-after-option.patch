@@ -1,0 +1,23 @@
+Mutant: the variable is read after the option, so PGCOPYDB_FOLLOW_MODE wins over --follow-mode. Must fail: the options case checks "no mode refusal" for opt-sqlite-wins and the wal2json refusal for opt-performance-wins.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -1476,6 +1476,17 @@
+ 					/* errors have already been logged */
+ 					exit(EXIT_CODE_BAD_ARGS);
+ 				}
++
++				/* the variable is read after the option, so it wins */
++				char envMode[BUFSIZE] = { 0 };
++
++				if (env_exists(PGCOPYDB_FOLLOW_MODE) &&
++					get_env_copy(PGCOPYDB_FOLLOW_MODE, envMode, sizeof(envMode)) &&
++					!cli_parse_follow_mode(envMode, &(options.followMode)))
++				{
++					/* errors have already been logged */
++					exit(EXIT_CODE_BAD_ARGS);
++				}
+ 				log_trace("--follow-mode %s", optarg);
+ 				break;
+ 			}
