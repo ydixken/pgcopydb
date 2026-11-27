@@ -3175,8 +3175,8 @@ test_start_cut(const char *dir)
 
 	/* the CDC directory holds other files, and names that only look like ours */
 	const char *others[] = {
-		"origin", "0000000000000000.seg", "000000000000000G.idx",
-		"0000000000000009.seg.bak", "00000000000005.idx",
+		"origin", "0000000000000000.seg", "0000000000000000.idx",
+		"000000000000000G.idx", "0000000000000009.seg.bak", "00000000000005.idx",
 		"0000000000000009.IDX"
 	};
 
@@ -3200,6 +3200,8 @@ test_start_cut(const char *dir)
 
 	check(kept, "files of other names in the spool directory are left alone");
 	kill_writer(&opened);
+	check(kept && reader_holds(writer.dirname, 0, all, 2),
+		  "a reader passes by files of other names in the spool directory");
 
 	made = make_spool(&writer, dir) &&
 		   put_bytes(spool_file(idx, writer.dirname, 9, ".idx"), -1, zeroes, 0);
@@ -3651,9 +3653,11 @@ test_start_failures(const char *dir)
 	injected = preadFailAt == 0;
 	preadFailAt = 0;
 
-	check(made && injected && !started &&
-		  one_line(logged_since(mark), " ERROR ", "Failed to read spool file"),
-		  "a start that cannot read the last index record before a removed last segment fails with an ERROR line");
+	char *logged = logged_since(mark);
+
+	check(made && injected && !started && count(logged, " ERROR ") == 1 &&
+		  one_line(logged, " ERROR ", "Failed to read spool file"),
+		  "a start that cannot read the index of the segment before a headed last segment fails with one ERROR line");
 
 	/* a header that could not be read would look torn, and a new spool restarts */
 	sformat(line, sizeof(line), "%s/unreadheader", dir);
@@ -3753,6 +3757,22 @@ test_start_failures(const char *dir)
 	}
 
 	check(ok, "a start that cannot remove a file fails with an ERROR line that names it");
+
+	/* the directory sync and the cut of the relation log come before the create */
+	made = make_spool(&writer, dir) &&
+		   truncate(spool_file(files[0], writer.dirname, 5, ".idx"), 30) == 0;
+	sformat(line, sizeof(line), "Failed to sync spool file \"%s\"",
+			spool_file(files[1], writer.dirname, 5, ".seg"));
+	mark = log_mark();
+	fsyncSkips = 2;
+	fsyncFailures = 1;
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	injected = fsyncFailures == 0;
+	fsyncFailures = 0;
+	fsyncSkips = 0;
+
+	check(made && injected && !started && one_line(logged_since(mark), " ERROR ", line),
+		  "a start that cannot sync the segment it creates again fails with an ERROR line that names it");
 
 	/* more definitions than the 256 bytes of a new PQExpBuffer hold, in the first */
 	Msg defined[13] = { firstTxn[0] };
@@ -4181,6 +4201,18 @@ test_reader(const char *dir)
 	spool_reader_close(&reader);
 	kill_writer(&fresh);
 
+	/* a reader opened before receive created the first segment */
+	sformat(name, sizeof(name), "%s/unsegmented", dir);
+	made = mkdir(name, 0700) == 0 && put_bytes(log_file(idx, name), -1, junk, 0) &&
+		   spool_reader_open(&reader, name, 0) &&
+		   spool_writer_open(&fresh, name, 7, 2, 0);
+	waiting = made && spool_reader_next(&reader, &found) && !found;
+	made = made && feed(&fresh, low, 3) && write_index(&fresh);
+	check(waiting && made && next_holds(&reader, &context, low, 3),
+		  "a reader opened on a directory with an empty relation log and no segment reads the first transaction once it is there");
+	spool_reader_close(&reader);
+	kill_writer(&fresh);
+
 	/* as when cleanup and the start have removed every segment before segment 7 */
 	SpoolHeader seventh = {
 		.firstSeq = 7, .systemId = 7, .timeline = 2,
@@ -4448,6 +4480,26 @@ test_reader_failures(const char *dir)
 }
 
 
+/* feeds total transactions of one INSERT each, and leaves the last one in txn */
+static bool
+feed_many(SpoolWriter *writer, int total, Msg *txn)
+{
+	bool fed = true;
+
+	for (int k = 0; fed && k < total; k++)
+	{
+		uint64_t base = 0x100000 + (uint64_t) k * 0x100;
+
+		txn[0] = begin_msg(base + 0x10, base + 0x80, 2000 + k);
+		txn[1] = other_msg(base + 0x10, 'I');
+		txn[2] = commit_msg(base + 0x90, base + 0x80, base + 0x90, 100 + k);
+		fed = feed(writer, txn, 3);
+	}
+
+	return fed;
+}
+
+
 /* the start and the reader read an index file in chunks of SPOOL_READER_CHUNK records */
 static void
 test_index_chunks(const char *dir)
@@ -4460,17 +4512,7 @@ test_index_chunks(const char *dir)
 	char idx[MAXPGPATH];
 	char seg[MAXPGPATH];
 	char line[2 * MAXPGPATH];
-	bool made = new_writer(&writer, dir, &header, 0);
-
-	for (int k = 0; made && k < total; k++)
-	{
-		uint64_t base = 0x100000 + (uint64_t) k * 0x100;
-
-		txn[0] = begin_msg(base + 0x10, base + 0x80, 2000 + k);
-		txn[1] = other_msg(base + 0x10, 'I');
-		txn[2] = commit_msg(base + 0x90, base + 0x80, base + 0x90, 100 + k);
-		made = feed(&writer, txn, lengthof(txn));
-	}
+	bool made = new_writer(&writer, dir, &header, 0) && feed_many(&writer, total, txn);
 
 	made = made && write_index(&writer);
 	kill_writer(&writer);
@@ -4513,6 +4555,29 @@ test_index_chunks(const char *dir)
 
 	check(gapped && refused_twice(writer.dirname, 7, 0, line),
 		  "an invalid index record past the first read chunk, before a valid one, ends every start with an error that names its offset, and no file changes");
+
+	/* the same records before a torn last segment: the header of each, then two chunks */
+	SpoolWriter rotated = { 0 };
+
+	made = new_writer(&rotated, dir, &header, 50) && feed_many(&rotated, total, txn) &&
+		   write_index(&rotated) && spool_writer_rotate(&rotated);
+	kill_writer(&rotated);
+	made = made && truncate(spool_file(seg, rotated.dirname, total + 1, ".seg"), 10) == 0;
+
+	char *state = made ? dir_state(rotated.dirname) : NULL;
+	long mark = log_mark();
+
+	preadFailAt = 4;
+	started = made && spool_writer_open(&opened, rotated.dirname, 7, 2, 50);
+
+	bool injected = preadFailAt == 0;
+	char *text = logged_since(mark);
+
+	preadFailAt = 0;
+	check(made && injected && !started && count(text, " ERROR ") == 1 &&
+		  one_line(text, " ERROR ", "Failed to read spool file") &&
+		  strcmp(state, dir_state(rotated.dirname)) == 0,
+		  "a start that cannot read the second chunk of the index before a torn last segment fails with one ERROR line, and no file changes");
 }
 
 
