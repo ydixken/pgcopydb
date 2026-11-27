@@ -3896,6 +3896,16 @@ test_start_failures(const char *dir)
 	check(ok,
 		  "a start that cannot open the relation log, the segment or its index fails with an ERROR line");
 
+	/* without an index record, which proves a length of the log synced */
+	made = make_spool(&writer, dir) &&
+		   truncate(spool_file(files[0], writer.dirname, 5, ".idx"), 30) == 0;
+	log_file(files[1], writer.dirname);
+	made = made && unlink(files[1]) == 0 && symlink(files[1], files[1]) == 0;
+	sformat(line, sizeof(line), "Failed to open spool file \"%s\"", files[1]);
+
+	check(made && refused_twice(writer.dirname, 7, 0, line),
+		  "a relation log that cannot be opened ends every start of a spool without an index record, and no file changes");
+
 	/* a leftover of cleanup, then the index file and the segment of the last one */
 	struct
 	{
