@@ -1,16 +1,14 @@
-Mutant: a segment with a torn header and indexed transactions is appended to. Must fail: a segment with indexed transactions and a torn header ends every start with an error, and no file changes.
+Mutant: a segment with a torn header and indexed transactions is appended to. Must fail: a segment with indexed transactions and a torn header ends every start with an error, and no file changes; an indexed last segment with a torn header after another segment ends every start with an error, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2026,13 +2026,6 @@
+@@ -2072,11 +2072,6 @@
  	char type = 0;
  	uint64_t endLSN = 0;
  
--	if (!tail->headed)
+-	if (!spool_tail_headed(tail))
 -	{
--		log_error("Spool file \"%s\" has no valid header, and its index file "
--				  "holds transactions", segment->filename);
 -		return false;
 -	}
 -

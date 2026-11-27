@@ -1,0 +1,18 @@
+Mutant: the start reads a segment before a headed last segment without a check of its header. Must fail: a segment with a torn header before a headed last segment without an indexed transaction ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2288,12 +2288,6 @@
+ 			return false;
+ 		}
+ 
+-		/* also before a headed last segment, which needs no tail check here */
+-		if (!spool_tail_headed(&start->before))
+-		{
+-			return false;
+-		}
+-
+ 		/* without the header of last, the writer appends to the one before */
+ 		if (!start->last.headed)
+ 		{

@@ -3740,6 +3740,17 @@ test_start_cut(const char *dir)
 
 	check(made && refused_twice(writer.dirname, 7, 50, line),
 		  "a segment with a torn header before a torn last segment ends every start with an error, and no file changes");
+
+	/* the reader would fail on it later */
+	made = make_rotated(&writer, dir, false) &&
+		   flip_byte(spool_file(first, writer.dirname, 5, ".seg"), 0) &&
+		   put_bytes(log_file(log, writer.dirname), -1, junk, 10);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has no valid header, and its index file holds transactions",
+			first);
+
+	check(made && refused_twice(writer.dirname, 7, 50, line),
+		  "a segment with a torn header before a headed last segment without an indexed transaction ends every start with an error, and no file changes");
 }
 
 

@@ -2038,6 +2038,21 @@ spool_tail_source(const SpoolTail *tail, uint64_t systemId)
 }
 
 
+/* the header of a segment names its source, and the reader starts from it */
+static bool
+spool_tail_headed(const SpoolTail *tail)
+{
+	if (!tail->headed)
+	{
+		log_error("Spool file \"%s\" has no valid header, and its index file "
+				  "holds transactions", tail->segment.filename);
+		return false;
+	}
+
+	return true;
+}
+
+
 /*
  * spool_tail_check checks that the last indexed transaction ends with its
  * COMMIT, at the end LSN of its index record.
@@ -2057,10 +2072,8 @@ spool_tail_check(SpoolTail *tail)
 	char type = 0;
 	uint64_t endLSN = 0;
 
-	if (!tail->headed)
+	if (!spool_tail_headed(tail))
 	{
-		log_error("Spool file \"%s\" has no valid header, and its index file "
-				  "holds transactions", segment->filename);
 		return false;
 	}
 
@@ -2272,6 +2285,12 @@ spool_start_read(SpoolStart *start, const char *dirname,
 			log_error("Spool file \"%s\" holds no valid index record at offset %"
 					  PRIu64 ", and a segment after it exists",
 					  start->before.index, start->before.keep);
+			return false;
+		}
+
+		/* also before a headed last segment, which needs no tail check here */
+		if (!spool_tail_headed(&start->before))
+		{
 			return false;
 		}
 
