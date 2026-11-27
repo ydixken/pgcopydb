@@ -342,6 +342,7 @@ typedef struct CopyDataSpec
 
 	int walWorkers;
 	char walHighTrafficTables[WAL_HIGH_TRAFFIC_TABLES_BUFSIZE];
+	FollowMode followMode;
 
 	/*
 	 * Database name for log messages in per-database workers.  Empty string

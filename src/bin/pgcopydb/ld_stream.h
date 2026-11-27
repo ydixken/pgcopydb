@@ -743,6 +743,7 @@ struct StreamSpecs
 	int coordPort;
 
 	int walWorkers;
+	FollowMode followMode;
 	bool walWorker;             /* this process is one of walWorkers */
 	int walWorkerIndex;         /* which WAL worker, with walWorker */
 	pid_t walSupervisor;        /* a worker quits once this pid is gone */
@@ -784,6 +785,7 @@ bool stream_init_for_mode(StreamSpecs *specs, LogicalStreamMode mode);
 char * LogicalStreamModeToString(LogicalStreamMode mode);
 
 bool stream_check_in_out(StreamSpecs *specs);
+bool stream_uses_raw_spool(StreamSpecs *specs);
 
 /* Lifecycle pipe signals (out-of-band, 8-byte big-endian LSN) */
 bool stream_signal_upstream_done(StreamSpecs *specs, uint64_t done_lsn,
@@ -983,6 +985,7 @@ bool stream_replay_reached_endpos(StreamSpecs *specs,
 
 /* follow.c */
 bool follow_export_snapshot(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
+bool copydb_check_cdc_layout(StreamSpecs *specs);
 bool follow_setup_databases(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
 bool follow_reset_sequences(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
 bool follow_restore_fkeys(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs,

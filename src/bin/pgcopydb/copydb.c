@@ -532,6 +532,7 @@ copydb_init_specs(CopyDataSpec *specs,
 		.deferIndexes = options->deferIndexes,
 		.useCopyBinary = options->useCopyBinary,
 		.walWorkers = options->walWorkers,
+		.followMode = options->followMode,
 
 		.restart = options->restart,
 		.resume = options->resume,

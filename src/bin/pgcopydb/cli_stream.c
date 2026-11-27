@@ -110,7 +110,8 @@ static CommandLine stream_prefetch_command =
 		"  --not-consistent Allow taking a new snapshot on the source database\n"
 		"  --slot-name           Stream changes recorded by this slot\n"
 		"  --endpos              LSN position where to stop receiving changes\n"
-		"  --max-replaydb-size   Rotate CDC files at this size (default 1GB)",
+		"  --max-replaydb-size   Rotate CDC files at this size (default 1GB)\n"
+		"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n",
 		cli_stream_getopts,
 		cli_stream_prefetch);
 
@@ -128,7 +129,8 @@ static CommandLine stream_catchup_command =
 		"  --slot-name           Stream changes recorded by this slot\n"
 		"  --endpos              LSN position where to stop receiving changes\n"
 		"  --max-replaydb-size   Rotate CDC files at this size (default 1GB)\n"
-		"  --origin              Name of the Postgres replication origin\n",
+		"  --origin              Name of the Postgres replication origin\n"
+		"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n",
 		cli_stream_getopts,
 		cli_stream_catchup);
 
@@ -146,7 +148,8 @@ static CommandLine stream_replay_command =
 		"  --slot-name           Stream changes recorded by this slot\n"
 		"  --endpos              LSN position where to stop receiving changes\n"
 		"  --max-replaydb-size   Rotate CDC files at this size (default 1GB)\n"
-		"  --origin              Name of the Postgres replication origin\n",
+		"  --origin              Name of the Postgres replication origin\n"
+		"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n",
 		cli_stream_getopts,
 		cli_stream_replay);
 
@@ -163,7 +166,8 @@ static CommandLine stream_receive_command =
 		"  --not-consistent      Allow taking a new snapshot on the source database\n"
 		"  --slot-name           Stream changes recorded by this slot\n"
 		"  --endpos              LSN position where to stop receiving changes\n"
-		"  --max-replaydb-size   Rotate CDC files at this size (default 1GB)",
+		"  --max-replaydb-size   Rotate CDC files at this size (default 1GB)\n"
+		"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n",
 		cli_stream_getopts,
 		cli_stream_receive);
 
@@ -180,7 +184,8 @@ static CommandLine stream_apply_command =
 		"  --restart        Allow restarting when temp files exist already\n"
 		"  --resume         Allow resuming operations after a failure\n"
 		"  --not-consistent Allow taking a new snapshot on the source database\n"
-		"  --origin         Name of the Postgres replication origin\n",
+		"  --origin         Name of the Postgres replication origin\n"
+		"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n",
 		cli_stream_getopts,
 		cli_stream_apply);
 
@@ -229,6 +234,7 @@ cli_stream_getopts(int argc, char **argv)
 		{ "host", required_argument, NULL, 1001 },
 		{ "port", required_argument, NULL, 1002 },
 		{ "dry-run", no_argument, NULL, 1005 },
+		{ "follow-mode", required_argument, NULL, 1009 },
 		{ "restart", no_argument, NULL, 'r' },
 		{ "resume", no_argument, NULL, 'R' },
 		{ "not-consistent", no_argument, NULL, 'C' },
@@ -369,6 +375,17 @@ cli_stream_getopts(int argc, char **argv)
 			{
 				options.replayNoOpUpdates = true;
 				log_trace("--replay-no-op-updates");
+				break;
+			}
+
+			case 1009:      /* --follow-mode */
+			{
+				if (!cli_parse_follow_mode(optarg, &(options.followMode)))
+				{
+					/* errors have already been logged */
+					exit(EXIT_CODE_BAD_ARGS);
+				}
+				log_trace("--follow-mode %s", optarg);
 				break;
 			}
 
@@ -917,6 +934,12 @@ cli_stream_catchup(int argc, char **argv)
 {
 	CopyDataSpec copySpecs = { 0 };
 
+	if (!cli_validate_follow_mode(&streamDBoptions))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_ARGS);
+	}
+
 	if (argc > 0)
 	{
 		commandline_help(stderr);
@@ -984,6 +1007,13 @@ cli_stream_catchup(int argc, char **argv)
 	specs.maxReplayDBSize = streamDBoptions.maxReplayDBSize > 0
 							? streamDBoptions.maxReplayDBSize
 							: (1ULL << 30);
+	specs.followMode = copySpecs.followMode;
+
+	if (!copydb_check_cdc_layout(&specs))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
 
 	/*
 	 * First, we need to know enough about the source database system to be
@@ -1008,6 +1038,12 @@ static void
 cli_stream_replay(int argc, char **argv)
 {
 	CopyDataSpec copySpecs = { 0 };
+
+	if (!cli_validate_follow_mode(&streamDBoptions))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_ARGS);
+	}
 
 	if (argc > 0)
 	{
@@ -1080,6 +1116,13 @@ cli_stream_replay(int argc, char **argv)
 	/* optional follow coordinator TCP endpoint (--host/--port or env) */
 	strlcpy(specs.coordHost, streamDBoptions.host, sizeof(specs.coordHost));
 	specs.coordPort = streamDBoptions.port;
+	specs.followMode = copySpecs.followMode;
+
+	if (!copydb_check_cdc_layout(&specs))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
 
 	/*
 	 * Before starting the receive, transform, and apply sub-processes, we need
@@ -1322,6 +1365,12 @@ cli_stream_transform(int argc, char **argv)
 static void
 cli_stream_apply(int argc, char **argv)
 {
+	if (!cli_validate_follow_mode(&streamDBoptions))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_ARGS);
+	}
+
 	/*
 	 * Legacy pipe mode: `pgcopydb stream apply -`
 	 *
@@ -1331,6 +1380,14 @@ cli_stream_apply(int argc, char **argv)
 	 */
 	if (argc == 1 && streq(argv[0], "-"))
 	{
+		/* performance mode has no pipe protocol to fall back to */
+		if (streamDBoptions.followMode == FOLLOW_MODE_PERFORMANCE)
+		{
+			log_fatal("Option --follow-mode performance is not compatible "
+					  "with stream apply -");
+			exit(EXIT_CODE_BAD_ARGS);
+		}
+
 		CopyDataSpec copySpecs = { 0 };
 
 		(void) find_pg_commands(&(copySpecs.pgPaths));
@@ -1476,6 +1533,7 @@ cli_stream_apply(int argc, char **argv)
 	specs.maxReplayDBSize = streamDBoptions.maxReplayDBSize > 0
 							? streamDBoptions.maxReplayDBSize
 							: (1ULL << 30);
+	specs.followMode = copySpecs.followMode;
 
 	if (!catalog_open(specs.sourceDB))
 	{
@@ -1604,6 +1662,12 @@ cli_stream_apply(int argc, char **argv)
 	}
 	else
 	{
+		if (!copydb_check_cdc_layout(&specs))
+		{
+			/* errors have already been logged */
+			exit(EXIT_CODE_BAD_STATE);
+		}
+
 		StreamApplyContext context = { 0 };
 
 		if (!stream_apply_setup(&specs, &context))
@@ -1632,6 +1696,12 @@ static void
 stream_start_in_mode(LogicalStreamMode mode)
 {
 	CopyDataSpec copySpecs = { 0 };
+
+	if (!cli_validate_follow_mode(&streamDBoptions))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_ARGS);
+	}
 
 	(void) find_pg_commands(&(copySpecs.pgPaths));
 
@@ -1694,6 +1764,13 @@ stream_start_in_mode(LogicalStreamMode mode)
 	specs.maxReplayDBSize = streamDBoptions.maxReplayDBSize > 0
 							? streamDBoptions.maxReplayDBSize
 							: (1ULL << 30);
+	specs.followMode = copySpecs.followMode;
+
+	if (!copydb_check_cdc_layout(&specs))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
 
 	switch (specs.mode)
 	{

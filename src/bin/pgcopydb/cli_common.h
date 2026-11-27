@@ -27,6 +27,13 @@ typedef struct SplitTableLargerThan
 	char bytesPretty[NAMEDATALEN];
 } SplitTableLargerThan;
 
+/* the zero value is sqlite, so a zero-initialized spec follows on SQLite */
+typedef enum
+{
+	FOLLOW_MODE_SQLITE = 0,
+	FOLLOW_MODE_PERFORMANCE
+} FollowMode;
+
 
 typedef struct SentinelOptions
 {
@@ -91,6 +98,7 @@ typedef struct CopyDBOptions
 
 	int walWorkers;
 	char walHighTrafficTables[WAL_HIGH_TRAFFIC_TABLES_BUFSIZE];
+	FollowMode followMode;
 
 	/* pgcopydb stream sentinel get --flush-lsn and friends */
 	SentinelOptions sentinelOptions;
@@ -139,6 +147,8 @@ void cli_read_coordinator_env(CopyDBOptions *options);
 bool cli_copydb_is_consistent(CopyDBOptions *options);
 bool cli_read_previous_options(CopyDBOptions *options, CopyFilePaths *cfPaths);
 bool cli_validate_wal_workers(CopyDBOptions *options);
+bool cli_parse_follow_mode(const char *value, FollowMode *mode);
+bool cli_validate_follow_mode(CopyDBOptions *options);
 
 bool cli_read_one_line(const char *filename,
 					   const char *name,

@@ -9,4 +9,5 @@
      --plugin                      Output plugin to use (pgoutput, test_decoding, wal2json)
      --wal2json-numeric-as-string  Print numeric data type as string when using wal2json output plugin
      --slot-name                   Use this Postgres replication slot name
+     --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)
    

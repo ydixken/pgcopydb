@@ -391,6 +391,18 @@ LogicalStreamModeToString(LogicalStreamMode mode)
 
 
 /*
+ * stream_uses_raw_spool routes a run to the raw spool. Its final condition is
+ * plugin pgoutput, --follow-mode performance and not a WAL worker process.
+ */
+bool
+stream_uses_raw_spool(StreamSpecs *specs)
+{
+	/* shortcut: false until receive and apply on the raw spool are in */
+	return false;
+}
+
+
+/*
  * stream_check_in_out checks that the stdIn and stdOut file descriptors are
  * still valid: EBADF could happen when a PIPE is Broken for lack of a
  * reader/writer process.
