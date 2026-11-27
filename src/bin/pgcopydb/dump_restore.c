@@ -3,6 +3,7 @@
  *     Implementation of a CLI to copy a database between two Postgres instances
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
@@ -34,9 +35,21 @@ static bool copydb_write_restore_list_hook(void *ctx,
 										   ArchiveContentItem *item);
 
 static bool copydb_restore_replica_identity(CopyDataSpec *specs);
+static bool copydb_restore_post_data(CopyDataSpec *specs);
+static bool copydb_write_post_data_pass_lists(CopyDataSpec *specs,
+											  int *attachCount,
+											  int *fkCount);
+static bool copydb_write_post_data_pass_hook(void *ctx,
+											 ArchiveContentItem *item);
 
 static bool copydb_write_own_publications(CopyDataSpec *specs,
 										  const char *snapshot);
+
+static int string_ptr_cmp(const void *a, const void *b);
+
+static bool copydb_write_section_restore_list(CopyDataSpec *specs,
+											  PostgresDumpSection section,
+											  bool skipExisting);
 
 
 /*
@@ -606,7 +619,8 @@ copydb_target_finalize_schema(CopyDataSpec *specs)
 		return false;
 	}
 
-	if (!copydb_write_restore_list(specs, PG_DUMP_SECTION_POST_DATA))
+	/* a previous run may have restored part of post-data, skip that part */
+	if (!copydb_write_section_restore_list(specs, PG_DUMP_SECTION_POST_DATA, true))
 	{
 		log_error("Failed to prepare the pg_restore --use-list catalogs, "
 				  "see above for details");
@@ -614,12 +628,8 @@ copydb_target_finalize_schema(CopyDataSpec *specs)
 	}
 
 	specs->restoreOptions.section = PG_RESTORE_SECTION_POST_DATA;
-	if (!pg_restore_db(&(specs->pgPaths),
-					   &(specs->connStrings),
-					   &(specs->filters),
-					   specs->dumpPaths.dumpFilename,
-					   specs->dumpPaths.postListFilename,
-					   specs->restoreOptions))
+
+	if (!copydb_restore_post_data(specs))
 	{
 		/* errors have already been logged */
 		return false;
@@ -649,6 +659,233 @@ copydb_target_finalize_schema(CopyDataSpec *specs)
 	}
 
 	return true;
+}
+
+
+/*
+ * copydb_restore_post_data runs pg_restore for the post-data section.
+ *
+ * With --restore-jobs > 1 and partitioned indexes in the archive, a single
+ * parallel pg_restore can deadlock. When the last INDEX ATTACH of a
+ * partitioned index completes it, Postgres validates the parent index and
+ * then its table, taking AccessExclusiveLock on both. Meanwhile a FK
+ * CONSTRAINT on that partitioned table, or referencing it, holds a lock on
+ * the table and waits for the parent index. pg_dump only makes such a FK
+ * depend on the ATTACH entries of the index it uses, and pg_restore only
+ * checks TABLE dependencies for lock conflicts, so both run concurrently.
+ *
+ * In that case we restore post-data in three passes:
+ *
+ *   1. everything except INDEX ATTACH, FK CONSTRAINT and COMMENT, parallel;
+ *   2. INDEX ATTACH entries, one at a time, each in its own transaction so
+ *      that locks do not pile up on schemas with many partitions;
+ *   3. FK CONSTRAINT and COMMENT entries, parallel.
+ *
+ * COMMENT entries go last because a comment may be on a FK constraint, and
+ * pg_restore ignores dependencies on entries that are not in its list.
+ */
+static bool
+copydb_restore_post_data(CopyDataSpec *specs)
+{
+	DumpPaths *dumpPaths = &(specs->dumpPaths);
+	int attachCount = 0;
+	int fkCount = 0;
+
+	if (specs->restoreOptions.jobs > 1)
+	{
+		if (!copydb_write_post_data_pass_lists(specs, &attachCount, &fkCount))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+	}
+
+	if (attachCount == 0)
+	{
+		return pg_restore_db(&(specs->pgPaths),
+							 &(specs->connStrings),
+							 &(specs->filters),
+							 dumpPaths->dumpFilename,
+							 dumpPaths->postListFilename,
+							 specs->restoreOptions);
+	}
+
+	log_info("Restoring post-data in 3 passes to avoid lock conflicts "
+			 "on partitioned indexes: %d INDEX ATTACH entries serially, "
+			 "then %d FK CONSTRAINT and COMMENT entries",
+			 attachCount,
+			 fkCount);
+
+	RestoreOptions serialOptions = specs->restoreOptions;
+	serialOptions.jobs = 1;
+	serialOptions.noSingleTransaction = true;
+
+	if (!pg_restore_db(&(specs->pgPaths),
+					   &(specs->connStrings),
+					   &(specs->filters),
+					   dumpPaths->dumpFilename,
+					   dumpPaths->postMainListFilename,
+					   specs->restoreOptions))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!pg_restore_db(&(specs->pgPaths),
+					   &(specs->connStrings),
+					   &(specs->filters),
+					   dumpPaths->dumpFilename,
+					   dumpPaths->postAttachListFilename,
+					   serialOptions))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (fkCount > 0 &&
+		!pg_restore_db(&(specs->pgPaths),
+					   &(specs->connStrings),
+					   &(specs->filters),
+					   dumpPaths->dumpFilename,
+					   dumpPaths->postFkListFilename,
+					   specs->restoreOptions))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	return true;
+}
+
+
+typedef struct PostDataPassContext
+{
+	FILE *mainStream;
+	FILE *attachStream;
+	FILE *fkStream;
+	int attachCount;
+	int fkCount;
+} PostDataPassContext;
+
+
+/*
+ * copydb_write_post_data_pass_lists splits the active entries of the
+ * post-data --use-list file into one list file per pass. The pass files are
+ * truncated, so that a resumed run starts from the current list.
+ */
+static bool
+copydb_write_post_data_pass_lists(CopyDataSpec *specs,
+								  int *attachCount,
+								  int *fkCount)
+{
+	DumpPaths *dumpPaths = &(specs->dumpPaths);
+	PostDataPassContext context = { 0 };
+	bool success = true;
+
+	context.mainStream =
+		fopen_with_umask(dumpPaths->postMainListFilename,
+						 "wb", FOPEN_FLAGS_W, 0644);
+	context.attachStream =
+		fopen_with_umask(dumpPaths->postAttachListFilename,
+						 "wb", FOPEN_FLAGS_W, 0644);
+	context.fkStream =
+		fopen_with_umask(dumpPaths->postFkListFilename,
+						 "wb", FOPEN_FLAGS_W, 0644);
+
+	if (context.mainStream == NULL ||
+		context.attachStream == NULL ||
+		context.fkStream == NULL)
+	{
+		/* errors have already been logged */
+		success = false;
+	}
+
+	if (success &&
+		!archive_iter_toc(dumpPaths->postListFilename,
+						  &context,
+						  copydb_write_post_data_pass_hook))
+	{
+		log_error("Failed to split the post-data pg_restore list file "
+				  "\"%s\" in passes, see above for details",
+				  dumpPaths->postListFilename);
+		success = false;
+	}
+
+	FILE *streams[] = {
+		context.mainStream, context.attachStream, context.fkStream
+	};
+
+	for (int i = 0; i < 3; i++)
+	{
+		if (streams[i] != NULL && fclose(streams[i]) == EOF)
+		{
+			log_error("Failed to write a post-data pg_restore list file: %m");
+			success = false;
+		}
+	}
+
+	*attachCount = context.attachCount;
+	*fkCount = context.fkCount;
+
+	return success;
+}
+
+
+/*
+ * copydb_write_post_data_pass_hook is an iterator callback function. Lines
+ * commented out in the --use-list file are not passed to the callback.
+ */
+static bool
+copydb_write_post_data_pass_hook(void *ctx, ArchiveContentItem *item)
+{
+	PostDataPassContext *context = (PostDataPassContext *) ctx;
+	FILE *stream = context->mainStream;
+
+	switch (item->desc)
+	{
+		case ARCHIVE_TAG_INDEX_ATTACH:
+		{
+			stream = context->attachStream;
+			++context->attachCount;
+			break;
+		}
+
+		case ARCHIVE_TAG_FK_CONSTRAINT:
+		case ARCHIVE_TAG_COMMENT:
+		{
+			stream = context->fkStream;
+			++context->fkCount;
+			break;
+		}
+
+		default:
+		{
+			break;
+		}
+	}
+
+	/* pg_restore --use-list only reads the dumpId from each line */
+	PQExpBuffer buf = createPQExpBuffer();
+
+	printfPQExpBuffer(buf, "%d; %u %u %s %s\n",
+					  item->dumpId,
+					  item->catalogOid,
+					  item->objectOid,
+					  item->description,
+					  item->restoreListName != NULL ? item->restoreListName : "");
+
+	if (PQExpBufferBroken(buf))
+	{
+		log_error("Failed to create pg_restore list file: out of memory");
+		destroyPQExpBuffer(buf);
+		return false;
+	}
+
+	bool success = write_to_stream(stream, buf->data, buf->len);
+
+	destroyPQExpBuffer(buf);
+
+	return success;
 }
 
 
@@ -714,7 +951,135 @@ typedef struct RestoreListContext
 	bool prevIsFK;      /* the previous entry is an FK CONSTRAINT */
 	CatalogObject *ownPublications; /* this run's follow made them on the source */
 	int ownPublicationCount;
+	char *existingBuffer;   /* post-data objects found on the target */
+	char **existing;        /* sorted lines of existingBuffer */
+	int existingCount;
+	int existingSkipped;
 } RestoreListContext;
+
+
+/*
+ * copydb_read_existing_post_data reads the post-data objects that already
+ * exist on the target, which a previous run may have restored only in part.
+ */
+static bool
+copydb_read_existing_post_data(CopyDataSpec *specs, RestoreListContext *context)
+{
+	PGSQL dst = { 0 };
+
+	bool success =
+		pgsql_init(&dst, specs->connStrings.target_pguri, PGSQL_CONN_TARGET) &&
+		pgsql_list_post_data_objects(&dst, &(context->existingBuffer));
+
+	(void) pgsql_finish(&dst);
+
+	if (!success || context->existingBuffer == NULL)
+	{
+		return success;
+	}
+
+	LinesBuffer lbuf = { 0 };
+
+	if (!splitLines(&lbuf, context->existingBuffer))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	qsort(lbuf.lines, lbuf.count, sizeof(char *), /* IGNORE-BANNED */
+		  string_ptr_cmp);
+
+	context->existing = lbuf.lines;
+	context->existingCount = lbuf.count;
+
+	return true;
+}
+
+
+static int
+string_ptr_cmp(const void *a, const void *b)
+{
+	return strcmp(*(char *const *) a, *(char *const *) b);
+}
+
+
+static bool
+copydb_post_data_key_exists(RestoreListContext *context, const char *key)
+{
+	return bsearch(&key, /* IGNORE-BANNED */
+				   context->existing,
+				   context->existingCount,
+				   sizeof(char *),
+				   string_ptr_cmp) != NULL;
+}
+
+
+/*
+ * copydb_post_data_item_exists returns true when the archive item names an
+ * object found on the target. The --list line ends with the owner, which
+ * INDEX ATTACH entries do not have, so we try with and without the last word.
+ */
+static bool
+copydb_post_data_item_exists(RestoreListContext *context,
+							 ArchiveContentItem *item)
+{
+	switch (item->desc)
+	{
+		case ARCHIVE_TAG_INDEX:
+		case ARCHIVE_TAG_INDEX_ATTACH:
+		case ARCHIVE_TAG_CONSTRAINT:
+		case ARCHIVE_TAG_CHECK_CONSTRAINT:
+		case ARCHIVE_TAG_FK_CONSTRAINT:
+		case ARCHIVE_TAG_TRIGGER:
+		case ARCHIVE_TAG_POLICY:
+		case ARCHIVE_TAG_RULE:
+		case ARCHIVE_TAG_STATISTICS:
+		{
+			break;
+		}
+
+		default:
+		{
+			return false;
+		}
+	}
+
+	if (context->existingCount == 0 || item->restoreListName == NULL)
+	{
+		return false;
+	}
+
+	char key[BUFSIZE] = { 0 };
+
+	sformat(key, sizeof(key), "%s %s", item->description, item->restoreListName);
+
+	/* trim trailing spaces, then the owner */
+	for (int attempt = 0; attempt < 2; attempt++)
+	{
+		size_t len = strlen(key);
+
+		while (len > 0 && isspace((unsigned char) key[len - 1]))
+		{
+			key[--len] = '\0';
+		}
+
+		if (copydb_post_data_key_exists(context, key))
+		{
+			return true;
+		}
+
+		char *sep = strrchr(key, ' ');
+
+		if (sep == NULL)
+		{
+			return false;
+		}
+
+		*sep = '\0';
+	}
+
+	return false;
+}
 
 
 /*
@@ -890,6 +1255,20 @@ catalog_object_cmp(const void *a, const void *b)
 bool
 copydb_write_restore_list(CopyDataSpec *specs, PostgresDumpSection section)
 {
+	return copydb_write_section_restore_list(specs, section, false);
+}
+
+
+/*
+ * copydb_write_section_restore_list implements copydb_write_restore_list.
+ * With skipExisting, post-data objects that exist on the target are commented
+ * out, so that a run resumed after a partial post-data restore goes on.
+ */
+static bool
+copydb_write_section_restore_list(CopyDataSpec *specs,
+								  PostgresDumpSection section,
+								  bool skipExisting)
+{
 	char *dumpFilename = NULL;
 	char *listFilename = NULL;
 	char *listOutFilename = NULL;
@@ -945,8 +1324,8 @@ copydb_write_restore_list(CopyDataSpec *specs, PostgresDumpSection section)
 		return false;
 	}
 
-	/* edit our post.list file now */
-	FILE *out = fopen_with_umask(listFilename, "ab", FOPEN_FLAGS_A, 0644);
+	/* a resumed run writes the list again, rather than after the old one */
+	FILE *out = fopen_with_umask(listFilename, "wb", FOPEN_FLAGS_W, 0644);
 
 	if (out == NULL)
 	{
@@ -960,27 +1339,43 @@ copydb_write_restore_list(CopyDataSpec *specs, PostgresDumpSection section)
 	};
 
 	/* pg_dump puts publications in post-data */
-	if (section == PG_DUMP_SECTION_POST_DATA &&
-		!copydb_read_own_publications(specs, &context))
+	bool success =
+		section != PG_DUMP_SECTION_POST_DATA ||
+		copydb_read_own_publications(specs, &context);
+
+	if (!success)
 	{
 		log_error("Failed to read the publications that pgcopydb created "
 				  "on the source");
-		free(context.ownPublications);
-		(void) fclose(out);
-		return false;
 	}
 
-	bool success = archive_iter_toc(listOutFilename,
-									&context,
-									copydb_write_restore_list_hook);
+	if (success && skipExisting && section == PG_DUMP_SECTION_POST_DATA)
+	{
+		success = copydb_read_existing_post_data(specs, &context);
+	}
+
+	success = success &&
+			  archive_iter_toc(listOutFilename,
+							   &context,
+							   copydb_write_restore_list_hook);
 
 	free(context.ownPublications);
+	free(context.existing);
+	free(context.existingBuffer);
 
 	if (!success)
 	{
 		log_error("Failed to prepare the pg_restore list file, "
 				  "see above for details");
+		(void) fclose(out);
 		return false;
+	}
+
+	if (context.existingSkipped > 0)
+	{
+		log_info("Skipping %d post-data objects that already exist on the "
+				 "target, restored by a previous run",
+				 context.existingSkipped);
 	}
 
 	if (fclose(out) == EOF)
@@ -1014,7 +1409,7 @@ copydb_write_schemas_restore_list(CopyDataSpec *specs)
 		return false;
 	}
 
-	FILE *out = fopen_with_umask(listFilename, "ab", FOPEN_FLAGS_A, 0644);
+	FILE *out = fopen_with_umask(listFilename, "wb", FOPEN_FLAGS_W, 0644);
 
 	if (out == NULL)
 	{
@@ -1332,6 +1727,17 @@ copydb_write_restore_list_hook(void *ctx, ArchiveContentItem *item)
 				  item->dumpId,
 				  item->description,
 				  item->objectOid,
+				  item->restoreListName);
+	}
+
+	if (!skip && copydb_post_data_item_exists(context, item))
+	{
+		skip = true;
+		++context->existingSkipped;
+
+		log_debug("Skipping dumpId %d that exists on the target: %s %s",
+				  item->dumpId,
+				  item->description,
 				  item->restoreListName);
 	}
 

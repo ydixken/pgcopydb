@@ -6228,6 +6228,73 @@ pgsql_list_publication_objects(PGSQL *pgsql, const char *name, bool walWorkers,
 
 
 /*
+ * pgsql_list_post_data_objects sets *objects to the post-data objects of the
+ * database, one per line in the "DESC namespace tag" form of pg_restore
+ * --list, or to NULL when there are none. The caller frees *objects.
+ *
+ * An invalid index is left out, so that pg_restore fails on it. A
+ * partitioned index stays invalid until all its partitions are attached.
+ */
+bool
+pgsql_list_post_data_objects(PGSQL *pgsql, char **objects)
+{
+	char *sql =
+		"with rel as ( "
+		"  select c.oid, c.relname, n.nspname "
+		"    from pg_class c "
+		"         join pg_namespace n on n.oid = c.relnamespace "
+		"   where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' "
+		") "
+		"select string_agg(k, E'\\n') from ( "
+		"  select 'INDEX ' || r.nspname || ' ' || r.relname as k "
+		"    from rel r join pg_index x on x.indexrelid = r.oid "
+		"         join pg_class c on c.oid = r.oid "
+		"   where x.indisvalid or c.relkind = 'I' "
+		"   union all "
+		"  select 'INDEX ATTACH ' || r.nspname || ' ' || r.relname "
+		"    from rel r join pg_index x on x.indexrelid = r.oid "
+		"         join pg_inherits i on i.inhrelid = r.oid "
+		"   union all "
+		"  select case con.contype when 'f' then 'FK CONSTRAINT ' "
+		"                          when 'c' then 'CHECK CONSTRAINT ' "
+		"                          else 'CONSTRAINT ' end "
+		"         || r.nspname || ' ' || r.relname || ' ' || con.conname "
+		"    from rel r join pg_constraint con on con.conrelid = r.oid "
+		"   union all "
+		"  select 'TRIGGER ' || r.nspname || ' ' || r.relname || ' ' || t.tgname "
+		"    from rel r join pg_trigger t on t.tgrelid = r.oid "
+		"   where not t.tgisinternal "
+		"   union all "
+		"  select 'POLICY ' || r.nspname || ' ' || r.relname || ' ' || p.polname "
+		"    from rel r join pg_policy p on p.polrelid = r.oid "
+		"   union all "
+		"  select 'RULE ' || r.nspname || ' ' || r.relname || ' ' || w.rulename "
+		"    from rel r join pg_rewrite w on w.ev_class = r.oid "
+		"   where w.rulename <> '_RETURN' "
+		"   union all "
+		"  select 'STATISTICS ' || n.nspname || ' ' || s.stxname "
+		"    from pg_statistic_ext s "
+		"         join pg_namespace n on n.oid = s.stxnamespace "
+		"   where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' "
+		") as objects";
+
+	SingleValueResultContext context = { { 0 }, PGSQL_RESULT_STRING, false };
+
+	if (!pgsql_execute_with_params(pgsql, sql, 0, NULL, NULL,
+								   &context, &parseSingleValueResult) ||
+		!context.parsedOk)
+	{
+		log_error("Failed to list the post-data objects of the target database");
+		return false;
+	}
+
+	*objects = context.isNull ? NULL : context.strVal;
+
+	return true;
+}
+
+
+/*
  * pgsql_table_exists checks that a table with the given name exists on the
  * Postgres server.
  */

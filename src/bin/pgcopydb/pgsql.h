@@ -618,6 +618,8 @@ bool pgsql_list_publication_objects(PGSQL *pgsql,
 									CatalogObject **objects,
 									int *count);
 
+bool pgsql_list_post_data_objects(PGSQL *pgsql, char **objects);
+
 bool pgsql_role_exists(PGSQL *pgsql, const char *roleName, bool *exists);
 
 bool pgsql_configuration_exists(PGSQL *pgsql, const char *setconfig, bool *exists);

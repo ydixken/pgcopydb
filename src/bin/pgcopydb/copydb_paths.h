@@ -69,6 +69,11 @@ typedef struct DumpPaths
 	char fkListFilename[MAXPGPATH];  /* foreign keys only, after endpos */
 	char fkDoneFilename[MAXPGPATH];  /* foreign keys have been created */
 	char ownPubsFilename[MAXPGPATH]; /* publications follow made, at the snapshot */
+
+	/* post-data split in passes when partitioned indexes are attached */
+	char postMainListFilename[MAXPGPATH];   /* everything else, --jobs */
+	char postAttachListFilename[MAXPGPATH]; /* INDEX ATTACH, serial */
+	char postFkListFilename[MAXPGPATH];     /* FK CONSTRAINT, COMMENT */
 } DumpPaths;
 
 

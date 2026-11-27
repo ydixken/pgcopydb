@@ -125,6 +125,7 @@ jobs:
           - defer-indexes
           - defer-indexes-queue
           - defer-indexes-all-databases
+          - post-data-partitioned
           - cdc-low-level
           - cdc-test-decoding
           - cdc-endpos-mid-txn
