@@ -157,6 +157,9 @@ cdc-endpos-before-txn: build
 cdc-origin-source: build
 	$(MAKE) -C $@
 
+cdc-parallel-isolation: build
+	$(MAKE) -C $@
+
 # builds its own image from the build stage of the top-level Dockerfile
 catalog-stmt-cache:
 	$(MAKE) -C $@
@@ -247,6 +250,7 @@ clean-images:
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
 .PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format
+.PHONY: cdc-parallel-isolation
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases
