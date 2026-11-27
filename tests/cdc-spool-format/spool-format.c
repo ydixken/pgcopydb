@@ -4414,6 +4414,19 @@ test_reader(const char *dir)
 	spool_reader_close(&reader);
 	kill_writer(&writer);
 
+	/* the records at or below the end LSN of the open move the reader past them too */
+	made = new_writer(&writer, dir, &spoolHeader, 50) &&
+		   feed(&writer, firstTxn, lengthof(firstTxn)) &&
+		   feed(&writer, secondTxn, lengthof(secondTxn)) && write_index(&writer) &&
+		   spool_reader_open(&reader, writer.dirname, 0xD230);
+	waiting = made && spool_reader_next(&reader, &found) && !found;
+	made = made && spool_writer_rotate(&writer) &&
+		   feed(&writer, thirdTxn, lengthof(thirdTxn)) && write_index(&writer);
+	check(waiting && made && next_holds(&reader, &context, thirdTxn, lengthof(thirdTxn)),
+		  "a reader opened at the end LSN of the last record reads the next segment once a rotation creates it");
+	spool_reader_close(&reader);
+	kill_writer(&writer);
+
 	/* the index file of the next segment is a link to itself, seen at the end or a torn record */
 	bool stopped = true;
 
