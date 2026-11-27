@@ -2007,7 +2007,10 @@ spool_tail_source(const SpoolTail *tail, uint64_t systemId)
 }
 
 
-/* spool_tail_check checks that the last indexed transaction ends with its COMMIT */
+/*
+ * spool_tail_check checks that the last indexed transaction ends with its
+ * COMMIT, at the end LSN of its index record.
+ */
 static bool
 spool_tail_check(SpoolTail *tail)
 {
@@ -2021,6 +2024,7 @@ spool_tail_check(SpoolTail *tail)
 	bool checked = true;
 	bool done = false;
 	char type = 0;
+	uint64_t endLSN = 0;
 
 	if (!tail->headed)
 	{
@@ -2041,7 +2045,10 @@ spool_tail_check(SpoolTail *tail)
 
 		if (checked && !done)
 		{
+			int pos = SPOOL_XLOGDATA_HEADER_SIZE + 10;
+
 			type = message[SPOOL_XLOGDATA_HEADER_SIZE];
+			endLSN = type == 'C' ? pgout_u64(message, &pos, (int) length) : 0;
 		}
 	}
 
@@ -2052,6 +2059,16 @@ spool_tail_check(SpoolTail *tail)
 		log_error("Spool file \"%s\" holds no COMMIT at the end of its last "
 				  "indexed transaction, at offset %" PRIu64,
 				  segment->filename, tail->last.endOffset);
+		return false;
+	}
+
+	/* a valid record of another transaction would report that one as durable */
+	if (checked && endLSN != tail->last.endLSN)
+	{
+		log_error("Spool file \"%s\" ends its last indexed transaction with a "
+				  "COMMIT of end LSN %X/%X, and its index record holds %X/%X",
+				  segment->filename, LSN_FORMAT_ARGS(endLSN),
+				  LSN_FORMAT_ARGS(tail->last.endLSN));
 		return false;
 	}
 

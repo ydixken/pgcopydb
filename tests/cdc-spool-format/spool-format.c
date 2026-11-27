@@ -3112,6 +3112,29 @@ test_start_cut(const char *dir)
 	check(made && refused_twice(writer.dirname, 7, 0, line),
 		  "a last indexed transaction with a damaged frame ends every start with an error, and no file changes");
 
+	/* a valid last index record whose end LSN is not the one of its COMMIT */
+	SpoolIndexRecord shifted = { 0 };
+	char shiftedBytes[SPOOL_INDEX_RECORD_SIZE];
+
+	made = make_spool(&writer, dir);
+
+	char *indexBytes = made ? slurp(spool_file(idx, writer.dirname, 5, ".idx"), &size) :
+					   NULL;
+
+	made = indexBytes != NULL && size == 2 * SPOOL_INDEX_RECORD_SIZE &&
+		   spool_index_decode(indexBytes + SPOOL_INDEX_RECORD_SIZE,
+							  SPOOL_INDEX_RECORD_SIZE, &shifted);
+	shifted.endLSN = 0xD240;
+	spool_index_encode(&shifted, shiftedBytes);
+	made = made && put_bytes(idx, SPOOL_INDEX_RECORD_SIZE, shiftedBytes,
+							 sizeof(shiftedBytes));
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" ends its last indexed transaction with a COMMIT of end LSN 0/D230, and its index record holds 0/D240",
+			spool_file(seg, writer.dirname, 5, ".seg"));
+
+	check(made && refused_twice(writer.dirname, 7, 0, line),
+		  "a last index record whose end LSN is not the one of its COMMIT ends every start with an error, and no file changes");
+
 	/* cleanup unlinked the index file of a closed segment, and was killed */
 	made = make_rotated(&writer, dir, true) &&
 		   unlink(spool_file(idx, writer.dirname, 5, ".idx")) == 0;
