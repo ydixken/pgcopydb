@@ -2959,7 +2959,8 @@ test_writer_open(const char *dir)
 
 	sformat(name, sizeof(name), "%s/fresh", dir);
 
-	bool created = mkdir(name, 0700) == 0 && spool_writer_open(&opened, name, 7, 2, 0, 0, storedW);
+	bool created = mkdir(name, 0700) == 0 && spool_writer_open(&opened, name, 7, 2, 0, 0,
+															   storedW);
 	char *bytes = created ?
 				  slurp(spool_file(path, name, SPOOL_FIRST_SEQ, ".seg"), &size) : NULL;
 
@@ -2973,7 +2974,8 @@ test_writer_open(const char *dir)
 
 	bool made = make_spool(&writer, dir);
 	long mark = log_mark();
-	bool reopened = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0, storedW);
+	bool reopened = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0,
+											  storedW);
 	char *text = logged_since(mark);
 
 	check(reopened && opened.nextSeq == 7 && opened.lastFinalLSN == 0xD200 &&
@@ -3003,7 +3005,8 @@ test_writer_open(const char *dir)
 		   feed(&writer, firstTxn, lengthof(firstTxn)) && spool_writer_flush(&writer);
 	kill_writer(&writer);
 
-	bool rotated = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 50, storedW) &&
+	bool rotated = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 50,
+											 storedW) &&
 				   spool_writer_rotate_due(&opened) && spool_writer_rotate(&opened);
 
 	check(rotated && file_size(spool_file(path, writer.dirname, 6, ".seg")) ==
@@ -3050,7 +3053,8 @@ test_start_cut(const char *dir)
 				put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, zeroes, 64) &&
 				put_bytes(idx, -1, record, 30);
 	long mark = log_mark();
-	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0, storedW);
+	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0,
+											 storedW);
 	char *text = logged_since(mark);
 
 	check(started && file_size(idx) == 2 * SPOOL_INDEX_RECORD_SIZE &&
@@ -3870,7 +3874,8 @@ test_start_confirmed(const char *dir)
 	/* a spool that holds no indexed transaction loses nothing to a cut */
 	made = new_writer(&writer, dir, &spoolHeader, 0);
 	kill_writer(&writer);
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0xD230, 0, storedW);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0xD230, 0,
+										storedW);
 
 	check(started && opened.nextSeq == 5,
 		  "a start of a spool without an indexed transaction keeps it, whatever the slot confirmed");
@@ -3987,7 +3992,8 @@ test_start_failures(const char *dir)
 
 		ftruncateSkips = skip;
 		ftruncateFailures = 1;
-		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0, storedW);
+		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0,
+												 storedW);
 		bool injected = ftruncateFailures == 0;
 
 		ftruncateFailures = 0;
@@ -4015,7 +4021,8 @@ test_start_failures(const char *dir)
 
 		fsyncSkips = skip;
 		fsyncFailures = 1;
-		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0, storedW);
+		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0,
+												 storedW);
 		bool injected = fsyncFailures == 0;
 
 		fsyncFailures = 0;
@@ -4040,7 +4047,8 @@ test_start_failures(const char *dir)
 		long mark = log_mark();
 
 		preadFailAt = Max(call, 1);
-		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0, storedW);
+		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0,
+												 storedW);
 		bool injected = preadFailAt == 0;
 
 		preadFailAt = 0;
@@ -4056,7 +4064,8 @@ test_start_failures(const char *dir)
 	long mark = log_mark();
 
 	fstatFailAt = 1;
-	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0, storedW);
+	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 0,
+											 storedW);
 	bool injected = fstatFailAt == 0;
 
 	fstatFailAt = 0;
@@ -4081,7 +4090,8 @@ test_start_failures(const char *dir)
 	/* a header that could not be read would look torn, and a new spool restarts */
 	sformat(line, sizeof(line), "%s/unreadheader", dir);
 	spool_file(files[0], line, SPOOL_FIRST_SEQ, ".seg");
-	made = mkdir(line, 0700) == 0 && spool_writer_open(&opened, line, 7, 2, 0, 0, storedW);
+	made = mkdir(line, 0700) == 0 && spool_writer_open(&opened, line, 7, 2, 0, 0,
+													   storedW);
 	kill_writer(&opened);
 	mark = log_mark();
 	preadFailAt = 1;
@@ -4253,7 +4263,8 @@ test_start_failures(const char *dir)
 	{
 		sformat(line, sizeof(line), "%s/unindexed%d", dir, fail);
 		log_file(files[2], line);
-		made = mkdir(line, 0700) == 0 && spool_writer_open(&writer, line, 7, 2, 0, 0, storedW) &&
+		made = mkdir(line, 0700) == 0 && spool_writer_open(&writer, line, 7, 2, 0, 0,
+														   storedW) &&
 			   feed(&writer, firstTxn, lengthof(firstTxn)) &&
 			   spool_sync(&writer.segment) && spool_sync(&writer.relationLog);
 		kill_writer(&writer);
@@ -4344,7 +4355,8 @@ test_start_failures(const char *dir)
 		  "a spool directory that cannot be listed fails the start with an ERROR line");
 
 	sformat(line, sizeof(line), "%s/missing", dir);
-	check(!spool_writer_open(&opened, line, 7, 2, 0, 0, storedW) && opened.segment.fd == -1,
+	check(!spool_writer_open(&opened, line, 7, 2, 0, 0, storedW) && opened.segment.fd ==
+		  -1,
 		  "a writer opened on a directory that does not exist fails");
 
 	/* the list of index files grows past the 256 bytes it starts with */
@@ -4387,13 +4399,13 @@ make_four(SpoolWriter *writer, const char *dir)
 {
 	bool made = new_writer(writer, dir, &spoolHeader, 50) &&
 				feed(writer, firstTxn, lengthof(firstTxn)) &&
-				write_index(writer) && spool_writer_rotate(writer) &&
+				spool_writer_flush(writer) && spool_writer_rotate(writer) &&
 				feed(writer, secondTxn, lengthof(secondTxn)) &&
-				write_index(writer) && spool_writer_rotate(writer) &&
+				spool_writer_flush(writer) && spool_writer_rotate(writer) &&
 				feed(writer, thirdTxn, lengthof(thirdTxn)) &&
-				write_index(writer) && spool_writer_rotate(writer) &&
+				spool_writer_flush(writer) && spool_writer_rotate(writer) &&
 				feed(writer, fourthTxn, lengthof(fourthTxn)) &&
-				write_index(writer);
+				spool_writer_flush(writer);
 
 	kill_writer(writer);
 
@@ -4553,7 +4565,8 @@ test_cleanup(const char *dir)
 	beforeReaddir = cleanup_races;
 	storedW = 0xD430;
 
-	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 50, storedW);
+	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, 50,
+											 storedW);
 	char *text = logged_since(mark);
 
 	storedW = 0;
@@ -4660,7 +4673,8 @@ test_reader(const char *dir)
 	};
 
 	sformat(name, sizeof(name), "%s/later", dir);
-	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 0, 50, storedW) &&
+	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 0, 50,
+													   storedW) &&
 		   feed(&fresh, low, 3) && spool_writer_flush(&fresh) && spool_writer_rotate(
 		&fresh) &&
 		   feed(&fresh, low + 3, 3) && record_at(&fresh, 0, &record) &&
@@ -4996,7 +5010,8 @@ test_reader(const char *dir)
 	kill_writer(&writer);
 
 	sformat(name, sizeof(name), "%s/early", dir);
-	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 0, 0, storedW) &&
+	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 0, 0,
+													   storedW) &&
 		   spool_reader_open(&reader, name, 0);
 	waiting = made && spool_reader_next(&reader, &found) && !found;
 	made = made && feed(&fresh, low, 3) && spool_writer_flush(&fresh);
@@ -5154,7 +5169,8 @@ test_reader_failures(const char *dir)
 
 	sformat(path, sizeof(path), "%s/linked", dir);
 
-	bool made = mkdir(path, 0700) == 0 && spool_writer_open(&fresh, path, 7, 2, 0, 0, storedW) &&
+	bool made = mkdir(path, 0700) == 0 && spool_writer_open(&fresh, path, 7, 2, 0, 0,
+															storedW) &&
 				spool_reader_open(&reader, path, 0) &&
 				feed(&fresh, low, lengthof(low)) && spool_writer_flush(&fresh) &&
 				unlink(fresh.segment.filename) == 0 &&
@@ -5357,7 +5373,8 @@ test_index_chunks(const char *dir)
 
 	SpoolWriter gappedWriter = { 0 };
 
-	check(gapped && spool_writer_open(&gappedWriter, writer.dirname, 7, 2, 0, 0, storedW) &&
+	check(gapped && spool_writer_open(&gappedWriter, writer.dirname, 7, 2, 0, 0,
+									  storedW) &&
 		  file_size(idx) == gap &&
 		  gappedWriter.nextSeq == (uint64_t) SPOOL_READER_CHUNK + 2,
 		  "an invalid index record past the first read chunk, before a valid one, cuts the index file at the record before it");
@@ -6352,9 +6369,9 @@ test_reader_reopen(const char *dir)
 
 	/* the receive start, which writes the next transaction into a new inode */
 	bool receive = read && context.previousLSN == 0xD230 &&
-				   spool_writer_open(&started, writer.dirname, 7, 2, 0) &&
+				   spool_writer_open(&started, writer.dirname, 7, 2, 0, 0, storedW) &&
 				   feed(&started, thirdTxn, lengthof(thirdTxn)) &&
-				   write_index(&started);
+				   spool_writer_flush(&started);
 
 	kill_writer(&started);
 
