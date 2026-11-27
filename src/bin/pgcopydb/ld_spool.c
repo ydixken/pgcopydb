@@ -418,6 +418,19 @@ spool_file_open(SpoolSegment *segment, int flags)
 
 
 /*
+ * spool_keepalive_encode writes the keepalive marker of receive, the one frame
+ * kind that the spool holds beside the messages of the source.
+ */
+void
+spool_keepalive_encode(char *buf, uint64_t lsn, uint64_t sendTime)
+{
+	buf[0] = SPOOL_KIND_KEEPALIVE;
+	spool_put_u64(buf + 1, lsn);
+	spool_put_u64(buf + 9, sendTime);
+}
+
+
+/*
  * spool_segment_create creates the segment file of header->firstSeq in
  * dirname, then syncs the header and the directory entry, in that order.
  */
@@ -1109,6 +1122,7 @@ spool_writer_create(SpoolWriter *writer, const char *dirname,
 		.maxSegmentSize = maxSegmentSize,
 		.header = *header,
 		.segment = { .fd = -1 },
+		.index = { .fd = -1 },
 		.relationLog = { .fd = -1 },
 		.nextSeq = header->firstSeq,
 		.lastFinalLSN = header->lastFinalLSN,
@@ -1400,6 +1414,119 @@ spool_writer_message(SpoolWriter *writer, const char *message, uint32_t length)
 
 
 /*
+ * spool_writer_open_index opens the index file of the open segment. A file
+ * that the flush creates needs its directory entry on disk before a record of
+ * it, as a segment does.
+ */
+static bool
+spool_writer_open_index(SpoolWriter *writer)
+{
+	SpoolSegment *index = &writer->index;
+	struct stat st = { 0 };
+
+	/* it fits, as the name of the segment file has the same length */
+	sformat(index->filename, sizeof(index->filename), "%s/%016" PRIX64 ".idx",
+			writer->dirname, writer->header.firstSeq);
+
+	bool fresh = access(index->filename, F_OK) != 0;
+
+	if (!spool_file_open(index, O_WRONLY | O_CREAT | O_APPEND))
+	{
+		return false;
+	}
+
+	if (fstat(index->fd, &st) != 0)
+	{
+		log_error("Failed to stat spool file \"%s\": %m", index->filename);
+		spool_fail(index);
+		return false;
+	}
+
+	/* the start cut the records it keeps and synced them */
+	index->size = (uint64_t) st.st_size;
+	index->synced = index->size;
+
+	return !fresh || spool_sync_directory(writer->dirname);
+}
+
+
+/*
+ * spool_writer_flush makes the frames of the complete transactions durable and
+ * only then indexes them, in the order of the format: the segment, the
+ * relation log, then the records, each of which names the length of the log
+ * that this sync covered. Receive reports a flush position once this returned
+ * true, and never before.
+ */
+bool
+spool_writer_flush(SpoolWriter *writer)
+{
+	PQExpBuffer pending = &writer->pendingIndex;
+
+	if (!spool_sync(&writer->segment) || !spool_sync(&writer->relationLog))
+	{
+		return false;
+	}
+
+	if (pending->len == 0)
+	{
+		return true;
+	}
+
+	/* a failed write closed the file for good, which spool_usable refuses */
+	if (writer->index.filename[0] == '\0' && !spool_writer_open_index(writer))
+	{
+		return false;
+	}
+
+	if (!spool_usable(&writer->index))
+	{
+		return false;
+	}
+
+	for (size_t at = 0; at < pending->len; at += SPOOL_INDEX_RECORD_SIZE)
+	{
+		SpoolIndexRecord record = { 0 };
+
+		if (!spool_index_decode(pending->data + at, SPOOL_INDEX_RECORD_SIZE,
+								&record))
+		{
+			log_error("BUG: the index record at offset %zu of spool file "
+					  "\"%s\" is not valid", at, writer->index.filename);
+			return false;
+		}
+
+		record.relationLogEnd = writer->relationLog.synced;
+		spool_index_encode(&record, pending->data + at);
+	}
+
+	if (!spool_put(&writer->index, pending->data, pending->len) ||
+		!spool_sync(&writer->index))
+	{
+		return false;
+	}
+
+	resetPQExpBuffer(pending);
+
+	return true;
+}
+
+
+/*
+ * spool_writer_close frees the files and the buffers of a writer, so that a
+ * receive process that ends leaves none of them.
+ */
+void
+spool_writer_close(SpoolWriter *writer)
+{
+	spool_fail(&writer->segment);
+	spool_fail(&writer->index);
+	spool_writer_free_relations(writer);
+	termPQExpBuffer(&writer->held);
+	termPQExpBuffer(&writer->pendingIndex);
+}
+
+
+/*
  * spool_writer_rewind is the raw form of the rollback after a lost connection:
  * the segment goes back to the end of the last complete transaction, because
  * the source sends a transaction without COMMIT again in full. The relation
@@ -1488,9 +1615,13 @@ spool_writer_rotate(SpoolWriter *writer)
 	header.lastFinalLSN = writer->lastFinalLSN;
 	header.lastEndLSN = writer->lastEndLSN;
 
-	/* the flush synced the old segment, so only its descriptor is left */
+	/* the flush synced both files, so only their descriptors are left */
 	(void) close(segment->fd);
 	free(segment->block);
+	spool_fail(&writer->index);
+	writer->index = (SpoolSegment) {
+		.fd = -1
+	};
 
 	if (!spool_segment_create(segment, writer->dirname, &header))
 	{
@@ -1991,6 +2122,7 @@ typedef struct SpoolTail
 	SpoolIndexRecord last;      /* the last valid index record */
 	uint64_t keep;              /* index length up to the end of last, or 0 */
 	uint64_t indexSize;
+	bool gap;                   /* a valid record follows an invalid one */
 } SpoolTail;
 
 
@@ -2044,7 +2176,8 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 
 	tail->indexSize = (uint64_t) st.st_size;
 
-	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
+	for (uint64_t at = 0; !tail->gap && at < (uint64_t) st.st_size;
+		 at += sizeof(bytes))
 	{
 		if (!spool_pread(tail->indexFd, tail->index, bytes,
 						 Min(sizeof(bytes), (uint64_t) st.st_size - at), at, &done))
@@ -2052,25 +2185,28 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 			return false;
 		}
 
-		for (uint64_t i = 0; i < done; i += SPOOL_INDEX_RECORD_SIZE)
+		for (uint64_t i = 0; !tail->gap && i < done; i += SPOOL_INDEX_RECORD_SIZE)
 		{
-			if (!spool_index_decode(bytes + i, done - i, &tail->last))
+			SpoolIndexRecord record = { 0 };
+
+			if (!spool_index_decode(bytes + i, done - i, &record))
 			{
 				continue;
 			}
 
 			/*
-			 * A power loss can keep a later record of a write and not an earlier
-			 * one, and a cut cannot tell that from damage of synced records.
+			 * A power loss can keep a later record of a write and not an
+			 * earlier one, and a cut cannot tell that from damage of synced
+			 * records: the records before it are kept, and the rule of A47
+			 * decides whether that cut is safe.
 			 */
-			if (at + i > tail->keep)
-			{
-				log_error("Spool file \"%s\" holds no valid index record at "
-						  "offset %" PRIu64, tail->index, tail->keep);
-				return false;
-			}
+			tail->gap = at + i > tail->keep;
 
-			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+			if (!tail->gap)
+			{
+				tail->last = record;
+				tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+			}
 		}
 	}
 
@@ -2198,6 +2334,7 @@ spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
 		.maxSegmentSize = maxSegmentSize,
 		.header = tail->header,
 		.segment = tail->segment,
+		.index = { .fd = -1 },
 		.relationLog = { .fd = -1 },
 		.nextSeq = tail->last.seq + 1,
 		.lastFinalLSN = tail->last.finalLSN,
@@ -2215,6 +2352,83 @@ spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
 	spool_tail_close(tail);
 
 	return spool_writer_start(writer, dirname);
+}
+
+
+/*
+ * spool_keepalive_scan raises lsn to the highest keepalive position that the
+ * frames of a segment hold. The feedback reports such a position as flushed
+ * under the rule of stream_sync_sentinel, and the marker carries no change, so
+ * a cut that drops one loses nothing. It stops at the first frame that is not
+ * whole, which no sync covered.
+ */
+static bool
+spool_keepalive_scan(const SpoolSegment *segment, uint64_t *lsn)
+{
+	char *buf = (char *) malloc(SPOOL_BLOCK_SIZE);
+	uint64_t at = SPOOL_HEADER_SIZE;
+	bool read = true;
+
+	if (buf == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	while (read)
+	{
+		SpoolFrameStatus status = SPOOL_FRAME_OK;
+		uint64_t done = 0;
+		uint64_t offset = 0;
+
+		read = spool_pread(segment->fd, segment->filename, buf,
+						   SPOOL_BLOCK_SIZE, at, &done);
+
+		while (read && status == SPOOL_FRAME_OK)
+		{
+			const char *message = NULL;
+			uint32_t length = 0;
+
+			status = spool_frame_decode(buf + offset, done - offset,
+										&message, &length);
+
+			if (status != SPOOL_FRAME_OK)
+			{
+				break;
+			}
+
+			if (length == SPOOL_KEEPALIVE_SIZE &&
+				message[0] == SPOOL_KIND_KEEPALIVE)
+			{
+				int pos = 1;
+				uint64_t position = pgout_u64(message, &pos, (int) length);
+
+				*lsn = Max(*lsn, position);
+			}
+
+			offset += SPOOL_FRAME_SIZE(length);
+		}
+
+		/* a frame of more than one block is a change, and holds no marker */
+		if (read && status == SPOOL_FRAME_SHORT && offset == 0 &&
+			done == SPOOL_BLOCK_SIZE)
+		{
+			int pos = 0;
+
+			offset = SPOOL_FRAME_SIZE(pgout_u32(buf, &pos, 4));
+		}
+
+		at += offset;
+
+		if (offset == 0 || done < SPOOL_BLOCK_SIZE)
+		{
+			break;
+		}
+	}
+
+	free(buf);
+
+	return read;
 }
 
 
@@ -2286,7 +2500,8 @@ spool_leftover_under_w(const char *dirname, PQExpBuffer segments,
 static bool
 spool_start_read(SpoolStart *start, const char *dirname,
 				 PQExpBuffer segments, PQExpBuffer indexes,
-				 const SpoolHeader *fresh, uint64_t storedW)
+				 const SpoolHeader *fresh, uint64_t confirmedFlushLSN,
+				 uint64_t storedW)
 {
 	uint64_t seq = spool_highest_below(segments, UINT64_MAX);
 	uint64_t before = spool_highest_below(segments, seq);
@@ -2436,6 +2651,73 @@ spool_start_read(SpoolStart *start, const char *dirname,
 		return false;
 	}
 
+	/*
+	 * A47, here in the read pass, so that a refused start changes no file: the
+	 * header of a segment names its first transaction, and the name of its
+	 * file repeats that number.
+	 */
+	uint64_t names[] = { seq, start->removed ? before : 0 };
+	SpoolTail *tails[] = { &start->last, &start->before };
+
+	for (int i = 0; i < (int) lengthof(names); i++)
+	{
+		if (names[i] > 0 && tails[i]->headed &&
+			tails[i]->header.firstSeq != names[i])
+		{
+			log_error("Spool file \"%s\" names the first transaction %" PRIu64
+					  " in its header, and %" PRIu64 " in its file name",
+					  tails[i]->segment.filename, tails[i]->header.firstSeq,
+					  names[i]);
+			return false;
+		}
+	}
+
+	/* and the removed segment continues the one before it, which ends there */
+	if (start->removed && before > 0 && start->last.headed &&
+		start->last.header.firstSeq != start->before.last.seq + 1)
+	{
+		log_error("Spool file \"%s\" names the first transaction %" PRIu64
+				  " in its header, and the last transaction of \"%s\" has the "
+				  "sequence number %" PRIu64,
+				  start->last.segment.filename, start->last.header.firstSeq,
+				  start->before.index, start->before.last.seq);
+		return false;
+	}
+
+	/*
+	 * Damage in the index file of the last segment drops transactions that the
+	 * slot can hold as flushed. A cut at or above the position it confirmed is
+	 * safe, because the walsender sends every transaction above it again, and
+	 * a keepalive marker of the spool counts where the feedback counts it.
+	 */
+	bool damaged = start->last.gap || start->last.keep < start->last.indexSize;
+	uint64_t kept = start->tail != NULL ? start->tail->last.endLSN :
+					start->header.lastEndLSN;
+
+	if (damaged && kept < confirmedFlushLSN && start->tail != NULL &&
+		!spool_keepalive_scan(&start->tail->segment, &kept))
+	{
+		return false;
+	}
+
+	if (damaged && kept < confirmedFlushLSN)
+	{
+		log_error("Spool file \"%s\" holds no valid index record at offset %"
+				  PRIu64 ", and a cut there keeps the spool up to %X/%X, below "
+						 "the %X/%X that the replication slot confirmed as flushed",
+				  start->last.index, start->last.keep, LSN_FORMAT_ARGS(kept),
+				  LSN_FORMAT_ARGS(confirmedFlushLSN));
+		return false;
+	}
+
+	if (start->last.gap)
+	{
+		log_warn("Spool file \"%s\" holds no valid index record at offset %"
+				 PRIu64 ": the start cuts it there, at %X/%X, and the source "
+						"sends the transactions after it again",
+				 start->last.index, start->last.keep, LSN_FORMAT_ARGS(kept));
+	}
+
 	return true;
 }
 
@@ -2493,8 +2775,8 @@ spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
 static bool
 spool_writer_resume(SpoolWriter *writer, const char *dirname,
 					PQExpBuffer segments, PQExpBuffer indexes,
-					const SpoolHeader *fresh, uint64_t maxSegmentSize,
-					uint64_t storedW)
+					const SpoolHeader *fresh, uint64_t confirmedFlushLSN,
+					uint64_t maxSegmentSize, uint64_t storedW)
 {
 	SpoolStart start = {
 		.last = { .segment = { .fd = -1 }, .indexFd = -1 },
@@ -2503,7 +2785,7 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 	};
 
 	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh,
-									storedW) &&
+									confirmedFlushLSN, storedW) &&
 				   spool_start_act(&start, writer, dirname, maxSegmentSize);
 
 	spool_tail_close(&start.last);
@@ -2566,7 +2848,8 @@ spool_lock(const char *dirname, bool wait, int *fd)
 bool
 spool_writer_open(SpoolWriter *writer, const char *dirname,
 				  uint64_t systemId, uint32_t timeline,
-				  uint64_t maxSegmentSize, uint64_t storedW)
+				  uint64_t confirmedFlushLSN, uint64_t maxSegmentSize,
+				  uint64_t storedW)
 {
 	PQExpBufferData segments;
 	PQExpBufferData indexes;
@@ -2581,6 +2864,7 @@ spool_writer_open(SpoolWriter *writer, const char *dirname,
 
 	*writer = (SpoolWriter) {
 		.segment = { .fd = -1 },
+		.index = { .fd = -1 },
 		.relationLog = { .fd = -1 }
 	};
 
@@ -2592,7 +2876,8 @@ spool_writer_open(SpoolWriter *writer, const char *dirname,
 				  spool_lock(dirname, true, &lock) &&
 				  spool_scan(dirname, &segments, &indexes) &&
 				  spool_writer_resume(writer, dirname, &segments, &indexes,
-									  &fresh, maxSegmentSize, storedW);
+									  &fresh, confirmedFlushLSN,
+									  maxSegmentSize, storedW);
 
 	if (lock >= 0)
 	{

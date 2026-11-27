@@ -1,0 +1,14 @@
+Mutant: a flush reports the index records of a closed index file as written. Must fail: a failed sync of the index file closes it, and every later flush refuses it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1479,7 +1479,7 @@
+ 
+ 	if (!spool_usable(&writer->index))
+ 	{
+-		return false;
++		return true;
+ 	}
+ 
+ 	for (size_t at = 0; at < pending->len; at += SPOOL_INDEX_RECORD_SIZE)

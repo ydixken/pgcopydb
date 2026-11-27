@@ -442,6 +442,8 @@ typedef struct LogicalStreamContext
 
 	const char *buffer;         /* expose internal buffer */
 	int bufferLen;              /* byte length of binary plugin data in buffer */
+	const char *copyData;       /* the whole message, from its 25-byte header */
+	int copyDataLen;
 	StreamOutputPlugin plugin;
 
 	bool forceFeedback;

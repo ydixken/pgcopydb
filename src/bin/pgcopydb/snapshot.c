@@ -782,6 +782,12 @@ copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 		return false;
 	}
 
+	/* receive opens the spool again, and this process writes no frame */
+	if (stream_uses_raw_spool(&specs))
+	{
+		spool_writer_close(&(specs.private.spool));
+	}
+
 	return true;
 }
 
