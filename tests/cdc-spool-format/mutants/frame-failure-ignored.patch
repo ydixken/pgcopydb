@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3330,7 +3330,7 @@
+@@ -3331,7 +3331,7 @@
  		uint32_t length = 0;
  		bool done = false;
  

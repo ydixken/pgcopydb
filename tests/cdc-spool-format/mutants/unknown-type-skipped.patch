@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3443,6 +3443,7 @@
+@@ -3469,6 +3469,7 @@
  
  			default:
  			{

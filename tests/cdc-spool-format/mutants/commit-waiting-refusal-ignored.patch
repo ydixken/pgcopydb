@@ -3,9 +3,9 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3437,8 +3437,9 @@
- 				strlcpy(commit.timestamp, spooled.begin.timestamp,
- 						sizeof(commit.timestamp));
+@@ -3463,8 +3463,9 @@
+ 					return false;
+ 				}
  
 -				return stream_spool_hand_waiting(&spooled) &&
 -					   stream_spool_hand(&spooled, &commit);

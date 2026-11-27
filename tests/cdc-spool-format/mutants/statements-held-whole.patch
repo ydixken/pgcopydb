@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3412,7 +3412,7 @@
+@@ -3426,7 +3426,7 @@
  				}
  
  				/* stmt did not merge with the waiting one, which is complete */
@@ -12,9 +12,9 @@ Apply from the repository root with git apply, and never commit it applied.
  				{
  					if (!stream_spool_hand_waiting(&spooled))
  					{
-@@ -3437,8 +3437,21 @@
- 				strlcpy(commit.timestamp, spooled.begin.timestamp,
- 						sizeof(commit.timestamp));
+@@ -3463,8 +3463,21 @@
+ 					return false;
+ 				}
  
 -				return stream_spool_hand_waiting(&spooled) &&
 -					   stream_spool_hand(&spooled, &commit);

@@ -1,0 +1,14 @@
+Mutant: the statement source reads the frames of an index record that do not start with a BEGIN. Must fail: the frames of an index record that do not start with a BEGIN are an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3352,7 +3352,7 @@
+ 		const char *buf = message + SPOOL_XLOGDATA_HEADER_SIZE;
+ 		int bufLen = (int) length - SPOOL_XLOGDATA_HEADER_SIZE;
+ 
+-		if (first && buf[0] != 'B')
++		if (false && first && buf[0] != 'B')
+ 		{
+ 			log_error("Index record %" PRIu64
+ 					  " of \"%s\" is damaged: its frames start at offset %" PRIu64

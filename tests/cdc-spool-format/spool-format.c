@@ -5679,6 +5679,30 @@ test_statements(const char *dir)
 		  strstr(logged_since(mark), "without a COMMIT") != NULL,
 		  "the frames of an index record that hold no COMMIT are an error, and no COMMIT comes");
 
+	/* the frames of a damaged index record that start past the BEGIN */
+	message = unknown[0];
+	message.bytes[SPOOL_XLOGDATA_HEADER_SIZE] = 'O';
+	made = txn_spool(&writer, dir, unknown, lengthof(unknown)) &&
+		   put_frame(spool_file(path, writer.dirname, 1, ".seg"), SPOOL_HEADER_SIZE,
+					 &message);
+	mark = log_mark();
+	built = made && statements(writer.dirname, new_specs(), &captured);
+	check(made && !built && captured.count == 0 &&
+		  strstr(logged_since(mark), "not a BEGIN") != NULL,
+		  "the frames of an index record that do not start with a BEGIN are an error");
+
+	/* and that go on after a COMMIT, here one in place of the INSERT */
+	message = commit_msg(0x6020, 0x6100, 0x6130, COMMIT_TIME);
+	made = message.length == unknown[2].length &&
+		   txn_spool(&writer, dir, unknown, lengthof(unknown)) &&
+		   put_frame(spool_file(path, writer.dirname, 1, ".seg"),
+					 SPOOL_HEADER_SIZE + frames_size(unknown, 2), &message);
+	mark = log_mark();
+	built = made && statements(writer.dirname, new_specs(), &captured);
+	check(made && !built && captured.count == 0 &&
+		  strstr(logged_since(mark), "after the COMMIT") != NULL,
+		  "the frames of an index record that go on after its COMMIT are an error, and no COMMIT comes");
+
 	/* a change of a relation that the relation log does not define */
 	Msg undefined[] = {
 		begin_msg(0x7010, 0x7100, 906),

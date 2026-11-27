@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3384,7 +3384,7 @@
+@@ -3398,7 +3398,7 @@
  				strlcpy(stmt->timestamp, spooled.begin.timestamp,
  						sizeof(stmt->timestamp));
  

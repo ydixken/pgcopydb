@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3402,8 +3402,6 @@
+@@ -3416,8 +3416,6 @@
  				{
  					spooled.begin.lsn = lsn;
  				}

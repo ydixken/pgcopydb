@@ -3,11 +3,11 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3338,6 +3338,7 @@
+@@ -3339,6 +3339,7 @@
  
  		if (done)
  		{
 +			return true;
- 			log_error("BUG: spooled transaction %" PRIu64 " ends at offset %"
- 					  PRIu64 " without a COMMIT", record->seq, record->endOffset);
- 			return false;
+ 			log_error("Index record %" PRIu64
+ 					  " of \"%s\" is damaged: its frames in \"%s\" end at offset %" PRIu64
+ 					  " without a COMMIT",

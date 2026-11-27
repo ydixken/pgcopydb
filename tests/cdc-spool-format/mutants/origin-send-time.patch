@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_transform.c
 +++ b/src/bin/pgcopydb/ld_transform.c
-@@ -3434,6 +3434,10 @@
+@@ -3448,6 +3448,10 @@
  					.lsn = record->endLSN
  				};
  

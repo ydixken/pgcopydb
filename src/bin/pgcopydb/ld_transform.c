@@ -3324,7 +3324,8 @@ stream_spool_statements(StreamSpecs *specs, SpoolReader *reader,
 		return false;
 	}
 
-	for (;;)
+	/* receive writes a BEGIN first and a COMMIT last, the rest is index damage */
+	for (bool first = true;; first = false)
 	{
 		const char *message = NULL;
 		uint32_t length = 0;
@@ -3338,8 +3339,11 @@ stream_spool_statements(StreamSpecs *specs, SpoolReader *reader,
 
 		if (done)
 		{
-			log_error("BUG: spooled transaction %" PRIu64 " ends at offset %"
-					  PRIu64 " without a COMMIT", record->seq, record->endOffset);
+			log_error("Index record %" PRIu64
+					  " of \"%s\" is damaged: its frames in \"%s\" end at offset %" PRIu64
+					  " without a COMMIT",
+					  record->seq, reader->indexFilename, reader->frames.filename,
+					  record->endOffset);
 			return false;
 		}
 
@@ -3347,6 +3351,16 @@ stream_spool_statements(StreamSpecs *specs, SpoolReader *reader,
 		uint64_t lsn = pgout_u64(message, &pos, (int) length);
 		const char *buf = message + SPOOL_XLOGDATA_HEADER_SIZE;
 		int bufLen = (int) length - SPOOL_XLOGDATA_HEADER_SIZE;
+
+		if (first && buf[0] != 'B')
+		{
+			log_error("Index record %" PRIu64
+					  " of \"%s\" is damaged: its frames start at offset %" PRIu64
+					  " of \"%s\" with a message of type '%c', not a BEGIN",
+					  record->seq, reader->indexFilename, record->beginOffset,
+					  reader->frames.filename, buf[0]);
+			return false;
+		}
 
 		switch (buf[0])
 		{
@@ -3436,6 +3450,18 @@ stream_spool_statements(StreamSpecs *specs, SpoolReader *reader,
 
 				strlcpy(commit.timestamp, spooled.begin.timestamp,
 						sizeof(commit.timestamp));
+
+				/* a read fails only on bytes past the COMMIT, so it is damage too */
+				if (!spool_reader_frame(reader, privateContext, &message, &length,
+										&done) || !done)
+				{
+					log_error("Index record %" PRIu64
+							  " of \"%s\" is damaged: its frames in \"%s\" go on after "
+							  "the COMMIT, up to offset %" PRIu64,
+							  record->seq, reader->indexFilename,
+							  reader->frames.filename, record->endOffset);
+					return false;
+				}
 
 				return stream_spool_hand_waiting(&spooled) &&
 					   stream_spool_hand(&spooled, &commit);
