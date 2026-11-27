@@ -632,6 +632,8 @@ bool sentinel_update_write_flush_lsn(DatabaseCatalog *catalog,
 									 uint64_t flush_lsn);
 
 bool sentinel_update_replay_lsn(DatabaseCatalog *catalog, uint64_t replay_lsn);
+bool sentinel_update_replay_lsn_guarded(DatabaseCatalog *catalog,
+										uint64_t replay_lsn);
 
 bool sentinel_get(DatabaseCatalog *catalog, CopyDBSentinel *sentinel);
 bool sentinel_fetch(SQLiteQuery *query);
@@ -643,6 +645,7 @@ bool sentinel_sync_recv(DatabaseCatalog *catalog,
 
 bool sentinel_sync_apply(DatabaseCatalog *catalog,
 						 uint64_t replay_lsn,
+						 bool guarded,
 						 CopyDBSentinel *sentinel);
 
 

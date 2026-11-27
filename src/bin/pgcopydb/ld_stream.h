@@ -592,6 +592,9 @@ typedef struct StreamApplyContext
 	uint64_t sentinelSyncTime;  /* when replay_lsn was last written */
 	uint64_t sentinelWrittenLSN;    /* replay_lsn value last written */
 
+	/* the raw path writes replay_lsn through the guard: W never falls */
+	bool guardReplayLSN;
+
 	ConnStrings *connStrings;
 	char origin[BUFSIZE];
 
