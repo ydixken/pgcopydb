@@ -31,6 +31,7 @@ services:
     environment:
       # kill-at-commit.gdb cuts the plaintext stream right before the COMMIT
       PGSSLMODE: disable
+      PGCOPYDB_FOLLOW_MODE:
     depends_on:
       - source
       - target

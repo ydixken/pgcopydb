@@ -3,6 +3,7 @@
 set -euxo pipefail
 
 source /usr/src/pgcopydb/spool.sh
+source /var/lib/postgres/spool-probe.sh
 
 boundary=${1:?expected commit or between}
 case "${boundary}" in
@@ -50,16 +51,29 @@ xid3=$(source_sql 'begin; select pg_current_xact_id(); insert into apply_guard v
 receive_bound=$(source_sql 'select pg_current_wal_flush_lsn()')
 
 timeout 60s pgcopydb stream prefetch --resume --endpos "${receive_bound}"
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 spool_transaction "${xid1}" 1
 confirmed=${commit_lsn}
 spool_transaction "${xid2}" 1
 recovered=${commit_lsn}
 spool_transaction "${xid3}" 1
 b3=${begin_lsn}
+else
+# An index record holds the COMMIT position and the number of changes, and no
+# BEGIN position, so the between boundary keeps only its lower half here.
+confirmed=$(spool_commit_lsn "${xid1}" 1)
+recovered=$(spool_commit_lsn "${xid2}" 1)
+spool_commit_lsn "${xid3}" 1 > /dev/null
+b3=
+fi
 if test "${boundary}" = commit; then
     endpos=${recovered}
 else
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     test "$(source_sql "select '${recovered}'::pg_lsn < '${endpos}'::pg_lsn and '${endpos}'::pg_lsn < '${b3}'::pg_lsn")" = t
+    else
+    test "$(source_sql "select '${recovered}'::pg_lsn < '${endpos}'::pg_lsn")" = t
+    fi
     echo "Between boundary: C2=${recovered} < endpos=${endpos} < B3=${b3}"
 fi
 
@@ -111,8 +125,14 @@ test "${origin}" = "${recovered}"
 if test "${boundary}" = commit; then
     test "${state}" = "done|${recovered}|1"
 else
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     # Inline transform sees B3 past endpos but must not apply that transaction.
     test "${state}" = "done|${recovered}|0"
+    else
+    # The raw path records the cut it reached, not the last commit below it,
+    # and counts the one transaction this run applied.
+    test "${state}" = "done|${endpos}|1"
+    fi
 fi
 test "${rows}" = '1,2'
 

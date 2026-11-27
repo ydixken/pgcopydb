@@ -23,7 +23,14 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 follow-pgoutput follow-filtering follow-resume-snapshot \
 	 orphaned-target-backend split-table-resume \
 	 all-databases-resume large-objects-resume json-logs \
-	 defer-indexes defer-indexes-queue defer-indexes-all-databases;
+	 defer-indexes defer-indexes-queue defer-indexes-all-databases \
+	 cdc-pgoutput-performance cdc-low-level-performance \
+	 cdc-filtering-pgoutput-performance cdc-replica-identity-full-performance \
+	 cdc-truncate-multi-performance cdc-receive-drain-error-performance \
+	 cdc-receive-reconnect-dying-source-performance cdc-receive-status-interval-performance \
+	 cdc-origin-abort-performance cdc-apply-wakeup-performance \
+	 follow-filtering-performance follow-resume-snapshot-performance \
+	 cdc-replica-identity-index-performance cdc-partitioned-target-performance;
 
 pagila: build
 	$(MAKE) -C $@
@@ -208,6 +215,51 @@ timescaledb: build
 citus: build
 	$(MAKE) -C $@
 
+# The performance pass of a kept suite: the same script, with the raw spool.
+# The sqlite pass is the suite's own entry, which leaves the variable unset.
+cdc-pgoutput-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-pgoutput
+
+cdc-low-level-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-low-level
+
+cdc-filtering-pgoutput-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-filtering-pgoutput
+
+cdc-replica-identity-full-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-replica-identity-full
+
+cdc-truncate-multi-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-truncate-multi
+
+cdc-receive-drain-error-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-drain-error
+
+cdc-receive-reconnect-dying-source-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-reconnect-dying-source
+
+cdc-receive-status-interval-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-status-interval
+
+cdc-origin-abort-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-abort
+
+cdc-apply-wakeup-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-apply-wakeup
+
+follow-filtering-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-filtering
+
+follow-resume-snapshot-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-resume-snapshot
+
+# These two suites run both plugins, and test_decoding has no performance mode
+cdc-replica-identity-index-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-replica-identity-index down run-pgoutput down
+
+cdc-partitioned-target-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-partitioned-target down run-pgoutput down
+
 build:
 	@docker image inspect pagila > /dev/null 2>&1 \
 	  && echo "pagila image already present — skipping build (run 'make force-build' to rebuild)" \
@@ -248,6 +300,11 @@ clean-images:
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
 .PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
+.PHONY: cdc-pgoutput-performance cdc-low-level-performance cdc-filtering-pgoutput-performance
+.PHONY: cdc-replica-identity-full-performance cdc-truncate-multi-performance cdc-receive-drain-error-performance
+.PHONY: cdc-receive-reconnect-dying-source-performance cdc-receive-status-interval-performance cdc-origin-abort-performance
+.PHONY: cdc-apply-wakeup-performance follow-filtering-performance follow-resume-snapshot-performance
+.PHONY: cdc-replica-identity-index-performance cdc-partitioned-target-performance
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases
 .PHONY: timescaledb citus

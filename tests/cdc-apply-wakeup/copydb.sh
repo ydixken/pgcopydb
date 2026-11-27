@@ -240,6 +240,7 @@ diff -q "${TMPDIR}/src.txt" "${TMPDIR}/tgt.txt" > /dev/null ||
     fail "table t differs: target $(target_sql 'select count(*) from t') rows, source $(source_sql 'select count(*) from t')"
 
 # the origin sits on the last COMMIT receive spooled, which is the last lag row
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 last=0
 for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
     l=$(timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader "${f}" \
@@ -247,6 +248,12 @@ for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
     test "${l}" -le "${last}" || last=${l}
 done
 last=$(printf '%X/%X' $((last >> 32)) $((last & 4294967295)))
+else
+# the last index record of the raw spool is the last COMMIT receive wrote
+. /var/lib/postgres/spool-probe.sh
+last=$(spool_commit_lsns | tail -1)
+test -n "${last}" || fail 'the raw spool holds no transaction'
+fi
 origin=$(origin)
 test "${origin}" = "${last}" || fail "origin ${origin} is not the last COMMIT ${last}"
 # the write at endpos and at exit is not held back

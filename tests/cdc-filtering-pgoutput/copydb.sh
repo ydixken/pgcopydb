@@ -71,6 +71,10 @@ lsn=$(psql -At -d ${PGCOPYDB_SOURCE_PGURI} -c 'select pg_current_wal_flush_lsn()
 pgcopydb stream prefetch --resume --endpos "${lsn}" -vv
 
 SHAREDIR=${XDG_DATA_HOME:-/var/lib/postgres/.local/share}/pgcopydb
+. /var/lib/postgres/spool-probe.sh
+
+# The decoded columns live in output.db, which performance mode does not write.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 OUTPUTDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-output.db' -type f | head -1)
 
 sqlite3 ${OUTPUTDB} "select count(*) as output_rows from output;"
@@ -99,6 +103,17 @@ actor_cdc=$(sqlite3 -init /dev/null -noheader -list ${OUTPUTDB} \
   "select count(*) from output where action = 'I' and relname = 'actor';")
 echo "actor INSERT CDC rows: ${actor_cdc} (should be > 0)"
 test "${actor_cdc}" -gt 0
+
+else
+
+# the raw spool answers both with its index records and the statement text
+spool_txns=$(spool_commits)
+echo "raw spool transactions: ${spool_txns}"
+test "${spool_txns}" -gt 0
+spool_stmts > /tmp/stmt-actual.sql
+grep -q '^INSERT INTO "public"."actor" ' /tmp/stmt-actual.sql
+
+fi
 
 #
 # Allow the apply process and replay the captured CDC changes.
