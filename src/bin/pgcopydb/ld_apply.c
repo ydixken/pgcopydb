@@ -935,13 +935,6 @@ stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
 			continue;
 		}
 
-		if (!applied)
-		{
-			/* errors have already been logged */
-			success = false;
-			break;
-		}
-
 		sent = feGetCurrentTimestamp();
 
 		current.last_txn_end_lsn = record->endLSN;
