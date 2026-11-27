@@ -3646,6 +3646,34 @@ test_start_cut(const char *dir)
 	check(made && refused_twice(writer.dirname, 8, 50, line),
 		  "a spool of another source system before a headed last segment of the source ends every start with an error that names both, and no file changes");
 
+	/* taken for a torn one, the header of an only segment 1 would start the spool again */
+	refused = true;
+
+	for (int i = 0; i < 2; i++)
+	{
+		/* there, index records of another size decode to nothing valid */
+		const SpoolHeader *versioned = i == 0 ? &spoolHeader : &one;
+
+		made = i == 0 ? make_spool(&writer, dir) :
+			   new_writer(&writer, dir, &one, 0) &&
+			   feed(&writer, firstTxn, lengthof(firstTxn)) && write_index(&writer);
+		kill_writer(&writer);
+		spool_file(idx, writer.dirname, versioned->firstSeq, ".idx");
+		spool_file(seg, writer.dirname, versioned->firstSeq, ".seg");
+		spool_header_encode(versioned, header);
+		be32(header + 4, SPOOL_FORMAT_VERSION + 1);
+		be32(header + 60, spool_crc32c(header, 60));
+		made = made && (i == 0 || truncate(idx, 30) == 0) &&
+			   put_bytes(seg, 0, header, sizeof(header));
+		sformat(line, sizeof(line),
+				"Spool file \"%s\" has format version %d, and this pgcopydb reads version %d",
+				seg, SPOOL_FORMAT_VERSION + 1, SPOOL_FORMAT_VERSION);
+		refused = refused && made && refused_twice(writer.dirname, 7, 0, line);
+	}
+
+	check(refused,
+		  "a segment header of another format version ends every start with an error that names both versions, and no file changes");
+
 	/* a power loss kept a later index record of the segment before a torn last one */
 	made = make_rotated(&writer, dir, false) &&
 		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
@@ -4343,6 +4371,24 @@ test_reader(const char *dir)
 	check(made && !spool_reader_next(&reader, &found) &&
 		  one_line(logged_since(mark), " ERROR ", line),
 		  "an invalid index record before the tail of an index file fails the reader with an ERROR line");
+	spool_reader_close(&reader);
+
+	/* pgcopydb list spool reads the headers this way too */
+	char header[SPOOL_HEADER_SIZE];
+
+	made = make_spool(&writer, dir);
+	spool_header_encode(&spoolHeader, header);
+	be32(header + 4, SPOOL_FORMAT_VERSION + 1);
+	be32(header + 60, spool_crc32c(header, 60));
+	made = made && put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), 0, header,
+							 sizeof(header));
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has format version %d, and this pgcopydb reads version %d",
+			seg, SPOOL_FORMAT_VERSION + 1, SPOOL_FORMAT_VERSION);
+	mark = log_mark();
+	check(made && !spool_reader_open(&reader, writer.dirname, 0) &&
+		  one_line(logged_since(mark), " ERROR ", line),
+		  "a reader fails on a segment header of another format version with an ERROR line that names both versions");
 	spool_reader_close(&reader);
 
 	made = make_rotated(&writer, dir, true) &&

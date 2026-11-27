@@ -81,14 +81,14 @@ spool_header_encode(const SpoolHeader *header, char *buf)
 
 
 /*
- * spool_header_decode reads a segment header, and returns false when the
- * bytes are short, of another format, or fail the checksum.
+ * spool_header_version reads the format version of a segment header, and
+ * returns false when the bytes are short or fail the magic or the checksum.
  */
-bool
-spool_header_decode(const char *buf, uint64_t size, SpoolHeader *header)
+static bool
+spool_header_version(const char *buf, uint64_t size, uint32_t *version)
 {
-	SpoolHeader read = { 0 };
 	int pos = 0;
+	int crcPos = 60;
 
 	if (size < SPOOL_HEADER_SIZE)
 	{
@@ -96,7 +96,30 @@ spool_header_decode(const char *buf, uint64_t size, SpoolHeader *header)
 	}
 
 	uint32_t magic = pgout_u32(buf, &pos, SPOOL_HEADER_SIZE);
-	uint32_t version = pgout_u32(buf, &pos, SPOOL_HEADER_SIZE);
+
+	*version = pgout_u32(buf, &pos, SPOOL_HEADER_SIZE);
+
+	return magic == SPOOL_MAGIC &&
+		   pgout_u32(buf, &crcPos, SPOOL_HEADER_SIZE) == spool_crc32c(buf, 60);
+}
+
+
+/*
+ * spool_header_decode reads a segment header, and returns false when the
+ * bytes are short, of another format, or fail the checksum.
+ */
+bool
+spool_header_decode(const char *buf, uint64_t size, SpoolHeader *header)
+{
+	SpoolHeader read = { 0 };
+	uint32_t version = 0;
+	int pos = 8;
+
+	if (!spool_header_version(buf, size, &version) ||
+		version != SPOOL_FORMAT_VERSION)
+	{
+		return false;
+	}
 
 	read.firstSeq = pgout_u64(buf, &pos, SPOOL_HEADER_SIZE);
 	read.systemId = pgout_u64(buf, &pos, SPOOL_HEADER_SIZE);
@@ -105,15 +128,6 @@ spool_header_decode(const char *buf, uint64_t size, SpoolHeader *header)
 	pos = 32;
 	read.lastFinalLSN = pgout_u64(buf, &pos, SPOOL_HEADER_SIZE);
 	read.lastEndLSN = pgout_u64(buf, &pos, SPOOL_HEADER_SIZE);
-
-	pos = 60;
-	uint32_t crc = pgout_u32(buf, &pos, SPOOL_HEADER_SIZE);
-
-	if (magic != SPOOL_MAGIC || version != SPOOL_FORMAT_VERSION ||
-		crc != spool_crc32c(buf, 60))
-	{
-		return false;
-	}
 
 	*header = read;
 
@@ -1814,12 +1828,16 @@ spool_frames_next(SpoolFrames *frames, const char **message, uint32_t *length,
 }
 
 
-/* spool_read_header reads a segment header, and headed is false when torn */
+/*
+ * spool_read_header reads a segment header, and headed is false when torn. A
+ * header of another format version fails: read as torn, it drops the spool.
+ */
 static bool
 spool_read_header(int fd, const char *path, SpoolHeader *header, bool *headed)
 {
 	char buf[SPOOL_HEADER_SIZE];
 	uint64_t done = 0;
+	uint32_t version = 0;
 
 	if (!spool_pread(fd, path, buf, sizeof(buf), 0, &done))
 	{
@@ -1827,6 +1845,13 @@ spool_read_header(int fd, const char *path, SpoolHeader *header, bool *headed)
 	}
 
 	*headed = spool_header_decode(buf, done, header);
+
+	if (!*headed && spool_header_version(buf, done, &version))
+	{
+		log_error("Spool file \"%s\" has format version %u, and this pgcopydb "
+				  "reads version %d", path, version, SPOOL_FORMAT_VERSION);
+		return false;
+	}
 
 	return true;
 }
