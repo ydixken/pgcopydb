@@ -27,10 +27,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# until_true <seconds> <what> <command...>
+# until_true <seconds> <what> <command...>: the loop re-runs the command, and
+# the caller expanded every argument once, so the command has to read the
+# state again itself.  A comparison of expanded words cannot, and the wait
+# would report the deadline instead of the condition, so it is refused here.
 until_true() {
-    local deadline=$((SECONDS + $1)) what=$2
+    local deadline=$((SECONDS + $1)) what=$2 op=''
     shift 2
+    case $1 in test | '[') op=${3-} ;; esac
+    case ${op} in
+        = | == | != | -eq | -ne | -lt | -le | -gt | -ge)
+            fail "until_true got a frozen comparison: $*" ;;
+    esac
     until "$@"; do
         test "${SECONDS}" -lt "${deadline}" || fail "${what}"
         sleep 1

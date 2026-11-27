@@ -9,11 +9,6 @@
 # run is refused for its mode yet.  The cases that read such a refusal are
 # not in the default list; CASE='refuse perfdir' runs them once the predicate
 # holds, which is package F12.
-#
-# CASE=two is out of the default list for another reason: the follow of
-# 9d8b660 at two WAL workers reported its positions but applied no change in
-# four minutes in this fixture, which is the N slot apply path that the
-# cdc-wal-workers suites own.
 
 set -euo pipefail
 
@@ -47,6 +42,7 @@ check() { echo "${1}: want [${2}] got [${3}]"; test "${2}" = "${3}" || fail "${1
 lite() { timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader "$1" "$2"; }
 
 rows() { tgt -c "select coalesce(string_agg(id::text, ',' order by id), 'none') from t"; }
+rows_are() { test "$(rows)" = "$1"; }
 source_rows() { src -c "select string_agg(id::text, ',' order by id) from t"; }
 
 begin_case() {
@@ -71,10 +67,18 @@ record() {
 
 segs() { find "$1" -name '*.seg' | wc -l | tr -d ' '; }
 
-# until_true <seconds> <what> <command...>
+# until_true <seconds> <what> <command...>: the loop re-runs the command, and
+# the caller expanded every argument once, so the command has to read the
+# state again itself.  A comparison of expanded words cannot, and the wait
+# would report the deadline instead of the condition, so it is refused here.
 until_true() {
-    local deadline=$((SECONDS + $1)) what=$2
+    local deadline=$((SECONDS + $1)) what=$2 op=''
     shift 2
+    case $1 in test | '[') op=${3-} ;; esac
+    case ${op} in
+        = | == | != | -eq | -ne | -lt | -le | -gt | -ge)
+            fail "until_true got a frozen comparison: $*" ;;
+    esac
     until "$@"; do
         test "${SECONDS}" -lt "${deadline}" || fail "${what}"
         sleep 0.5
@@ -224,7 +228,7 @@ two() {
     pid=$!
     src -c "insert into t select g, 'after' from generate_series(4, 6) g"
     until_true 240 'the 9d8b660 follow at two workers did not apply the later rows' \
-               test "$(rows)" = 1,2,3,4,5,6
+               rows_are 1,2,3,4,5,6
     kill -TERM -- "-${pid}" 2> /dev/null || true
     wait "${pid}" || true
     until_true 120 'the replication slots stayed active after the follow stopped' settled
