@@ -856,6 +856,14 @@ bool stream_transform_write_replay_stmt(StreamSpecs *specs);
 bool stream_transform_write_replay_txn(StreamSpecs *specs);
 
 bool stream_transform_context_init(StreamSpecs *specs);
+bool stream_transform_caches_init(StreamSpecs *specs);
+
+struct ReplayDBStmt;
+
+bool stream_write_statement(bool replayNoOpUpdates,
+							struct ReplayDBStmt *replayStmt,
+							LogicalTransactionStatement *stmt);
+
 bool stream_transform_from_outputdb(StreamSpecs *specs,
 									uint64_t previousLSN,
 									uint64_t keepaliveLSN);
@@ -913,6 +921,19 @@ bool stream_apply_catchup(StreamSpecs *specs);
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
 bool stream_apply_stdin(StreamSpecs *specs, StreamApplyContext *context);
 bool stream_apply_to_stdout(StreamSpecs *specs, FILE *out);
+
+/* a linear scan, as stream apply --target - is a debug path */
+#define STREAM_PRINT_MAX_PREPARED 64
+
+/* the statement hashes that stream apply --target - printed a PREPARE for */
+typedef struct StreamPrepared
+{
+	uint32_t hashes[STREAM_PRINT_MAX_PREPARED];
+	int count;
+} StreamPrepared;
+
+bool stream_apply_print_stmt(FILE *out, struct ReplayDBStmt *s,
+							 StreamPrepared *prepared);
 
 bool stream_apply_setup(StreamSpecs *specs, StreamApplyContext *context);
 

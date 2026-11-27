@@ -3831,19 +3831,7 @@ stream_apply_to_stdout(StreamSpecs *specs, FILE *out)
 	}
 
 	bool inTxn = false;
-	char prevHash[16] = { 0 };   /* track which stmts have been PREPAREd */
-
-	/*
-	 * We use a simple in-memory hash set to avoid printing the same PREPARE
-	 * more than once.  For the expected number of distinct statements per
-	 * unit-test (< 10) a linear scan is fast enough.
-	 */
-#define MAX_PREPARED 64
-	uint32_t preparedHashes[MAX_PREPARED];
-	int preparedCount = 0;
-	memset(preparedHashes, 0, sizeof(preparedHashes));
-
-	(void) prevHash;   /* suppress unused-variable warning */
+	StreamPrepared prepared = { 0 };
 
 	for (;;)
 	{
@@ -3897,86 +3885,13 @@ stream_apply_to_stdout(StreamSpecs *specs, FILE *out)
 			case STREAM_ACTION_DELETE:
 			case STREAM_ACTION_TRUNCATE:
 			{
-				if (s->stmt == NULL || s->data == NULL)
+				if (!stream_apply_print_stmt(out, s, &prepared))
 				{
-					/* no SQL template or args — skip */
-					break;
-				}
-
-				/* PREPARE once per distinct hash */
-				bool alreadyPrepared = false;
-
-				for (int i = 0; i < preparedCount; i++)
-				{
-					if (preparedHashes[i] == s->hash)
-					{
-						alreadyPrepared = true;
-						break;
-					}
-				}
-
-				if (!alreadyPrepared)
-				{
-					char name[NAMEDATALEN] = { 0 };
-					sformat(name, sizeof(name), "%x", s->hash);
-
-					fformat(out, "PREPARE %s AS %s;\n", name, s->stmt);
-
-					if (preparedCount < MAX_PREPARED)
-					{
-						preparedHashes[preparedCount++] = s->hash;
-					}
-				}
-
-				/* EXECUTE with args */
-				char name[NAMEDATALEN] = { 0 };
-				sformat(name, sizeof(name), "%x", s->hash);
-
-				/*
-				 * Parse the JSON array of argument values and format them as
-				 * a comma-separated list: EXECUTE name ('v1', 'v2', NULL, ...)
-				 */
-				JSON_Value *js = json_parse_string(s->data);
-
-				if (js == NULL ||
-					json_value_get_type(js) != JSONArray)
-				{
-					log_error("stream_apply_to_stdout: failed to parse "
-							  "args JSON for replay id %lld: %s",
-							  (long long) s->id, s->data);
-					json_value_free(js);
+					/* errors have already been logged */
 					(void) semaphore_unlock(&(replayDB->sema));
 					return false;
 				}
 
-				JSON_Array *jsArray = json_value_get_array(js);
-				int count = json_array_get_count(jsArray);
-
-				/* EXECUTE name () is a syntax error */
-				fformat(out, count > 0 ? "EXECUTE %s (" : "EXECUTE %s", name);
-
-				for (int i = 0; i < count; i++)
-				{
-					const char *val = json_array_get_string(jsArray, i);
-
-					if (i > 0)
-					{
-						fformat(out, ", ");
-					}
-
-					if (val == NULL)
-					{
-						fformat(out, "NULL");
-					}
-					else
-					{
-						fformat(out, "'%s'", val);
-					}
-				}
-
-				fformat(out, count > 0 ? ")\n" : "\n");
-
-				json_value_free(js);
 				break;
 			}
 
@@ -4003,6 +3918,96 @@ done:
 		return false;
 	}
 
+	return true;
+}
+
+
+/*
+ * stream_apply_print_stmt prints a DML replay row as stream apply --target -
+ * does: a PREPARE the first time its hash comes, then an EXECUTE.
+ */
+bool
+stream_apply_print_stmt(FILE *out, ReplayDBStmt *s, StreamPrepared *prepared)
+{
+	if (s->stmt == NULL || s->data == NULL)
+	{
+		/* no SQL template or args: skip */
+		return true;
+	}
+
+	/* PREPARE once per distinct hash */
+	bool alreadyPrepared = false;
+
+	for (int i = 0; i < prepared->count; i++)
+	{
+		if (prepared->hashes[i] == s->hash)
+		{
+			alreadyPrepared = true;
+			break;
+		}
+	}
+
+	if (!alreadyPrepared)
+	{
+		char name[NAMEDATALEN] = { 0 };
+		sformat(name, sizeof(name), "%x", s->hash);
+
+		fformat(out, "PREPARE %s AS %s;\n", name, s->stmt);
+
+		if (prepared->count < STREAM_PRINT_MAX_PREPARED)
+		{
+			prepared->hashes[prepared->count++] = s->hash;
+		}
+	}
+
+	/* EXECUTE with args */
+	char name[NAMEDATALEN] = { 0 };
+	sformat(name, sizeof(name), "%x", s->hash);
+
+	/*
+	 * Parse the JSON array of argument values and format them as
+	 * a comma-separated list: EXECUTE name ('v1', 'v2', NULL, ...)
+	 */
+	JSON_Value *js = json_parse_string(s->data);
+
+	if (js == NULL ||
+		json_value_get_type(js) != JSONArray)
+	{
+		log_error("stream_apply_to_stdout: failed to parse "
+				  "args JSON for replay id %lld: %s",
+				  (long long) s->id, s->data);
+		json_value_free(js);
+		return false;
+	}
+
+	JSON_Array *jsArray = json_value_get_array(js);
+	int count = json_array_get_count(jsArray);
+
+	/* EXECUTE name () is a syntax error */
+	fformat(out, count > 0 ? "EXECUTE %s (" : "EXECUTE %s", name);
+
+	for (int i = 0; i < count; i++)
+	{
+		const char *val = json_array_get_string(jsArray, i);
+
+		if (i > 0)
+		{
+			fformat(out, ", ");
+		}
+
+		if (val == NULL)
+		{
+			fformat(out, "NULL");
+		}
+		else
+		{
+			fformat(out, "'%s'", val);
+		}
+	}
+
+	fformat(out, count > 0 ? ")\n" : "\n");
+
+	json_value_free(js);
 	return true;
 }
 

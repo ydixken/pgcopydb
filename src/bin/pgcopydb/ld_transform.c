@@ -149,6 +149,17 @@ stream_transform_context_init(StreamSpecs *specs)
 		}
 	}
 
+	return stream_transform_caches_init(specs);
+}
+
+
+/*
+ * stream_transform_caches_init reads the two sets that the statement builders
+ * take from the source catalog: generated columns and keyless tables.
+ */
+bool
+stream_transform_caches_init(StreamSpecs *specs)
+{
 	/*
 	 * Prepare the generated columns cache, which helps to skip the generated
 	 * columns in the SQL output.
@@ -165,7 +176,6 @@ stream_transform_context_init(StreamSpecs *specs)
 		/* errors have already been logged */
 		return false;
 	}
-
 
 	return true;
 }
@@ -1969,56 +1979,10 @@ stream_transform_write_replay_txn_rows(StreamSpecs *specs)
 
 		strlcpy(stmt.timestamp, currentStmt->timestamp, PG_MAX_TIMESTAMP);
 
-		switch (currentStmt->action)
+		if (!stream_write_statement(specs->replayNoOpUpdates, &stmt, currentStmt))
 		{
-			case STREAM_ACTION_INSERT:
-			{
-				if (!stream_write_insert(&stmt, &(currentStmt->stmt.insert)))
-				{
-					/* errors have already been logged */
-					return false;
-				}
-
-				break;
-			}
-
-			case STREAM_ACTION_UPDATE:
-			{
-				if (!stream_write_update(specs->replayNoOpUpdates,
-										 &stmt, &(currentStmt->stmt.update)))
-				{
-					/* errors have already been logged */
-					return false;
-				}
-				break;
-			}
-
-			case STREAM_ACTION_DELETE:
-			{
-				if (!stream_write_delete(&stmt, &(currentStmt->stmt.delete)))
-				{
-					/* errors have already been logged */
-					return false;
-				}
-				break;
-			}
-
-			case STREAM_ACTION_TRUNCATE:
-			{
-				if (!stream_write_truncate(&stmt, &(currentStmt->stmt.truncate)))
-				{
-					/* errors have already been logged */
-					return false;
-				}
-				break;
-			}
-
-			default:
-			{
-				log_error("BUG: Failed to write unexepected SQL action %d",
-						  currentStmt->action);
-				return false;
-			}
+			/* errors have already been logged */
+			return false;
 		}
 
 		if (!ld_store_insert_replay_stmt(specs->replayDB, &stmt))
@@ -2040,6 +2004,70 @@ stream_transform_write_replay_txn_rows(StreamSpecs *specs)
 	{
 		/* errors have already been logged */
 		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * stream_write_statement builds the SQL and the arguments of a DML statement
+ * into replayStmt.
+ */
+bool
+stream_write_statement(bool replayNoOpUpdates, ReplayDBStmt *replayStmt,
+					   LogicalTransactionStatement *stmt)
+{
+	switch (stmt->action)
+	{
+		case STREAM_ACTION_INSERT:
+		{
+			if (!stream_write_insert(replayStmt, &(stmt->stmt.insert)))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+
+			break;
+		}
+
+		case STREAM_ACTION_UPDATE:
+		{
+			if (!stream_write_update(replayNoOpUpdates,
+									 replayStmt, &(stmt->stmt.update)))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+			break;
+		}
+
+		case STREAM_ACTION_DELETE:
+		{
+			if (!stream_write_delete(replayStmt, &(stmt->stmt.delete)))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+			break;
+		}
+
+		case STREAM_ACTION_TRUNCATE:
+		{
+			if (!stream_write_truncate(replayStmt, &(stmt->stmt.truncate)))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+			break;
+		}
+
+		default:
+		{
+			log_error("BUG: Failed to write unexepected SQL action %d",
+					  stmt->action);
+			return false;
+		}
 	}
 
 	return true;
