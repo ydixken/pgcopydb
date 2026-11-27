@@ -137,6 +137,7 @@ interrupt() {
 # term_idle <first id - 1>: SIGTERM once apply has caught up with half a backlog and a paused
 # receive holds back the rest. With no target work left apply takes the clean stop at the top
 # of its loop, so follow exits 0 short of the backlog and the resume must apply the rest.
+# In performance mode a signal writes no done marker, so the run fails instead.
 term_idle() {
     local n rpid half=$((backlog / 2))
     insert_txns $(($1 + 1)) $(($1 + half)) term-idle
@@ -149,7 +150,11 @@ term_idle() {
     wait_follow 120
     n=$(count term-idle)
     echo "term-idle: follow exited ${rc} after SIGTERM with ${n} of ${backlog} rows applied"
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     test "${rc}" = 0 || fail "follow stopped by SIGTERM between groups exited ${rc}"
+    else
+    test "${rc}" = 12 || fail "follow stopped by SIGTERM between groups exited ${rc}, not 12"
+    fi
     test "${n}" = "${half}" || fail "${n} term-idle rows applied at the stop, expected ${half}"
     grep -q 'Apply process received a shutdown signal, stopping' "${follow_log}" ||
         fail 'apply did not take the clean stop at the top of its loop'
