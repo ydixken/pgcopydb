@@ -4578,7 +4578,7 @@ test_reader(const char *dir)
 	spool_reader_close(&reader);
 	kill_writer(&fresh);
 
-	/* as when cleanup and the start have removed every segment before segment 7 */
+	/* a lone segment 7 without an index file, which only damage leaves */
 	SpoolHeader seventh = {
 		.firstSeq = 7, .systemId = 7, .timeline = 2,
 		.lastFinalLSN = 0xD200, .lastEndLSN = 0xD230
