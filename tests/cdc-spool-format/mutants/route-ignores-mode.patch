@@ -1,0 +1,15 @@
+Mutant: the route ignores the follow mode. Must fail: sqlite mode keeps the SQLite spool, pgoutput included.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_stream.c
++++ b/src/bin/pgcopydb/ld_stream.c
+@@ -398,8 +398,7 @@
+ bool
+ stream_uses_raw_spool(StreamSpecs *specs)
+ {
+-	return specs->followMode == FOLLOW_MODE_PERFORMANCE &&
+-		   specs->slot.plugin == STREAM_PLUGIN_PGOUTPUT &&
++	return specs->slot.plugin == STREAM_PLUGIN_PGOUTPUT &&
+ 		   !specs->walWorker;
+ }
+ 
