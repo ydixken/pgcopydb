@@ -3906,6 +3906,22 @@ test_start_failures(const char *dir)
 	check(made && refused_twice(writer.dirname, 7, 0, line),
 		  "a relation log that cannot be opened ends every start of a spool without an index record, and no file changes");
 
+	/* a start refused before it opened the relation log, on a spool without its segment */
+	int nul = open("/dev/null", O_RDONLY);
+	bool duped = nul == 0 || (nul > 0 && dup2(nul, 0) == 0);
+
+	made = make_spool(&writer, dir) &&
+		   put_bytes(spool_file(files[0], writer.dirname, 9, ".idx"), -1, "x", 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+
+	check(duped && made && !started && fcntl(0, F_GETFD) != -1,
+		  "a refused start leaves descriptor 0 open");
+
+	if (nul > 0)
+	{
+		(void) close(nul);
+	}
+
 	/* a leftover of cleanup, then the index file and the segment of the last one */
 	struct
 	{
