@@ -336,7 +336,7 @@ perfdir() {
 "${OLD}" --version
 "${NEW}" ping
 
-for c in ${CASE:-one nine}; do
+for c in ${CASE:-one two nine}; do
     case "${c}" in
         one) one ;;
         two) two ;;
