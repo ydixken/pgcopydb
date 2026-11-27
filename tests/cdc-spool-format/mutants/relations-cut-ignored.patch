@@ -4,13 +4,13 @@ Apply from the repository root with git apply, and never commit it applied.
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
 @@ -2280,8 +2280,8 @@
- 	/* the removal is on disk before create, which uses O_EXCL, makes it again */
- 	if (((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname)) ||
- 		(start->relations.fd >= 0 &&
--		 !spool_cut_file(start->relations.fd, start->relations.path,
--						 start->relations.end)))
-+		 !(spool_cut_file(start->relations.fd, start->relations.path,
-+						  start->relations.end) || true)))
+ 
+ 	/* first, so that a crash after the removal of a new spool leaves a new one */
+ 	if (start->relations.fd >= 0 &&
+-		!spool_cut_file(start->relations.fd, start->relations.path,
+-						start->relations.end))
++		!(spool_cut_file(start->relations.fd, start->relations.path,
++						 start->relations.end) || true))
  	{
  		return false;
  	}

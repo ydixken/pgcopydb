@@ -3319,16 +3319,17 @@ test_start_cut(const char *dir)
 	check(made && refused_twice(name, 7, 0, line),
 		  "a relation log that holds records in a directory without a segment ends every start with an error that names it, and no file changes");
 
+	/* a first segment with a torn header beside a record of the relation log */
 	sformat(name, sizeof(name), "%s/tornlog", dir);
 	made = mkdir(name, 0700) == 0 &&
 		   put_bytes(spool_file(seg, name, SPOOL_FIRST_SEQ, ".seg"), -1, junk, 10) &&
-		   put_bytes(log_file(log, name), -1, junk, 10);
-	sformat(line, sizeof(line),
-			"Spool file \"%s\" holds 10 bytes, but the spool has no segment with a valid header",
-			log);
+		   put_bytes(log_file(log, name), -1, logged, loggedSize);
+	started = made && spool_writer_open(&opened, name, 7, 2, 0);
 
-	check(made && refused_twice(name, 7, 0, line),
-		  "a relation log that holds bytes beside an only segment with a torn header ends every start with an error that names it, and no file changes");
+	check(started && opened.nextSeq == SPOOL_FIRST_SEQ && opened.lastEndLSN == 0 &&
+		  file_size(seg) == SPOOL_HEADER_SIZE && file_size(log) == 0,
+		  "an only segment with a torn header and sequence number 1 is removed with the records of the relation log, and the spool starts again");
+	kill_writer(&opened);
 
 	sformat(name, sizeof(name), "%s/emptylog", dir);
 	made = mkdir(name, 0700) == 0 && put_bytes(log_file(log, name), -1, junk, 0);
@@ -3773,6 +3774,68 @@ test_start_failures(const char *dir)
 
 	check(made && injected && !started && one_line(logged_since(mark), " ERROR ", line),
 		  "a start that cannot sync the segment it creates again fails with an ERROR line that names it");
+
+	/* a new spool whose first flush synced its frames and definition, and no index record */
+	ok = true;
+
+	for (int fail = 1; fail <= 2; fail++)
+	{
+		sformat(line, sizeof(line), "%s/unindexed%d", dir, fail);
+		log_file(files[2], line);
+		made = mkdir(line, 0700) == 0 && spool_writer_open(&writer, line, 7, 2, 0) &&
+			   feed(&writer, firstTxn, lengthof(firstTxn)) &&
+			   spool_sync(&writer.segment) && spool_sync(&writer.relationLog);
+		kill_writer(&writer);
+
+		/* the sync of the cut relation log, then the one of the removal */
+		mark = log_mark();
+		fsyncSkips = fail - 1;
+		fsyncFailures = 1;
+		started = made && file_size(files[2]) > 0 &&
+				  spool_writer_open(&opened, line, 7, 2, 0);
+		injected = fsyncFailures == 0;
+		fsyncFailures = 0;
+		fsyncSkips = 0;
+
+		bool refused = made && injected && !started &&
+					   count(logged_since(mark), " ERROR ") == 1;
+
+		started = refused && spool_writer_open(&opened, line, 7, 2, 0);
+		ok = ok && started && opened.nextSeq == SPOOL_FIRST_SEQ &&
+			 opened.lastEndLSN == 0 && file_size(files[2]) == 0 &&
+			 file_size(spool_file(files[1], line, SPOOL_FIRST_SEQ, ".seg")) ==
+			 SPOOL_HEADER_SIZE;
+
+		if (started)
+		{
+			kill_writer(&opened);
+		}
+	}
+
+	check(ok,
+		  "a start that fails after it removed the only segment of a new spool leaves a new spool, which the next start begins");
+
+	/* the same above sequence number 1, which a spool never restarts at */
+	made = new_writer(&writer, dir, &spoolHeader, 0) &&
+		   feed(&writer, firstTxn, lengthof(firstTxn)) &&
+		   spool_sync(&writer.segment) && spool_sync(&writer.relationLog);
+	kill_writer(&writer);
+
+	int64_t logSize = file_size(log_file(files[2], writer.dirname));
+
+	fsyncSkips = 1;
+	fsyncFailures = 1;
+	started = made && logSize > 0 && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	injected = fsyncFailures == 0;
+	fsyncFailures = 0;
+	fsyncSkips = 0;
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds %" PRId64
+			" bytes, but the spool has no segment with a valid header", files[2],
+			logSize);
+
+	check(made && injected && !started && refused_twice(writer.dirname, 7, 0, line),
+		  "a start that fails after it removed the only segment above sequence number 1 keeps the relation log, and every later start ends with an error");
 
 	/* more definitions than the 256 bytes of a new PQExpBuffer hold, in the first */
 	Msg defined[13] = { firstTxn[0] };

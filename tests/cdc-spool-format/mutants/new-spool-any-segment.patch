@@ -1,0 +1,14 @@
+Mutant: the start empties the relation log whenever it removes an only segment, also above sequence number 1. Must fail: a start that fails after it removed the only segment above sequence number 1 keeps the relation log, and every later start ends with an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2244,7 +2244,7 @@
+ 	}
+ 
+ 	/* nothing of a new spool is indexed, and a new session sends each definition again */
+-	if (start->removed && seq == SPOOL_FIRST_SEQ)
++	if (start->removed && before == 0)
+ 	{
+ 		start->relations.end = 0;
+ 	}

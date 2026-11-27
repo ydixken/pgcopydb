@@ -1,13 +1,13 @@
-Mutant: a start that creates a headed last segment again refuses a relation log that holds bytes. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header; a last segment whose index file holds no valid record is removed with it, and created again from its header.
+Mutant: a start that creates a headed last segment again refuses a relation log that holds bytes. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header; a last segment whose index file holds no valid record is removed with it, and created again from its header; an only segment with a torn header and sequence number 1 is removed with the records of the relation log, and the spool starts again.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2244,7 +2244,7 @@
- 	}
- 
- 	/* a new spool: relation records follow the first segment, so these are damage */
--	if (start->tail == NULL && !start->last.headed && start->relations.size > 0)
+@@ -2253,7 +2253,7 @@
+ 	 * Relation records follow the first segment, and the start empties the log
+ 	 * of a new spool before it removes that segment, so these are damage.
+ 	 */
+-	if (seq == 0 && start->relations.size > 0)
 +	if (start->tail == NULL && start->relations.size > 0)
  	{
  		log_error("Spool file \"%s\" holds %" PRIu64

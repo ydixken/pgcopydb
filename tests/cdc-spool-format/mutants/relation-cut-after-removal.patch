@@ -1,0 +1,44 @@
+Mutant: the start cuts the relation log after it removed the last segment and synced the directory. Must fail: a start that fails after it removed the only segment of a new spool leaves a new spool, which the next start begins.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2278,24 +2278,24 @@
+ 	sformat(leftover, sizeof(leftover), "%s/%016" PRIX64 ".seg", dirname,
+ 			start->leftover);
+ 
++	/* the index file first, as cleanup does */
++	if ((start->leftover > 0 && !unlink_file(leftover)) ||
++		(start->removed &&
++		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
++	{
++		return false;
++	}
++
++	/* the removal is on disk before create, which uses O_EXCL, makes it again */
++	if ((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname))
++	{
++		return false;
++	}
++
+ 	/* first, so that a crash after the removal of a new spool leaves a new one */
+ 	if (start->relations.fd >= 0 &&
+ 		!spool_cut_file(start->relations.fd, start->relations.path,
+ 						start->relations.end))
+-	{
+-		return false;
+-	}
+-
+-	/* the index file first, as cleanup does */
+-	if ((start->leftover > 0 && !unlink_file(leftover)) ||
+-		(start->removed &&
+-		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
+-	{
+-		return false;
+-	}
+-
+-	/* the removal is on disk before create, which uses O_EXCL, makes it again */
+-	if ((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname))
+ 	{
+ 		return false;
+ 	}

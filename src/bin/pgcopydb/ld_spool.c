@@ -1835,7 +1835,7 @@ typedef struct SpoolRelations
 	char path[MAXPGPATH];
 	int fd;                     /* open to cut, -1 when the log does not exist */
 	uint64_t size;
-	uint64_t end;               /* of its last valid record */
+	uint64_t end;               /* where the act pass cuts it */
 } SpoolRelations;
 
 
@@ -2243,8 +2243,17 @@ spool_start_read(SpoolStart *start, const char *dirname,
 		return false;
 	}
 
-	/* a new spool: relation records follow the first segment, so these are damage */
-	if (start->tail == NULL && !start->last.headed && start->relations.size > 0)
+	/* nothing of a new spool is indexed, and a new session sends each definition again */
+	if (start->removed && seq == SPOOL_FIRST_SEQ)
+	{
+		start->relations.end = 0;
+	}
+
+	/*
+	 * Relation records follow the first segment, and the start empties the log
+	 * of a new spool before it removes that segment, so these are damage.
+	 */
+	if (seq == 0 && start->relations.size > 0)
 	{
 		log_error("Spool file \"%s\" holds %" PRIu64
 				  " bytes, but the spool has no segment with a valid header",
@@ -2269,6 +2278,14 @@ spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
 	sformat(leftover, sizeof(leftover), "%s/%016" PRIX64 ".seg", dirname,
 			start->leftover);
 
+	/* first, so that a crash after the removal of a new spool leaves a new one */
+	if (start->relations.fd >= 0 &&
+		!spool_cut_file(start->relations.fd, start->relations.path,
+						start->relations.end))
+	{
+		return false;
+	}
+
 	/* the index file first, as cleanup does */
 	if ((start->leftover > 0 && !unlink_file(leftover)) ||
 		(start->removed &&
@@ -2278,10 +2295,7 @@ spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
 	}
 
 	/* the removal is on disk before create, which uses O_EXCL, makes it again */
-	if (((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname)) ||
-		(start->relations.fd >= 0 &&
-		 !spool_cut_file(start->relations.fd, start->relations.path,
-						 start->relations.end)))
+	if ((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname))
 	{
 		return false;
 	}
