@@ -4281,14 +4281,15 @@ test_index_chunks(const char *dir)
 }
 
 
-/* runs pgcopydb with args, and returns its output and exit status */
+/* runs pgcopydb with args, and returns its output, with its log when logged */
 static char *
-run_pgcopydb(const char *binary, const char *args, int *status)
+run_pgcopydb(const char *binary, const char *args, bool logged, int *status)
 {
 	static char output[64 * 1024];
 	char command[4 * MAXPGPATH];
 
-	sformat(command, sizeof(command), "%s %s 2>/dev/null", binary, args);
+	sformat(command, sizeof(command), "%s %s %s", binary, args,
+			logged ? "2>&1" : "2>/dev/null");
 
 	FILE *pipe = popen(command, "r");
 	size_t n = pipe == NULL ? 0 : fread(output, 1, sizeof(output) - 1, pipe);
@@ -4331,7 +4332,7 @@ test_list_spool(const char *dir, const char *binary)
 	/* pgcopydb prints the commit time in the local time zone */
 	setenv("TZ", "UTC", 1);
 
-	char *output = made ? run_pgcopydb(binary, args, &status) : "";
+	char *output = made ? run_pgcopydb(binary, args, false, &status) : "";
 	JSON_Value *js = json_parse_string(output);
 	JSON_Array *array = json_value_get_array(js);
 	JSON_Object *first = json_array_get_object(array, 0);
@@ -4356,27 +4357,32 @@ test_list_spool(const char *dir, const char *binary)
 	json_value_free(js);
 
 	sformat(args, sizeof(args), "list spool --dir %s", top);
-	output = made ? run_pgcopydb(binary, args, &status) : "";
+	output = made ? run_pgcopydb(binary, args, false, &status) : "";
 
 	check(made && status == 0 && count(output, "\n") == 3 &&
 		  count(output, "0000000000000001 |") == 2 && strstr(output, "0/230") != NULL,
 		  "pgcopydb list spool prints a header and one line per index record");
 
 	char idx[MAXPGPATH];
+	char line[2 * MAXPGPATH];
 
 	made = made && flip_byte(spool_file(idx, cdc, 1, ".idx"), 10);
-	output = made ? run_pgcopydb(binary, args, &status) : "";
-	check(made && status != 0, "pgcopydb list spool fails on a damaged index record");
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds no valid index record at offset 0", idx);
+	output = made ? run_pgcopydb(binary, args, true, &status) : "";
+	check(made && status != 0 && one_line(output, " ERROR ", line),
+		  "pgcopydb list spool fails on a damaged index record");
 
 	sformat(args, sizeof(args), "list spool --dir %s --bogus", top);
-	output = made ? run_pgcopydb(binary, args, &status) : "";
+	output = made ? run_pgcopydb(binary, args, false, &status) : "";
 	check(made && status != 0 && strstr(output, "Segment") == NULL,
 		  "pgcopydb list spool refuses an unknown option");
 
 	sformat(top, sizeof(top), "%s/unspooled", dir);
 	sformat(args, sizeof(args), "list spool --dir %s", top);
-	output = mkdir(top, 0700) == 0 ? run_pgcopydb(binary, args, &status) : "";
-	check(status != 0 && strstr(output, "Segment") == NULL,
+	made = mkdir(top, 0700) == 0;
+	output = made ? run_pgcopydb(binary, args, false, &status) : "";
+	check(made && status != 0 && strstr(output, "Segment") == NULL,
 		  "pgcopydb list spool fails on a work directory without a spool");
 }
 
