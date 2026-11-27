@@ -1,0 +1,14 @@
+Mutant: a reader of a spool without an index file looks for sequence number 1. Must fail: a reader of a spool whose only segment is above sequence number 1 and has no index file waits, and reads it once it is there.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2590,7 +2590,7 @@
+ 	}
+ 
+ 	/* without an index file, the next record is the first one of the lowest segment */
+-	if (count == 0 && spool_lowest(&segments) > 0)
++	if (false && count == 0 && spool_lowest(&segments) > 0)
+ 	{
+ 		reader->nextSeq = spool_lowest(&segments);
+ 	}

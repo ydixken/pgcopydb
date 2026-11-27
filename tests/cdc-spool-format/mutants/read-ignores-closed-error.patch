@@ -1,0 +1,17 @@
+Mutant: the read of an index file goes on when it cannot look up the next index file. Must fail: a reader that cannot look up the index file of the next segment fails with an ERROR line, and does not wait.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2497,9 +2497,9 @@
+ 
+ 			bool damaged = offset + SPOOL_INDEX_RECORD_SIZE < size;
+ 
+-			if (!damaged && !spool_reader_closed(reader, next, &damaged))
++			if (!damaged)
+ 			{
+-				return false;
++				(void) spool_reader_closed(reader, next, &damaged);
+ 			}
+ 
+ 			if (damaged)

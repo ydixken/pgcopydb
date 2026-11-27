@@ -1,14 +1,16 @@
-Mutant: an index record before a removed last segment that cannot be read counts as none. Must fail: a start that cannot read the last index record before a removed last segment fails with an ERROR line.
+Mutant: an index of the segment before a last one without an indexed transaction that cannot be read counts as read up to the failure. Must fail: a start that cannot read the index of the segment before a headed last segment fails with one ERROR line; a start that cannot read the second chunk of the index before a torn last segment fails with one ERROR line, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2064,7 +2064,7 @@
- 	*synced = tail.last.relationLogEnd;
- 	spool_tail_close(&tail);
+@@ -2210,8 +2210,8 @@
  
--	return read;
-+	return read || true;
- }
- 
- 
+ 	if (start->removed && before > 0)
+ 	{
+-		if (!spool_tail_read(&start->before, dirname, before,
+-							 spool_listed(indexes, before)) ||
++		if ((!spool_tail_read(&start->before, dirname, before,
++							  spool_listed(indexes, before)) && false) ||
+ 			!spool_tail_source(&start->before, fresh->systemId))
+ 		{
+ 			return false;

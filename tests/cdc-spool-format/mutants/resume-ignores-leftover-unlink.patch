@@ -3,15 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2066,10 +2066,7 @@
+@@ -2270,7 +2270,7 @@
+ 			start->leftover);
  
- 			sformat(path, sizeof(path), "%s/%016" PRIX64 ".seg", dirname, seqs[i]);
- 
--			if (!unlink_file(path))
--			{
--				return false;
--			}
-+			(void) unlink_file(path);
- 
- 			removed = true;
- 		}
+ 	/* the index file first, as cleanup does */
+-	if ((start->leftover > 0 && !unlink_file(leftover)) ||
++	if ((start->leftover > 0 && !(unlink_file(leftover) || true)) ||
+ 		(start->removed &&
+ 		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
+ 	{

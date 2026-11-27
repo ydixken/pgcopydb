@@ -1,0 +1,56 @@
+Mutant: the start compares the system identifiers after it removed the leftover and the last segment. Must fail: a spool of another source system with a leftover of cleanup ends every start with an error that names both, and no file changes; a spool of another source system behind a torn last segment ends every start with an error that names both, and no file changes; a spool of another source system before a headed last segment of the source ends every start with an error that names both, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2184,8 +2184,7 @@
+ 	start->header = *fresh;
+ 
+ 	if (seq > 0 &&
+-		(!spool_tail_read(&start->last, dirname, seq, spool_listed(indexes, seq)) ||
+-		 !spool_tail_source(&start->last, fresh->systemId)))
++		!spool_tail_read(&start->last, dirname, seq, spool_listed(indexes, seq)))
+ 	{
+ 		return false;
+ 	}
+@@ -2211,8 +2210,7 @@
+ 	if (start->removed && before > 0)
+ 	{
+ 		if (!spool_tail_read(&start->before, dirname, before,
+-							 spool_listed(indexes, before)) ||
+-			!spool_tail_source(&start->before, fresh->systemId))
++							 spool_listed(indexes, before)))
+ 		{
+ 			return false;
+ 		}
+@@ -2262,7 +2260,7 @@
+  */
+ static bool
+ spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
+-				uint64_t maxSegmentSize)
++				uint64_t maxSegmentSize, uint64_t systemId)
+ {
+ 	char leftover[MAXPGPATH];
+ 
+@@ -2273,6 +2271,12 @@
+ 	if ((start->leftover > 0 && !unlink_file(leftover)) ||
+ 		(start->removed &&
+ 		 (!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename))))
++	{
++		return false;
++	}
++
++	if (!spool_tail_source(&start->last, systemId) ||
++		!spool_tail_source(&start->before, systemId))
+ 	{
+ 		return false;
+ 	}
+@@ -2312,7 +2316,7 @@
+ 	};
+ 
+ 	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh) &&
+-				   spool_start_act(&start, writer, dirname, maxSegmentSize);
++				   spool_start_act(&start, writer, dirname, maxSegmentSize, fresh->systemId);
+ 
+ 	spool_tail_close(&start.last);
+ 	spool_tail_close(&start.before);

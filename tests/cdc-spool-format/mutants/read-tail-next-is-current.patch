@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2260,9 +2260,7 @@
+@@ -2491,9 +2491,7 @@
  		if (!spool_index_decode(bytes + at, done - at, record))
  		{
  			uint64_t offset = reader->indexOffset + at;
@@ -12,5 +12,5 @@ Apply from the repository root with git apply, and never commit it applied.
 -							reader->nextSeq;
 +			uint64_t next = reader->nextSeq;
  
- 			if (offset + SPOOL_INDEX_RECORD_SIZE < size ||
- 				spool_reader_closed(reader, next))
+ 			bool damaged = offset + SPOOL_INDEX_RECORD_SIZE < size;
+ 

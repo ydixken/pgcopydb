@@ -1,14 +1,15 @@
-Mutant: the start compares the system identifier only in the header of the last segment. Must fail: a spool of another source system behind a torn last segment ends every start with an error that names both, and no file changes.
+Mutant: the start compares the system identifier only in the header of the last segment. Must fail: a spool of another source system behind a torn last segment ends every start with an error that names both, and no file changes; a spool of another source system before a headed last segment of the source ends every start with an error that names both, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2125,7 +2125,7 @@
- 		}
- 
- 		/* frames of another source would be applied as if the slot sent them */
--		if (tail.headed && tail.header.systemId != fresh->systemId)
-+		if (round == 0 && tail.headed && tail.header.systemId != fresh->systemId)
+@@ -2211,8 +2211,7 @@
+ 	if (start->removed && before > 0)
+ 	{
+ 		if (!spool_tail_read(&start->before, dirname, before,
+-							 spool_listed(indexes, before)) ||
+-			!spool_tail_source(&start->before, fresh->systemId))
++							 spool_listed(indexes, before)))
  		{
- 			log_error("Spool file \"%s\" holds the changes of source system %" PRIu64
- 					  ", and the source is system %" PRIu64,
+ 			return false;
+ 		}

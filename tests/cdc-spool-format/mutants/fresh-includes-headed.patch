@@ -1,0 +1,14 @@
+Mutant: a start that creates a headed last segment again refuses a relation log that holds bytes. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header; a last segment whose index file holds no valid record is removed with it, and created again from its header.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2244,7 +2244,7 @@
+ 	}
+ 
+ 	/* a new spool: relation records follow the first segment, so these are damage */
+-	if (start->tail == NULL && !start->last.headed && start->relations.size > 0)
++	if (start->tail == NULL && start->relations.size > 0)
+ 	{
+ 		log_error("Spool file \"%s\" holds %" PRIu64
+ 				  " bytes, but the spool has no segment with a valid header",

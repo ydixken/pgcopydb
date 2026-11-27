@@ -3,18 +3,18 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1841,12 +1841,8 @@
+@@ -1874,12 +1874,8 @@
  
- 	bool cut = read_file(path, &bytes, &size);
+ 	log->size = (uint64_t) size;
  
--	while (cut && end < (uint64_t) size &&
--		   spool_relation_decode(bytes + end, (uint64_t) size - end,
+-	while (log->end < log->size &&
+-		   spool_relation_decode(bytes + log->end, log->size - log->end,
 -								 &record) == SPOOL_FRAME_OK)
 -	{
--		end += SPOOL_RELATION_RECORD_SIZE(record.length);
+-		log->end += SPOOL_RELATION_RECORD_SIZE(record.length);
 -	}
 +	(void) record;
-+	end = (uint64_t) size;
++	log->end = log->size;
  
- 	/* a cut there would decode later rows with an older definition */
- 	if (cut && end < synced)
+ 	free(bytes);
+ 

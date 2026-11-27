@@ -3,13 +3,13 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2106,8 +2106,7 @@
- 		}
+@@ -2194,8 +2194,7 @@
+ 	start->tail = seq > 0 && !start->removed ? &start->last : NULL;
  
- 		/* a torn header hides where the spool goes on: only a new one restarts */
--		if (!tail.headed && seq != SPOOL_FIRST_SEQ &&
--			spool_highest_below(indexes, seq) == 0)
-+		if (!tail.headed && spool_highest_below(indexes, seq) == 0)
- 		{
- 			log_error("Spool file \"%s\" has no valid header, and no segment "
- 					  "before it to continue from", tail.segment.filename);
+ 	/* a torn header hides where the spool goes on: only a new one restarts */
+-	if (start->removed && !start->last.headed && before == 0 &&
+-		seq != SPOOL_FIRST_SEQ)
++	if (start->removed && !start->last.headed && before == 0)
+ 	{
+ 		log_error("Spool file \"%s\" has no valid header, and no segment "
+ 				  "before it to continue from", start->last.segment.filename);

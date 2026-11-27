@@ -3,15 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2054,11 +2054,6 @@
+@@ -2208,7 +2208,7 @@
+ 		start->header = start->last.header;
+ 	}
  
- 	*synced = 0;
- 
--	if (before == 0)
--	{
--		return true;
--	}
--
- 	bool read = spool_tail_read(&tail, dirname, before, true);
- 
- 	*synced = tail.last.relationLogEnd;
+-	if (start->removed && before > 0)
++	if (start->removed)
+ 	{
+ 		if (!spool_tail_read(&start->before, dirname, before,
+ 							 spool_listed(indexes, before)) ||

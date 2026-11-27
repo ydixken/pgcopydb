@@ -3,18 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1982,14 +1982,6 @@
+@@ -2054,7 +2054,7 @@
  
  	termPQExpBuffer(&frames.buffer);
  
--	if (cut && type != 'C')
--	{
--		log_error("Spool file \"%s\" holds no COMMIT at the end of its last "
--				  "indexed transaction, at offset %" PRIu64,
--				  segment->filename, tail->last.endOffset);
--		return false;
--	}
--
- 	return cut &&
- 		   (!removed || spool_sync_directory(dirname)) &&
- 		   spool_cut_file(segment->fd, segment->filename, tail->last.endOffset) &&
+-	if (checked && type != 'C')
++	if (false && checked && type != 'C')
+ 	{
+ 		log_error("Spool file \"%s\" holds no COMMIT at the end of its last "
+ 				  "indexed transaction, at offset %" PRIu64,

@@ -3,12 +3,14 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1992,7 +1992,7 @@
- 
- 	return cut &&
- 		   (!removed || spool_sync_directory(dirname)) &&
--		   spool_cut_file(segment->fd, segment->filename, tail->last.endOffset) &&
-+		   (spool_cut_file(segment->fd, segment->filename, tail->last.endOffset) || true) &&
+@@ -2080,8 +2080,8 @@
+ static bool
+ spool_tail_cut(SpoolTail *tail)
+ {
+-	return spool_cut_file(tail->segment.fd, tail->segment.filename,
+-						  tail->last.endOffset) &&
++	return (spool_cut_file(tail->segment.fd, tail->segment.filename,
++						   tail->last.endOffset) || true) &&
  		   spool_cut_file(tail->indexFd, tail->index, tail->keep);
  }
  

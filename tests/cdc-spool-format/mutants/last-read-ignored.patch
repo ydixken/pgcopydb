@@ -1,0 +1,14 @@
+Mutant: a last segment that the start cannot read counts as read up to the failure. Must fail: a start that cannot read the segment or its index fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2184,7 +2184,7 @@
+ 	start->header = *fresh;
+ 
+ 	if (seq > 0 &&
+-		(!spool_tail_read(&start->last, dirname, seq, spool_listed(indexes, seq)) ||
++		((!spool_tail_read(&start->last, dirname, seq, spool_listed(indexes, seq)) && false) ||
+ 		 !spool_tail_source(&start->last, fresh->systemId)))
+ 	{
+ 		return false;

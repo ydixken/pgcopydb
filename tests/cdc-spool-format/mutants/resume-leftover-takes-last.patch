@@ -1,14 +1,14 @@
-Mutant: the last segment without an index file is deleted as a leftover too. Must fail: a last segment without an index file is removed, the directory synced, and the segment created again from its header.
+Mutant: the last segment without an index file counts as a leftover of cleanup too. Must fail: a last segment with a torn header is removed, the writer appends to the segment before it, and rotation creates the removed one again.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2060,7 +2060,7 @@
+@@ -2165,7 +2165,7 @@
  
  	for (int i = 0; i < count; i++)
  	{
--		if (seqs[i] != seq && !spool_listed(indexes, seqs[i]))
-+		if (!spool_listed(indexes, seqs[i]))
+-		if (seqs[i] == seq || spool_listed(indexes, seqs[i]))
++		if (spool_listed(indexes, seqs[i]))
  		{
- 			char path[MAXPGPATH];
- 
+ 			continue;
+ 		}

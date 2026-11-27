@@ -3,12 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2127,7 +2127,7 @@
- 		if (tail.keep > 0)
- 		{
- 			bool resumed =
--				spool_cut_relations(dirname, tail.last.relationLogEnd) &&
-+				spool_cut_relations(dirname, 0) &&
- 				spool_tail_cut(&tail, dirname, removed) &&
- 				spool_tail_append(&tail, writer, dirname, maxSegmentSize);
+@@ -2235,7 +2235,7 @@
  
+ 	/* the last valid index record proves the relation log synced up to its length */
+ 	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
+-					  start->last.last.relationLogEnd;
++					  0;
+ 
+ 	if ((start->tail != NULL && !spool_tail_check(start->tail)) ||
+ 		!spool_relations_read(&start->relations, dirname, synced))

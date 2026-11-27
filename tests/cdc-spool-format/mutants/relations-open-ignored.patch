@@ -3,13 +3,13 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1832,8 +1832,7 @@
+@@ -1863,8 +1863,7 @@
  
- 	if (fd < 0)
+ 	if (log->fd < 0)
  	{
--		log_error("Failed to open spool file \"%s\": %m", path);
+-		log_error("Failed to open spool file \"%s\": %m", log->path);
 -		return false;
 +		return true;
  	}
  
- 	bool cut = read_file(path, &bytes, &size);
+ 	if (!read_file(log->path, &bytes, &size))

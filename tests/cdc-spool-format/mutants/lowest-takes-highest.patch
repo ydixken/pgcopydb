@@ -1,0 +1,14 @@
+Mutant: the lowest segment of a list is its highest one. Must fail: a segment file without its index file is deleted as a leftover of cleanup, and the directory synced.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1647,7 +1647,7 @@
+ 
+ 	for (int i = 0; i < count; i++)
+ 	{
+-		if (lowest == 0 || seqs[i] < lowest)
++		if (lowest == 0 || seqs[i] > lowest)
+ 		{
+ 			lowest = seqs[i];
+ 		}

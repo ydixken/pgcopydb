@@ -1,14 +1,14 @@
-Mutant: the start that creates a removed last segment again cuts the relation log without the length of the index record before it. Must fail: a relation log damaged below the length that the index record before a headed last segment holds ends every start with an error, and no file changes.
+Mutant: the start that creates a removed last segment again cuts the relation log without the length of the index record before it. Must fail: a relation log damaged below the length that the index record before a headed last segment holds ends every start with an error, and no file changes; the relation log of a start that removes a headed last segment is bound by the last index record of the segment before it.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2170,7 +2170,7 @@
+@@ -2234,7 +2234,7 @@
+ 	}
  
- 			return spool_sync_directory(dirname) &&
- 				   spool_synced_before(dirname, indexes, seq, &synced) &&
--				   spool_cut_relations(dirname, synced) &&
-+				   spool_cut_relations(dirname, 0) &&
- 				   spool_writer_create(writer, dirname, &tail.header, maxSegmentSize);
- 		}
+ 	/* the last valid index record proves the relation log synced up to its length */
+-	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
++	uint64_t synced = start->removed ? (start->last.headed ? 0 : start->before.last.relationLogEnd) :
+ 					  start->last.last.relationLogEnd;
  
+ 	if ((start->tail != NULL && !spool_tail_check(start->tail)) ||

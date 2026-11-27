@@ -1,0 +1,20 @@
+Mutant: a segment without its index file that is neither the lowest nor the last is removed as a leftover. Must fail: a segment without its index file that is neither the lowest nor the last ends every start with an error that names it, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2170,14 +2170,6 @@
+ 			continue;
+ 		}
+ 
+-		if (seqs[i] != spool_lowest(segments))
+-		{
+-			log_error("Spool file \"%s/%016" PRIX64
+-					  ".seg\" has no index file, and is neither the lowest "
+-					  "segment nor the last one", dirname, seqs[i]);
+-			return false;
+-		}
+-
+ 		start->leftover = seqs[i];
+ 	}
+ 

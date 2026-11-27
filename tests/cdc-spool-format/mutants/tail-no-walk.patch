@@ -3,24 +3,28 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1967,18 +1967,8 @@
+@@ -2036,21 +2036,9 @@
  	sformat(frames.filename, sizeof(frames.filename), "%s", segment->filename);
  	initPQExpBuffer(&frames.buffer);
  
--	while (cut && !done)
+-	while (checked && !done)
 -	{
 -		const char *message = NULL;
 -		uint32_t length = 0;
 -
--		cut = spool_frames_next(&frames, &message, &length, &done);
+-		checked = spool_frames_next(&frames, &message, &length, &done);
 -
--		if (cut && !done)
+-		if (checked && !done)
 -		{
+-			int pos = SPOOL_XLOGDATA_HEADER_SIZE + 10;
+-
 -			type = message[SPOOL_XLOGDATA_HEADER_SIZE];
+-			endLSN = type == 'C' ? pgout_u64(message, &pos, (int) length) : 0;
 -		}
 -	}
 +	(void) done;
 +	type = 'C';
++	endLSN = tail->last.endLSN;
  
  	termPQExpBuffer(&frames.buffer);
  

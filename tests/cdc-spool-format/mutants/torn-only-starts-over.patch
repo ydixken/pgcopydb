@@ -1,21 +1,21 @@
-Mutant: an only segment with a torn header starts the spool again at sequence number 1, whatever its name. Must fail: an only segment with a torn header and a sequence number above 1 ends every start with an error that names it, and no file changes.
+Mutant: an only segment with a torn header begins a new spool at sequence number 1, whatever its name. Must fail: an only segment with a torn header and a sequence number above 1 ends every start with an error that names it, and no file changes.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2105,15 +2105,6 @@
- 			return false;
- 		}
+@@ -2193,15 +2193,6 @@
+ 	start->removed = seq > 0 && start->last.keep == 0;
+ 	start->tail = seq > 0 && !start->removed ? &start->last : NULL;
  
--		/* a torn header hides where the spool goes on: only a new one restarts */
--		if (!tail.headed && seq != SPOOL_FIRST_SEQ &&
--			spool_highest_below(indexes, seq) == 0)
--		{
--			log_error("Spool file \"%s\" has no valid header, and no segment "
--					  "before it to continue from", tail.segment.filename);
--			return false;
--		}
+-	/* a torn header hides where the spool goes on: only a new one restarts */
+-	if (start->removed && !start->last.headed && before == 0 &&
+-		seq != SPOOL_FIRST_SEQ)
+-	{
+-		log_error("Spool file \"%s\" has no valid header, and no segment "
+-				  "before it to continue from", start->last.segment.filename);
+-		return false;
+-	}
 -
- 		/* the index file first, as cleanup does */
- 		if (!unlink_file(tail.index) || !unlink_file(tail.segment.filename))
- 		{
+ 	/* the header gives the last transaction before it, also after cleanup */
+ 	if (start->removed && start->last.headed)
+ 	{

@@ -3,11 +3,11 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1966,6 +1966,7 @@
+@@ -2035,6 +2035,7 @@
  
  	sformat(frames.filename, sizeof(frames.filename), "%s", segment->filename);
  	initPQExpBuffer(&frames.buffer);
 +	(void) ftruncate(segment->fd, (off_t) tail->last.endOffset);
  
- 	while (cut && !done)
+ 	while (checked && !done)
  	{

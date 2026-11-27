@@ -3,9 +3,9 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1957,13 +1957,6 @@
- 	bool done = false;
+@@ -2026,13 +2026,6 @@
  	char type = 0;
+ 	uint64_t endLSN = 0;
  
 -	if (!tail->headed)
 -	{

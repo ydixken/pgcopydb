@@ -3,16 +3,16 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1827,12 +1827,6 @@
+@@ -1854,12 +1854,6 @@
+ 	sformat(log->path, sizeof(log->path), "%s/" SPOOL_RELATION_LOG, dirname);
  
- 	int fd = open(path, O_WRONLY);
- 
--	if (fd < 0 && errno == ENOENT && synced == 0)
+ 	log->fd = open(log->path, O_WRONLY);
+-
+-	if (log->fd < 0 && errno == ENOENT && synced == 0)
 -	{
 -		/* a new spool, whose writer creates the log */
 -		return true;
 -	}
--
- 	if (fd < 0)
+ 
+ 	if (log->fd < 0)
  	{
- 		log_error("Failed to open spool file \"%s\": %m", path);

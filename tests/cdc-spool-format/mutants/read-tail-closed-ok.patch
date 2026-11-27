@@ -3,13 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2264,8 +2264,7 @@
- 							reader->chunk[reader->chunkCount - 1].seq + 1 :
- 							reader->nextSeq;
+@@ -2497,7 +2497,7 @@
  
--			if (offset + SPOOL_INDEX_RECORD_SIZE < size ||
--				spool_reader_closed(reader, next))
-+			if (offset + SPOOL_INDEX_RECORD_SIZE < size)
+ 			bool damaged = offset + SPOOL_INDEX_RECORD_SIZE < size;
+ 
+-			if (!damaged && !spool_reader_closed(reader, next, &damaged))
++			if (false && !spool_reader_closed(reader, next, &damaged))
  			{
- 				log_error("Spool file \"%s\" holds no valid index record at "
- 						  "offset %" PRIu64, reader->indexFilename, offset);
+ 				return false;
+ 			}

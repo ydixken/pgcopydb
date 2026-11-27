@@ -3,12 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1827,7 +1827,7 @@
+@@ -1855,7 +1855,7 @@
  
- 	int fd = open(path, O_WRONLY);
+ 	log->fd = open(log->path, O_WRONLY);
  
--	if (fd < 0 && errno == ENOENT && synced == 0)
-+	if (fd < 0 && errno == ENOENT)
+-	if (log->fd < 0 && errno == ENOENT && synced == 0)
++	if (log->fd < 0 && errno == ENOENT)
  	{
  		/* a new spool, whose writer creates the log */
  		return true;

@@ -1,4 +1,4 @@
-Mutant: a file of sequence number 0 is taken for a spool file. Must fail: files of other names in the spool directory are left alone.
+Mutant: a file of sequence number 0 is taken for a spool file. Must fail: a reader passes by files of other names in the spool directory.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c

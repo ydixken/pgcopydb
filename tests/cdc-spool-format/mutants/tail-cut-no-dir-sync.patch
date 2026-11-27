@@ -3,11 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1991,7 +1991,6 @@
+@@ -2278,7 +2278,7 @@
  	}
  
- 	return cut &&
--		   (!removed || spool_sync_directory(dirname)) &&
- 		   spool_cut_file(segment->fd, segment->filename, tail->last.endOffset) &&
- 		   spool_cut_file(tail->indexFd, tail->index, tail->keep);
- }
+ 	/* the removal is on disk before create, which uses O_EXCL, makes it again */
+-	if (((start->leftover > 0 || start->removed) && !spool_sync_directory(dirname)) ||
++	if ((start->removed && !spool_sync_directory(dirname)) ||
+ 		(start->relations.fd >= 0 &&
+ 		 !spool_cut_file(start->relations.fd, start->relations.path,
+ 						 start->relations.end)))

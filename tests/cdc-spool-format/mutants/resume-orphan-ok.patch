@@ -3,10 +3,11 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2045,16 +2045,6 @@
+@@ -2149,17 +2149,6 @@
+ 	int count = 0;
  	uint64_t *seqs = spool_seqs(indexes, &count);
  
- 	/* cleanup unlinks the index file first, so every index has its segment */
+-	/* cleanup unlinks the index file first, so every index has its segment */
 -	for (int i = 0; i < count; i++)
 -	{
 -		if (!spool_listed(segments, seqs[i]))
@@ -17,6 +18,6 @@ Apply from the repository root with git apply, and never commit it applied.
 -		}
 -	}
 -
- 	/* and a segment without its index file, but the last one, is its leftover */
+ 	/* and goes oldest first, so only the lowest segment can be its leftover */
  	seqs = spool_seqs(segments, &count);
  
