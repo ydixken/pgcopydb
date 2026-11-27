@@ -555,6 +555,15 @@ typedef struct PreparedStmt
 	uint32_t hash;
 	bool prepared;
 
+	/*
+	 * The raw path prepares one name per statement text: two texts of one hash
+	 * would otherwise run under the name of the first. Entries of one hash are
+	 * a chain, and the hash table holds its head.
+	 */
+	char name[NAMEDATALEN];
+	char *sql;
+	struct PreparedStmt *next;
+
 	UT_hash_handle hh;          /* makes this structure hashable */
 } PreparedStmt;
 
@@ -631,6 +640,7 @@ typedef struct StreamApplyContext
 	bool reachedEOF;
 	bool transactionInProgress;
 	bool logSQL;
+	bool rawSpool;              /* apply from the raw spool, in commit groups */
 
 	PreparedStmt *preparedStmt;
 
@@ -929,6 +939,8 @@ bool parseWal2jsonMessage(StreamContext *privateContext,
 /* ld_apply.c */
 bool stream_apply_catchup(StreamSpecs *specs);
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
+bool stream_apply_prepared(StreamApplyContext *context, uint32_t hash,
+						   const char *sql, PreparedStmt **entry, bool *isNew);
 bool stream_apply_stdin(StreamSpecs *specs, StreamApplyContext *context);
 bool stream_apply_to_stdout(StreamSpecs *specs, FILE *out);
 

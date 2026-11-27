@@ -1927,6 +1927,87 @@ stream_apply_prepare(StreamApplyContext *context, const char *name,
 
 
 /*
+ * stream_apply_prepared returns the entry of the statement that the apply is
+ * about to send, and isNew when it still has to be prepared.
+ *
+ * On the raw path a hit must also match the statement text: the hash of a
+ * statement is a hash, so two texts can share one, and running the second
+ * under the name of the first would apply the wrong rows. The SQLite path
+ * keeps the lookup by hash alone of 9d8b660.
+ */
+bool
+stream_apply_prepared(StreamApplyContext *context, uint32_t hash,
+					  const char *sql, PreparedStmt **entry, bool *isNew)
+{
+	PreparedStmt *head = NULL;
+	int texts = 0;
+
+	HASH_FIND(hh, context->preparedStmt, &hash, sizeof(hash), head);
+
+	for (PreparedStmt *stmt = head; stmt != NULL; stmt = stmt->next)
+	{
+		texts++;
+
+		if (!context->rawSpool ||
+			(sql != NULL && stmt->sql != NULL && streq(stmt->sql, sql)))
+		{
+			*entry = stmt;
+			*isNew = !stmt->prepared;
+
+			return true;
+		}
+	}
+
+	PreparedStmt *stmt = (PreparedStmt *) calloc(1, sizeof(PreparedStmt));
+
+	if (stmt == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	stmt->hash = hash;
+
+	if (texts == 0)
+	{
+		sformat(stmt->name, sizeof(stmt->name), "%x", hash);
+	}
+	else
+	{
+		sformat(stmt->name, sizeof(stmt->name), "%x_%d", hash, texts);
+	}
+
+	if (context->rawSpool && sql != NULL)
+	{
+		stmt->sql = strdup(sql);
+
+		if (stmt->sql == NULL)
+		{
+			log_error(ALLOCATION_FAILED_ERROR);
+			free(stmt);
+			return false;
+		}
+	}
+
+	/* the hash table holds the head of the chain of one hash */
+	if (head == NULL)
+	{
+		HASH_ADD(hh, context->preparedStmt, hash, sizeof(hash), stmt);
+	}
+	else
+	{
+		stmt->next = head->next;
+		head->next = stmt;
+	}
+
+	*entry = stmt;
+	*isNew = true;
+
+	return true;
+}
+
+
+/*
  * stream_apply_dml applies a single DML row (INSERT/UPDATE/DELETE/TRUNCATE)
  * to the target database.  The transaction must already be open.
  *
@@ -1954,45 +2035,28 @@ stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s)
 		return true;
 	}
 
-	uint32_t hash = s->hash;
-	PreparedStmt *stmtHashTable = context->preparedStmt;
 	PreparedStmt *stmt = NULL;
+	bool isNew = false;
 
-	HASH_FIND(hh, stmtHashTable, &hash, sizeof(hash), stmt);
-
-	if (stmt == NULL)
+	if (!stream_apply_prepared(context, s->hash, s->stmt, &stmt, &isNew))
 	{
-		char name[NAMEDATALEN] = { 0 };
-		sformat(name, sizeof(name), "%x", hash);
+		/* errors have already been logged */
+		return false;
+	}
 
-		if (!stream_apply_prepare(context, name, s->stmt))
+	if (isNew)
+	{
+		if (!stream_apply_prepare(context, stmt->name, s->stmt))
 		{
 			/* errors have already been logged */
 			return false;
 		}
 
-		stmt = (PreparedStmt *) calloc(1, sizeof(PreparedStmt));
-
-		if (stmt == NULL)
-		{
-			log_error(ALLOCATION_FAILED_ERROR);
-			return false;
-		}
-
-		stmt->hash = hash;
 		stmt->prepared = true;
-
-		HASH_ADD(hh, stmtHashTable, hash, sizeof(hash), stmt);
-
-		/* HASH_ADD can change the pointer in place, update */
-		context->preparedStmt = stmtHashTable;
 	}
 
 	if (s->data != NULL)
 	{
-		char name[NAMEDATALEN] = { 0 };
-		sformat(name, sizeof(name), "%x", hash);
-
 		JSON_Value *js = json_parse_string(s->data);
 
 		if (json_value_get_type(js) != JSONArray)
@@ -2025,7 +2089,7 @@ stream_apply_dml(StreamApplyContext *context, ReplayDBStmt *s)
 			}
 		}
 
-		if (!pgsql_execute_prepared(applyPgConn, name,
+		if (!pgsql_execute_prepared(applyPgConn, stmt->name,
 									count, paramValues,
 									NULL, NULL))
 		{
@@ -2196,6 +2260,23 @@ stream_apply_cleanup(StreamApplyContext *context)
 	{
 		HASH_DEL(context->targetRelkindCache, entry);
 		free(entry);
+	}
+
+	/* free the prepared statements, and the texts that the raw path keeps */
+	PreparedStmt *head, *headTmp;
+
+	HASH_ITER(hh, context->preparedStmt, head, headTmp)
+	{
+		HASH_DEL(context->preparedStmt, head);
+
+		for (PreparedStmt *stmt = head; stmt != NULL;)
+		{
+			PreparedStmt *gone = stmt;
+
+			stmt = stmt->next;
+			free(gone->sql);
+			free(gone);
+		}
 	}
 
 	return true;
