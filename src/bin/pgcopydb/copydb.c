@@ -451,6 +451,15 @@ copydb_prepare_dump_paths(CopyFilePaths *cfPaths, DumpPaths *dumpPaths)
 	sformat(dumpPaths->ownPubsFilename, MAXPGPATH, "%s/%s",
 			cfPaths->schemadir, "own-publications.txt");
 
+	sformat(dumpPaths->postMainListFilename, MAXPGPATH, "%s/%s",
+			cfPaths->schemadir, "post-pass1-main.list");
+
+	sformat(dumpPaths->postAttachListFilename, MAXPGPATH, "%s/%s",
+			cfPaths->schemadir, "post-pass2-attach.list");
+
+	sformat(dumpPaths->postFkListFilename, MAXPGPATH, "%s/%s",
+			cfPaths->schemadir, "post-pass3-fk.list");
+
 	return true;
 }
 

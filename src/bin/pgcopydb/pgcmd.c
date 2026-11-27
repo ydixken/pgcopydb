@@ -961,7 +961,7 @@ pg_restore_db(PostgresPaths *pgPaths,
 	args[argsIndex++] = "--section";
 	args[argsIndex++] = (char *) sectionOption;
 
-	if (options.jobs == 1)
+	if (options.jobs == 1 && !options.noSingleTransaction)
 	{
 		args[argsIndex++] = "--single-transaction";
 	}

@@ -239,6 +239,7 @@ typedef struct RestoreOptions
 	bool noComments;
 	bool noACL;
 	bool noTableSpaces;
+	bool noSingleTransaction;   /* with jobs 1, use --jobs 1 instead */
 	int jobs;
 	PostgresRestoreSection section;
 } RestoreOptions;
