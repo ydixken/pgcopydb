@@ -444,7 +444,7 @@ stream_apply_finish_wal_worker(StreamSpecs *specs,
 
 	CopyDBSentinel sentinel = { 0 };
 
-	if (!sentinel_sync_apply(context->sourceDB, confirmLSN, &sentinel))
+	if (!sentinel_sync_apply(context->sourceDB, confirmLSN, false, &sentinel))
 	{
 		log_error("Failed to record replay_lsn %X/%X at endpos %X/%X",
 				  LSN_FORMAT_ARGS(confirmLSN),
@@ -2282,7 +2282,8 @@ stream_apply_sync_sentinel(StreamApplyContext *context, bool findDurableLSN)
 	CopyDBSentinel sentinel = { 0 };
 
 	bool synced = write ?
-				  sentinel_sync_apply(context->sourceDB, durableLSN, &sentinel) :
+				  sentinel_sync_apply(context->sourceDB, durableLSN,
+									  context->guardReplayLSN, &sentinel) :
 				  sentinel_get(context->sourceDB, &sentinel);
 
 	if (!synced)

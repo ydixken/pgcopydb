@@ -64,6 +64,9 @@ static int readdirFailures = 0;
 /* runs once, before the next readdir, as receive running between two calls */
 static void (*beforeReaddir)(void) = NULL;
 
+/* the W that a start reads from the sentinel, 0 for a spool with none */
+static uint64_t storedW = 0;
+
 /* 'w', dataStart, walEnd, sendTime, then a pgoutput BEGIN */
 static char xlogdata[SPOOL_XLOGDATA_HEADER_SIZE + 21];
 
@@ -2888,7 +2891,9 @@ dir_state(const char *dir)
 		struct stat st;
 		uint64_t size = 0;
 
-		if (entry->d_name[0] == '.')
+		/* the lock file of a start and of a cleanup pass holds no spool state */
+		if (entry->d_name[0] == '.' ||
+			strcmp(entry->d_name, SPOOL_LOCK_FILE) == 0)
 		{
 			continue;
 		}
@@ -2945,7 +2950,8 @@ refused_twice(const char *dir, uint64_t systemId, uint64_t maxSegmentSize,
 	{
 		SpoolWriter opened = { 0 };
 		long mark = log_mark();
-		bool started = spool_writer_open(&opened, dir, systemId, 2, maxSegmentSize);
+		bool started = spool_writer_open(&opened, dir, systemId, 2, maxSegmentSize,
+										 storedW);
 		char *text = logged_since(mark);
 
 		if (started)
@@ -2980,7 +2986,8 @@ test_writer_open(const char *dir)
 
 	sformat(name, sizeof(name), "%s/fresh", dir);
 
-	bool created = mkdir(name, 0700) == 0 && spool_writer_open(&opened, name, 7, 2, 0);
+	bool created = mkdir(name, 0700) == 0 && spool_writer_open(&opened, name, 7, 2, 0,
+															   storedW);
 	char *bytes = created ?
 				  slurp(spool_file(path, name, SPOOL_FIRST_SEQ, ".seg"), &size) : NULL;
 
@@ -2994,7 +3001,7 @@ test_writer_open(const char *dir)
 
 	bool made = make_spool(&writer, dir);
 	long mark = log_mark();
-	bool reopened = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	bool reopened = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	char *text = logged_since(mark);
 
 	check(reopened && opened.nextSeq == 7 && opened.lastFinalLSN == 0xD200 &&
@@ -3024,7 +3031,8 @@ test_writer_open(const char *dir)
 		   feed(&writer, firstTxn, lengthof(firstTxn)) && write_index(&writer);
 	kill_writer(&writer);
 
-	bool rotated = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50) &&
+	bool rotated = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50,
+											 storedW) &&
 				   spool_writer_rotate_due(&opened) && spool_writer_rotate(&opened);
 
 	check(rotated && file_size(spool_file(path, writer.dirname, 6, ".seg")) ==
@@ -3071,7 +3079,7 @@ test_start_cut(const char *dir)
 				put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, zeroes, 64) &&
 				put_bytes(idx, -1, record, 30);
 	long mark = log_mark();
-	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	char *text = logged_since(mark);
 
 	check(started && file_size(idx) == 2 * SPOOL_INDEX_RECORD_SIZE &&
@@ -3109,7 +3117,7 @@ test_start_cut(const char *dir)
 		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), -1, tail, tailSize) &&
 		   put_bytes(seg, -1, junk, sizeof(junk));
 	mark = log_mark();
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	text = logged_since(mark);
 
 	check(started && file_size(seg) == (int64_t) SECOND_END &&
@@ -3204,7 +3212,7 @@ test_start_cut(const char *dir)
 		   unlink(spool_file(idx, writer.dirname, 5, ".idx")) == 0;
 	sformat(dirLine, sizeof(dirLine), "Synced spool directory \"%s\"", writer.dirname);
 	mark = log_mark();
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	text = logged_since(mark);
 
 	check(started && access(spool_file(seg, writer.dirname, 5, ".seg"), F_OK) != 0 &&
@@ -3249,7 +3257,7 @@ test_start_cut(const char *dir)
 		made = put_bytes(line, -1, "x", 1);
 	}
 
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 
 	bool kept = started && opened.nextSeq == 7;
 
@@ -3282,7 +3290,7 @@ test_start_cut(const char *dir)
 		   unlink(spool_file(seg, writer.dirname, 5, ".seg")) == 0;
 	sformat(dirLine, sizeof(dirLine), "Synced spool directory \"%s\"", writer.dirname);
 	mark = log_mark();
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	text = logged_since(mark);
 
 	char *bytes = started ? slurp(spool_file(seg, writer.dirname, 7, ".seg"), &size) :
@@ -3301,7 +3309,7 @@ test_start_cut(const char *dir)
 
 	made = make_spool(&writer, dir) &&
 		   truncate(spool_file(idx, writer.dirname, 5, ".idx"), 30) == 0;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	bytes = started ? slurp(spool_file(seg, writer.dirname, 5, ".seg"), &size) : NULL;
 
 	check(bytes != NULL && size == SPOOL_HEADER_SIZE &&
@@ -3316,7 +3324,7 @@ test_start_cut(const char *dir)
 		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0;
 	sformat(dirLine, sizeof(dirLine), "Synced spool directory \"%s\"", writer.dirname);
 	mark = log_mark();
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50, storedW);
 	text = logged_since(mark);
 	removal = strstr(text, dirLine);
 
@@ -3339,7 +3347,7 @@ test_start_cut(const char *dir)
 	made = make_rotated(&writer, dir, false) &&
 		   truncate(spool_file(seg, writer.dirname, 7, ".seg"), 10) == 0 &&
 		   put_bytes(spool_file(idx, writer.dirname, 7, ".idx"), -1, zeroes, 0);
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 
 	check(started && access(seg, F_OK) != 0 && access(idx, F_OK) != 0 &&
 		  opened.nextSeq == 7,
@@ -3351,7 +3359,7 @@ test_start_cut(const char *dir)
 	made = mkdir(line, 0700) == 0 &&
 		   put_bytes(spool_file(seg, line, SPOOL_FIRST_SEQ, ".seg"), -1, junk, 10);
 	mark = log_mark();
-	started = made && spool_writer_open(&opened, line, 7, 2, 0);
+	started = made && spool_writer_open(&opened, line, 7, 2, 0, storedW);
 	text = logged_since(mark);
 	bytes = started ? slurp(seg, &size) : NULL;
 	removal = strstr(text, dirLine);
@@ -3403,7 +3411,7 @@ test_start_cut(const char *dir)
 
 	sformat(name, sizeof(name), "%s/emptylog", dir);
 	made = mkdir(name, 0700) == 0 && put_bytes(log_file(log, name), -1, junk, 0);
-	started = made && spool_writer_open(&opened, name, 7, 2, 0);
+	started = made && spool_writer_open(&opened, name, 7, 2, 0, storedW);
 
 	check(started && opened.nextSeq == SPOOL_FIRST_SEQ &&
 		  file_size(spool_file(seg, name, SPOOL_FIRST_SEQ, ".seg")) == SPOOL_HEADER_SIZE,
@@ -3491,7 +3499,7 @@ test_start_cut(const char *dir)
 	made = made && logSize > 0 && put_bytes(log, -1, zeroes, 24) &&
 		   put_bytes(log, -1, junk, 10);
 	mark = log_mark();
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	text = logged_since(mark);
 
 	check(started && file_size(log) == logSize &&
@@ -3513,7 +3521,7 @@ test_start_cut(const char *dir)
 
 	for (int i = 0; kept && i < 2; i++)
 	{
-		kept = spool_writer_open(&opened, writer.dirname, 7, 2, 0) &&
+		kept = spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW) &&
 			   opened.nextSeq == 3 && opened.lastEndLSN == 0xD230;
 		kill_writer(&opened);
 		kept = kept && file_size(log) == logSize;
@@ -3574,7 +3582,7 @@ test_start_cut(const char *dir)
 
 	int fds = open_fds();
 
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50, storedW);
 
 	if (started)
 	{
@@ -3780,7 +3788,8 @@ test_start_failures(const char *dir)
 
 		ftruncateSkips = skip;
 		ftruncateFailures = 1;
-		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0,
+												 storedW);
 		bool injected = ftruncateFailures == 0;
 
 		ftruncateFailures = 0;
@@ -3808,7 +3817,8 @@ test_start_failures(const char *dir)
 
 		fsyncSkips = skip;
 		fsyncFailures = 1;
-		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0,
+												 storedW);
 		bool injected = fsyncFailures == 0;
 
 		fsyncFailures = 0;
@@ -3833,7 +3843,8 @@ test_start_failures(const char *dir)
 		long mark = log_mark();
 
 		preadFailAt = Max(call, 1);
-		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+		bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0,
+												 storedW);
 		bool injected = preadFailAt == 0;
 
 		preadFailAt = 0;
@@ -3849,7 +3860,7 @@ test_start_failures(const char *dir)
 	long mark = log_mark();
 
 	fstatFailAt = 1;
-	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	bool injected = fstatFailAt == 0;
 
 	fstatFailAt = 0;
@@ -3861,7 +3872,7 @@ test_start_failures(const char *dir)
 	made = make_rotated(&writer, dir, false);
 	mark = log_mark();
 	preadFailAt = 3;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50, storedW);
 	injected = preadFailAt == 0;
 	preadFailAt = 0;
 
@@ -3874,11 +3885,11 @@ test_start_failures(const char *dir)
 	/* a header that could not be read would look torn, and a new spool restarts */
 	sformat(line, sizeof(line), "%s/unreadheader", dir);
 	spool_file(files[0], line, SPOOL_FIRST_SEQ, ".seg");
-	made = mkdir(line, 0700) == 0 && spool_writer_open(&opened, line, 7, 2, 0);
+	made = mkdir(line, 0700) == 0 && spool_writer_open(&opened, line, 7, 2, 0, storedW);
 	kill_writer(&opened);
 	mark = log_mark();
 	preadFailAt = 1;
-	started = made && spool_writer_open(&opened, line, 7, 2, 0);
+	started = made && spool_writer_open(&opened, line, 7, 2, 0, storedW);
 	injected = preadFailAt == 0;
 	preadFailAt = 0;
 
@@ -3898,7 +3909,7 @@ test_start_failures(const char *dir)
 		mark = log_mark();
 
 		fopenFailures = 1;
-		started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+		started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 		injected = fopenFailures == 0;
 
 		fopenFailures = 0;
@@ -3925,7 +3936,7 @@ test_start_failures(const char *dir)
 		made = made && unlink(files[0]) == 0 && symlink(files[0], files[0]) == 0;
 
 		mark = log_mark();
-		started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+		started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 
 		char *text = logged_since(mark);
 
@@ -3953,7 +3964,7 @@ test_start_failures(const char *dir)
 
 	made = make_spool(&writer, dir) &&
 		   put_bytes(spool_file(files[0], writer.dirname, 9, ".idx"), -1, "x", 0);
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 
 	check(duped && made && !started && fcntl(0, F_GETFD) != -1,
 		  "a refused start leaves descriptor 0 open");
@@ -3987,7 +3998,7 @@ test_start_failures(const char *dir)
 				spool_file(files[1], writer.dirname, 5, removals[i].suffix));
 		mark = log_mark();
 		unlinkFailAt = removals[i].call;
-		started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+		started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 		injected = unlinkFailAt == 0;
 		unlinkFailAt = 0;
 		ok = ok && made && injected && !started &&
@@ -4013,7 +4024,7 @@ test_start_failures(const char *dir)
 	/* the sync of the cut relation log, then the one of the removal of the leftover */
 	fsyncSkips = 1;
 	fsyncFailures = 1;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50, storedW);
 	injected = fsyncFailures == 0;
 	fsyncFailures = 0;
 	fsyncSkips = 0;
@@ -4031,7 +4042,7 @@ test_start_failures(const char *dir)
 	mark = log_mark();
 	fsyncSkips = 2;
 	fsyncFailures = 1;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	injected = fsyncFailures == 0;
 	fsyncFailures = 0;
 	fsyncSkips = 0;
@@ -4046,7 +4057,8 @@ test_start_failures(const char *dir)
 	{
 		sformat(line, sizeof(line), "%s/unindexed%d", dir, fail);
 		log_file(files[2], line);
-		made = mkdir(line, 0700) == 0 && spool_writer_open(&writer, line, 7, 2, 0) &&
+		made = mkdir(line, 0700) == 0 && spool_writer_open(&writer, line, 7, 2, 0,
+														   storedW) &&
 			   feed(&writer, firstTxn, lengthof(firstTxn)) &&
 			   spool_sync(&writer.segment) && spool_sync(&writer.relationLog);
 		kill_writer(&writer);
@@ -4056,7 +4068,7 @@ test_start_failures(const char *dir)
 		fsyncSkips = fail - 1;
 		fsyncFailures = 1;
 		started = made && file_size(files[2]) > 0 &&
-				  spool_writer_open(&opened, line, 7, 2, 0);
+				  spool_writer_open(&opened, line, 7, 2, 0, storedW);
 		injected = fsyncFailures == 0;
 		fsyncFailures = 0;
 		fsyncSkips = 0;
@@ -4064,7 +4076,7 @@ test_start_failures(const char *dir)
 		bool refused = made && injected && !started &&
 					   count(logged_since(mark), " ERROR ") == 1;
 
-		started = refused && spool_writer_open(&opened, line, 7, 2, 0);
+		started = refused && spool_writer_open(&opened, line, 7, 2, 0, storedW);
 		ok = ok && started && opened.nextSeq == SPOOL_FIRST_SEQ &&
 			 opened.lastEndLSN == 0 && file_size(files[2]) == 0 &&
 			 file_size(spool_file(files[1], line, SPOOL_FIRST_SEQ, ".seg")) ==
@@ -4089,7 +4101,8 @@ test_start_failures(const char *dir)
 
 	fsyncSkips = 1;
 	fsyncFailures = 1;
-	started = made && logSize > 0 && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && logSize > 0 && spool_writer_open(&opened, writer.dirname, 7, 2, 0,
+													   storedW);
 	injected = fsyncFailures == 0;
 	fsyncFailures = 0;
 	fsyncSkips = 0;
@@ -4116,7 +4129,7 @@ test_start_failures(const char *dir)
 		   feed(&writer, secondTxn, lengthof(secondTxn)) && write_index(&writer);
 	kill_writer(&writer);
 	reallocFailures = 1;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	injected = reallocFailures == 0;
 	reallocFailures = 0;
 
@@ -4128,7 +4141,7 @@ test_start_failures(const char *dir)
 	sformat(line, sizeof(line), "Failed to read spool directory \"%s\"", writer.dirname);
 	mark = log_mark();
 	readdirFailures = 1;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	injected = readdirFailures == 0;
 	readdirFailures = 0;
 
@@ -4136,7 +4149,7 @@ test_start_failures(const char *dir)
 		  "a spool directory that cannot be listed fails the start with an ERROR line");
 
 	sformat(line, sizeof(line), "%s/missing", dir);
-	check(!spool_writer_open(&opened, line, 7, 2, 0) && opened.segment.fd == -1,
+	check(!spool_writer_open(&opened, line, 7, 2, 0, storedW) && opened.segment.fd == -1,
 		  "a writer opened on a directory that does not exist fails");
 
 	/* the list of index files grows past the 256 bytes it starts with */
@@ -4148,7 +4161,7 @@ test_start_failures(const char *dir)
 	}
 
 	reallocFailures = 1;
-	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 	injected = reallocFailures == 0;
 	reallocFailures = 0;
 
@@ -4166,10 +4179,239 @@ test_start_failures(const char *dir)
 	sformat(line, sizeof(line), "Spool directory name \"%s\" is too long", longDir);
 	mark = log_mark();
 
-	check(!spool_writer_open(&opened, longDir, 7, 2, 0) &&
+	check(!spool_writer_open(&opened, longDir, 7, 2, 0, storedW) &&
 		  one_line(logged_since(mark), " ERROR ", line) &&
 		  opened.segment.fd == -1 && opened.relationLog.fd == -1,
 		  "a writer opened on a directory whose file names do not fit fails with an ERROR line");
+}
+
+
+/* the four transactions, each in a segment of its own, the last one unrotated */
+static bool
+make_four(SpoolWriter *writer, const char *dir)
+{
+	bool made = new_writer(writer, dir, &spoolHeader, 50) &&
+				feed(writer, firstTxn, lengthof(firstTxn)) &&
+				write_index(writer) && spool_writer_rotate(writer) &&
+				feed(writer, secondTxn, lengthof(secondTxn)) &&
+				write_index(writer) && spool_writer_rotate(writer) &&
+				feed(writer, thirdTxn, lengthof(thirdTxn)) &&
+				write_index(writer) && spool_writer_rotate(writer) &&
+				feed(writer, fourthTxn, lengthof(fourthTxn)) &&
+				write_index(writer);
+
+	kill_writer(writer);
+
+	return made;
+}
+
+
+/* the spool of the cleanup pass that runs inside the scan of a start */
+static char racingDir[MAXPGPATH];
+static uint64_t racingDeleted = 0;
+static bool racingCleaned = false;
+
+
+/* a cleanup pass of the supervisor, while the receive process is in its start */
+static void
+cleanup_races(void)
+{
+	uint64_t bytes = 0;
+
+	racingDeleted = 0;
+	racingCleaned = spool_cleanup(racingDir, 0xD430, false, &racingDeleted,
+								  &bytes);
+}
+
+
+/* true when the segment and the index file of each seq are there, or are not */
+static bool
+segments_exist(const char *dir, const uint64_t *seqs, int n, bool exist)
+{
+	char path[MAXPGPATH];
+	bool found = true;
+
+	for (int i = 0; i < n; i++)
+	{
+		found = found &&
+				(access(spool_file(path, dir, seqs[i], ".seg"), F_OK) == 0) == exist &&
+				(access(spool_file(path, dir, seqs[i], ".idx"), F_OK) == 0) == exist;
+	}
+
+	return found;
+}
+
+
+static void
+test_cleanup(const char *dir)
+{
+	SpoolWriter writer = { 0 };
+	SpoolWriter opened = { 0 };
+	char path[MAXPGPATH];
+	char index[MAXPGPATH];
+	char line[2 * MAXPGPATH];
+	char dirLine[2 * MAXPGPATH];
+	uint64_t first[] = { 5 };
+	uint64_t both[] = { 5, 6 };
+	uint64_t after[] = { 6, 7, 8 };
+	uint64_t kept[] = { 7, 8 };
+	uint64_t all[] = { 5, 6, 7, 8 };
+	uint64_t deleted = 0;
+	uint64_t freed = 0;
+
+	/* four segments, each holding one transaction, the last two kept always */
+	bool made = make_four(&writer, dir);
+	int64_t pair = file_size(spool_file(path, writer.dirname, 5, ".seg")) +
+				   file_size(spool_file(index, writer.dirname, 5, ".idx"));
+	long mark = log_mark();
+	bool cleaned = made && spool_cleanup(writer.dirname, 0xD230, false,
+										 &deleted, &freed);
+
+	sformat(dirLine, sizeof(dirLine), "Synced spool directory \"%s\"",
+			writer.dirname);
+
+	check(made && cleaned && deleted == 1 && freed == (uint64_t) pair &&
+		  segments_exist(writer.dirname, first, lengthof(first), false) &&
+		  segments_exist(writer.dirname, after, lengthof(after), true) &&
+		  count(logged_since(mark), dirLine) == 2,
+		  "a cleanup pass removes the segments whose transactions end below the stored W, oldest first, and keeps the one whose last transaction ends at it");
+
+	/* the last segment and the one before it stay, whatever W says */
+	made = make_four(&writer, dir);
+	deleted = 0;
+	freed = 0;
+	sformat(dirLine, sizeof(dirLine), "Synced spool directory \"%s\"",
+			writer.dirname);
+	mark = log_mark();
+	cleaned = made && spool_cleanup(writer.dirname, 0xD430, false,
+									&deleted, &freed);
+
+	check(made && cleaned && deleted == 2 &&
+		  segments_exist(writer.dirname, both, lengthof(both), false) &&
+		  segments_exist(writer.dirname, kept, lengthof(kept), true) &&
+		  count(logged_since(mark), dirLine) == 4,
+		  "a cleanup pass keeps the last segment and the one before it, so that a torn last segment has a segment before it");
+
+	/* the dry run of stream prune lists the same segments and removes none */
+	made = make_four(&writer, dir);
+	deleted = 0;
+	freed = 0;
+	sformat(dirLine, sizeof(dirLine), "Synced spool directory \"%s\"",
+			writer.dirname);
+	mark = log_mark();
+	cleaned = made && spool_cleanup(writer.dirname, 0xD430, true,
+									&deleted, &freed);
+	sformat(line, sizeof(line), "Would remove spool segment \"%s\"",
+			spool_file(path, writer.dirname, 6, ".seg"));
+
+	check(made && cleaned && deleted == 2 &&
+		  segments_exist(writer.dirname, all, lengthof(all), true) &&
+		  strstr(logged_since(mark), line) != NULL &&
+		  count(logged_since(mark), dirLine) == 0,
+		  "a dry run of the cleanup lists the segments it would remove and removes none");
+
+	/* the index file goes first, so that a kill leaves a leftover and no gap */
+	made = make_four(&writer, dir);
+	deleted = 0;
+	freed = 0;
+	sformat(line, sizeof(line), "Failed to remove file \"%s\"",
+			spool_file(index, writer.dirname, 5, ".idx"));
+	mark = log_mark();
+	unlinkFailAt = 1;
+	cleaned = made && spool_cleanup(writer.dirname, 0xD430, false,
+									&deleted, &freed);
+
+	bool injected = unlinkFailAt == 0;
+
+	unlinkFailAt = 0;
+
+	check(made && injected && !cleaned && deleted == 0 &&
+		  one_line(logged_since(mark), " ERROR ", line) &&
+		  segments_exist(writer.dirname, all, lengthof(all), true),
+		  "a cleanup pass that cannot remove the index file of a segment keeps the segment, and fails with an ERROR line that names the index file");
+
+	/* and it is gone from the directory before the segment is unlinked */
+	made = make_four(&writer, dir);
+	deleted = 0;
+	freed = 0;
+	sformat(line, sizeof(line), "Failed to sync spool directory \"%s\"",
+			writer.dirname);
+	mark = log_mark();
+	fsyncFailures = 1;
+	cleaned = made && spool_cleanup(writer.dirname, 0xD430, false,
+									&deleted, &freed);
+	injected = fsyncFailures == 0;
+	fsyncFailures = 0;
+
+	check(made && injected && !cleaned && deleted == 0 &&
+		  one_line(logged_since(mark), " ERROR ", line) &&
+		  access(spool_file(index, writer.dirname, 5, ".idx"), F_OK) != 0 &&
+		  access(spool_file(path, writer.dirname, 5, ".seg"), F_OK) == 0,
+		  "a cleanup pass syncs the removal of an index file before it unlinks its segment");
+
+	/* the supervisor runs a pass while the receive process is in its start */
+	made = make_four(&writer, dir);
+	strlcpy(racingDir, writer.dirname, sizeof(racingDir));
+	racingCleaned = false;
+	racingDeleted = 0;
+	mark = log_mark();
+	beforeReaddir = cleanup_races;
+	storedW = 0xD430;
+
+	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 50,
+											 storedW);
+	char *text = logged_since(mark);
+
+	storedW = 0;
+	beforeReaddir = NULL;
+
+	check(made && started && racingCleaned && racingDeleted == 0 &&
+		  segments_exist(writer.dirname, all, lengthof(all), true) &&
+		  strstr(text, "Skipping the cleanup of spool") != NULL,
+		  "a cleanup pass that starts while a start holds the lock of the spool deletes nothing");
+	kill_writer(&opened);
+
+	/* a leftover of a cleanup pass, under a W at the end of its last transaction */
+	made = make_rotated_twice(&writer, dir) &&
+		   unlink(spool_file(index, writer.dirname, 5, ".idx")) == 0;
+	storedW = 0xD230;
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0,
+										storedW);
+	storedW = 0;
+
+	check(made && started &&
+		  access(spool_file(path, writer.dirname, 5, ".seg"), F_OK) != 0,
+		  "a start removes a leftover of cleanup whose last transaction ends at the stored W");
+	kill_writer(&opened);
+
+	/* cleanup leaves no leftover above W, so this one is damage */
+	made = make_rotated_twice(&writer, dir) &&
+		   unlink(spool_file(index, writer.dirname, 5, ".idx")) == 0;
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has no index file, and holds transactions up to 0/D230, above the stored replay LSN 0/D130",
+			spool_file(path, writer.dirname, 5, ".seg"));
+	storedW = 0xD130;
+
+	bool refused = made && refused_twice(writer.dirname, 7, 0, line);
+
+	storedW = 0;
+
+	check(refused,
+		  "a start under a stored W refuses a leftover of cleanup whose last transaction ends above it, and no file changes");
+
+	/* and without the header after it, where the leftover ends is unknown */
+	made = make_rotated_twice(&writer, dir) &&
+		   unlink(spool_file(index, writer.dirname, 5, ".idx")) == 0 &&
+		   flip_byte(spool_file(path, writer.dirname, 7, ".seg"), 0);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" has no valid header, and the segment before it has no index file",
+			spool_file(path, writer.dirname, 7, ".seg"));
+	storedW = 0xD230;
+	refused = made && refused_twice(writer.dirname, 7, 0, line);
+	storedW = 0;
+
+	check(refused,
+		  "a start under a stored W refuses a leftover of cleanup whose next segment has no valid header, and no file changes");
 }
 
 
@@ -4225,7 +4467,7 @@ test_reader(const char *dir)
 	};
 
 	sformat(name, sizeof(name), "%s/later", dir);
-	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 50) &&
+	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 50, storedW) &&
 		   feed(&fresh, low, 3) && write_index(&fresh) && spool_writer_rotate(&fresh) &&
 		   feed(&fresh, low + 3, 3) && record_at(&fresh, 0, &record) &&
 		   spool_sync(&fresh.segment);
@@ -4559,7 +4801,7 @@ test_reader(const char *dir)
 	kill_writer(&writer);
 
 	sformat(name, sizeof(name), "%s/early", dir);
-	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 0) &&
+	made = mkdir(name, 0700) == 0 && spool_writer_open(&fresh, name, 7, 2, 0, storedW) &&
 		   spool_reader_open(&reader, name, 0);
 	waiting = made && spool_reader_next(&reader, &found) && !found;
 	made = made && feed(&fresh, low, 3) && write_index(&fresh);
@@ -4572,7 +4814,7 @@ test_reader(const char *dir)
 	sformat(name, sizeof(name), "%s/unsegmented", dir);
 	made = mkdir(name, 0700) == 0 && put_bytes(log_file(idx, name), -1, junk, 0) &&
 		   spool_reader_open(&reader, name, 0) &&
-		   spool_writer_open(&fresh, name, 7, 2, 0);
+		   spool_writer_open(&fresh, name, 7, 2, 0, storedW);
 	waiting = made && spool_reader_next(&reader, &found) && !found;
 	made = made && feed(&fresh, low, 3) && write_index(&fresh);
 	check(waiting && made && next_holds(&reader, &context, low, 3),
@@ -4716,7 +4958,8 @@ test_reader_failures(const char *dir)
 
 	sformat(path, sizeof(path), "%s/linked", dir);
 
-	bool made = mkdir(path, 0700) == 0 && spool_writer_open(&fresh, path, 7, 2, 0) &&
+	bool made = mkdir(path, 0700) == 0 && spool_writer_open(&fresh, path, 7, 2, 0,
+															storedW) &&
 				spool_reader_open(&reader, path, 0) &&
 				feed(&fresh, low, lengthof(low)) && write_index(&fresh) &&
 				unlink(fresh.segment.filename) == 0 &&
@@ -4889,7 +5132,7 @@ test_index_chunks(const char *dir)
 	int64_t segSize = SPOOL_HEADER_SIZE + total * frames_size(txn, lengthof(txn));
 	bool started = made && file_size(idx) == total * SPOOL_INDEX_RECORD_SIZE &&
 				   put_bytes(idx, -1, "torn record", 11) &&
-				   spool_writer_open(&opened, writer.dirname, 7, 2, 0);
+				   spool_writer_open(&opened, writer.dirname, 7, 2, 0, storedW);
 
 	check(started && opened.nextSeq == total + 1 &&
 		  opened.lastEndLSN == 0x100000 + (total - 1) * 0x100 + 0x90 &&
@@ -4935,7 +5178,7 @@ test_index_chunks(const char *dir)
 	long mark = log_mark();
 
 	preadFailAt = 4;
-	started = made && spool_writer_open(&opened, rotated.dirname, 7, 2, 50);
+	started = made && spool_writer_open(&opened, rotated.dirname, 7, 2, 50, storedW);
 
 	bool injected = preadFailAt == 0;
 	char *text = logged_since(mark);
@@ -4990,7 +5233,7 @@ test_list_spool(const char *dir, const char *binary)
 	sformat(cdc, sizeof(cdc), "%s/cdc", top);
 
 	bool made = mkdir(top, 0700) == 0 && mkdir(cdc, 0700) == 0 &&
-				spool_writer_open(&writer, cdc, 7, 2, 0) &&
+				spool_writer_open(&writer, cdc, 7, 2, 0, storedW) &&
 				feed(&writer, low, lengthof(low)) && write_index(&writer);
 
 	kill_writer(&writer);
@@ -5947,6 +6190,7 @@ main(int argc, char **argv)
 	test_writer_open(dir);
 	test_start_cut(dir);
 	test_start_failures(dir);
+	test_cleanup(dir);
 	test_reader(dir);
 	test_reader_failures(dir);
 	test_index_chunks(dir);

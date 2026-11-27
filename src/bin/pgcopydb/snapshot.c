@@ -787,24 +787,41 @@ copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 
 
 /*
- * copydb_check_cdc_layout refuses a work directory that another follow mode
- * started. A slot or a setup row records a mode, performance when the row
- * holds the tag; a directory with neither takes the mode of this run.
+ * copydb_cdc_layout_mode reads the follow mode that the work directory
+ * records: recorded is false for a directory that no run has tagged either
+ * way, and tagged is true for the performance tag of a setup row.
  */
+bool
+copydb_cdc_layout_mode(StreamSpecs *specs, bool *recorded, bool *tagged)
+{
+	int workers = 0;
+	char highTraffic[WAL_HIGH_TRAFFIC_TABLES_BUFSIZE] = { 0 };
+
+	if (!catalog_read_wal_worker_setup(specs->sourceDB,
+									   &workers,
+									   highTraffic,
+									   sizeof(highTraffic),
+									   recorded))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	*tagged = *recorded && streq(highTraffic, FOLLOW_MODE_PERFORMANCE_TAG);
+
+	return true;
+}
+
+
 bool
 copydb_check_cdc_layout(StreamSpecs *specs)
 {
 	ReplicationSlot slot = { 0 };
-	int workers = 0;
-	char highTraffic[WAL_HIGH_TRAFFIC_TABLES_BUFSIZE] = { 0 };
 	bool found = false;
+	bool tagged = false;
 
 	if (!catalog_read_replication_slot(specs->sourceDB, &slot) ||
-		!catalog_read_wal_worker_setup(specs->sourceDB,
-									   &workers,
-									   highTraffic,
-									   sizeof(highTraffic),
-									   &found))
+		!copydb_cdc_layout_mode(specs, &found, &tagged))
 	{
 		/* errors have already been logged */
 		return false;
@@ -815,7 +832,6 @@ copydb_check_cdc_layout(StreamSpecs *specs)
 		return true;
 	}
 
-	bool tagged = found && streq(highTraffic, FOLLOW_MODE_PERFORMANCE_TAG);
 	bool raw = stream_uses_raw_spool(specs);
 
 	if (tagged != raw)

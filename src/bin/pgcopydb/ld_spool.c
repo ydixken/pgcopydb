@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1520,6 +1521,16 @@ spool_dirname_fits(const char *dirname)
 }
 
 
+/* the name of the segment or index file of seq, which fits by spool_dirname_fits */
+static char *
+spool_path(char *path, const char *dirname, uint64_t seq, const char *suffix)
+{
+	sformat(path, MAXPGPATH, "%s/%016" PRIX64 "%s", dirname, seq, suffix);
+
+	return path;
+}
+
+
 /*
  * spool_name_seq returns the suffix of a segment or index file name, and its
  * sequence number, or NULL for a name that the writer does not make.
@@ -1662,6 +1673,26 @@ spool_lowest(PQExpBuffer list)
 	for (int i = 0; i < count; i++)
 	{
 		if (lowest == 0 || seqs[i] < lowest)
+		{
+			lowest = seqs[i];
+		}
+	}
+
+	return lowest;
+}
+
+
+/* the lowest sequence number of the list above bound, 0 for none */
+static uint64_t
+spool_lowest_above(PQExpBuffer list, uint64_t bound)
+{
+	int count = 0;
+	uint64_t *seqs = spool_seqs(list, &count);
+	uint64_t lowest = 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		if (seqs[i] > bound && (lowest == 0 || seqs[i] < lowest))
 		{
 			lowest = seqs[i];
 		}
@@ -1854,6 +1885,31 @@ spool_read_header(int fd, const char *path, SpoolHeader *header, bool *headed)
 	}
 
 	return true;
+}
+
+
+/*
+ * spool_segment_header reads the header of segment seq, which holds the end
+ * of the last complete transaction before it.
+ */
+static bool
+spool_segment_header(const char *dirname, uint64_t seq, SpoolHeader *header,
+					 bool *headed)
+{
+	char path[MAXPGPATH];
+	int fd = open(spool_path(path, dirname, seq, ".seg"), O_RDONLY);
+
+	if (fd < 0)
+	{
+		log_error("Failed to open spool file \"%s\": %m", path);
+		return false;
+	}
+
+	bool read = spool_read_header(fd, path, header, headed);
+
+	(void) close(fd);
+
+	return read;
 }
 
 
@@ -2180,13 +2236,57 @@ typedef struct SpoolStart
 
 
 /*
+ * spool_leftover_under_w refuses the lowest leftover of a cleanup pass once
+ * the spool holds a W: cleanup deletes only segments whose transactions are
+ * all below it, so a leftover above W is damage and not a leftover (A49).
+ */
+static bool
+spool_leftover_under_w(const char *dirname, PQExpBuffer segments,
+					   uint64_t leftover, uint64_t storedW)
+{
+	char path[MAXPGPATH];
+	char next[MAXPGPATH];
+	SpoolHeader header = { 0 };
+	bool headed = false;
+	uint64_t after = spool_lowest_above(segments, leftover);
+
+	spool_path(path, dirname, leftover, ".seg");
+
+	if (!spool_segment_header(dirname, after, &header, &headed))
+	{
+		return false;
+	}
+
+	/* without that header, where the leftover ends is unknown */
+	if (!headed)
+	{
+		log_error("Spool file \"%s\" has no valid header, and the segment "
+				  "before it has no index file",
+				  spool_path(next, dirname, after, ".seg"));
+		return false;
+	}
+
+	if (header.lastEndLSN > storedW)
+	{
+		log_error("Spool file \"%s\" has no index file, and holds "
+				  "transactions up to %X/%X, above the stored replay LSN "
+				  "%X/%X", path, LSN_FORMAT_ARGS(header.lastEndLSN),
+				  LSN_FORMAT_ARGS(storedW));
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
  * spool_start_read reads and checks everything that the start needs, and
  * writes nothing, so that a refused start leaves the spool as it was.
  */
 static bool
 spool_start_read(SpoolStart *start, const char *dirname,
 				 PQExpBuffer segments, PQExpBuffer indexes,
-				 const SpoolHeader *fresh)
+				 const SpoolHeader *fresh, uint64_t storedW)
 {
 	uint64_t seq = spool_highest_below(segments, UINT64_MAX);
 	uint64_t before = spool_highest_below(segments, seq);
@@ -2232,6 +2332,13 @@ spool_start_read(SpoolStart *start, const char *dirname,
 		}
 
 		start->leftover = seqs[i];
+	}
+
+	/* and leaves only segments below W, so a leftover above it is damage */
+	if (start->leftover > 0 && storedW != InvalidXLogRecPtr &&
+		!spool_leftover_under_w(dirname, segments, start->leftover, storedW))
+	{
+		return false;
 	}
 
 	start->header = *fresh;
@@ -2386,7 +2493,8 @@ spool_start_act(SpoolStart *start, SpoolWriter *writer, const char *dirname,
 static bool
 spool_writer_resume(SpoolWriter *writer, const char *dirname,
 					PQExpBuffer segments, PQExpBuffer indexes,
-					const SpoolHeader *fresh, uint64_t maxSegmentSize)
+					const SpoolHeader *fresh, uint64_t maxSegmentSize,
+					uint64_t storedW)
 {
 	SpoolStart start = {
 		.last = { .segment = { .fd = -1 }, .indexFd = -1 },
@@ -2394,7 +2502,8 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 		.relations = { .fd = -1 }
 	};
 
-	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh) &&
+	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh,
+									storedW) &&
 				   spool_start_act(&start, writer, dirname, maxSegmentSize);
 
 	spool_tail_close(&start.last);
@@ -2406,16 +2515,62 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
 
 
 /*
+ * spool_lock takes the exclusive lock of the spool of dirname, which keeps a
+ * start and a cleanup pass apart (A49). Without wait, fd is -1 when the other
+ * one holds it, and a close of fd releases the lock.
+ */
+static bool
+spool_lock(const char *dirname, bool wait, int *fd)
+{
+	char path[MAXPGPATH];
+
+	sformat(path, sizeof(path), "%s/" SPOOL_LOCK_FILE, dirname);
+
+	*fd = open(path, O_WRONLY | O_CREAT, 0644);
+
+	if (*fd < 0)
+	{
+		log_error("Failed to open spool file \"%s\": %m", path);
+		return false;
+	}
+
+	while (flock(*fd, wait ? LOCK_EX : LOCK_EX | LOCK_NB) != 0)
+	{
+		/* a signal of the supervisor interrupts the wait of a start */
+		if (errno == EINTR)
+		{
+			continue;
+		}
+
+		bool held = !wait && errno == EWOULDBLOCK;
+
+		if (!held)
+		{
+			log_error("Failed to lock spool file \"%s\": %m", path);
+		}
+
+		(void) close(*fd);
+		*fd = -1;
+
+		return held;
+	}
+
+	return true;
+}
+
+
+/*
  * spool_writer_open starts receive on the spool of dirname, cut back to its
  * last indexed transaction, which lastFinalLSN and lastEndLSN then hold.
  */
 bool
 spool_writer_open(SpoolWriter *writer, const char *dirname,
 				  uint64_t systemId, uint32_t timeline,
-				  uint64_t maxSegmentSize)
+				  uint64_t maxSegmentSize, uint64_t storedW)
 {
 	PQExpBufferData segments;
 	PQExpBufferData indexes;
+	int lock = -1;
 
 	/* a new spool skips no transaction, so a commit at the consistent point stays */
 	SpoolHeader fresh = {
@@ -2432,15 +2587,139 @@ spool_writer_open(SpoolWriter *writer, const char *dirname,
 	initPQExpBuffer(&segments);
 	initPQExpBuffer(&indexes);
 
+	/* no cleanup pass runs while the start reads and changes the files */
 	bool opened = spool_dirname_fits(dirname) &&
+				  spool_lock(dirname, true, &lock) &&
 				  spool_scan(dirname, &segments, &indexes) &&
 				  spool_writer_resume(writer, dirname, &segments, &indexes,
-									  &fresh, maxSegmentSize);
+									  &fresh, maxSegmentSize, storedW);
+
+	if (lock >= 0)
+	{
+		(void) close(lock);
+	}
 
 	termPQExpBuffer(&segments);
 	termPQExpBuffer(&indexes);
 
 	return opened;
+}
+
+
+/*
+ * spool_remove_segment unlinks the index file of seq and then its segment,
+ * each on disk before the next step, so that a kill inside a pass leaves at
+ * most the lowest segment without its index file, which a start removes (A39).
+ */
+static bool
+spool_remove_segment(const char *dirname, uint64_t seq, bool dry_run,
+					 uint64_t *filesDeleted, uint64_t *bytesFreed)
+{
+	char index[MAXPGPATH];
+	char segment[MAXPGPATH];
+	struct stat st = { 0 };
+	uint64_t bytes = 0;
+
+	spool_path(index, dirname, seq, ".idx");
+	spool_path(segment, dirname, seq, ".seg");
+
+	if (stat(index, &st) == 0)
+	{
+		bytes += (uint64_t) st.st_size;
+	}
+
+	if (stat(segment, &st) == 0)
+	{
+		bytes += (uint64_t) st.st_size;
+	}
+
+	if (dry_run)
+	{
+		log_info("Would remove spool segment \"%s\" and its index file, "
+				 "%" PRIu64 " bytes", segment, bytes);
+	}
+	else if (!unlink_file(index) || !spool_sync_directory(dirname) ||
+			 !unlink_file(segment) || !spool_sync_directory(dirname))
+	{
+		return false;
+	}
+	else
+	{
+		log_info("Removed spool segment \"%s\" and its index file, "
+				 "%" PRIu64 " bytes", segment, bytes);
+	}
+
+	*bytesFreed += bytes;
+	++(*filesDeleted);
+
+	return true;
+}
+
+
+/*
+ * spool_cleanup removes the segments of the spool of dirname whose
+ * transactions are all below storedW, oldest first. It keeps the last segment
+ * and the one before it, so that a torn last segment always has a segment
+ * before it to continue from (A33). While a start holds the lock it deletes
+ * nothing, because the next pass comes within five minutes.
+ */
+bool
+spool_cleanup(const char *dirname, uint64_t storedW, bool dry_run,
+			  uint64_t *filesDeleted, uint64_t *bytesFreed)
+{
+	PQExpBufferData segments;
+	PQExpBufferData indexes;
+	int lock = -1;
+
+	if (!spool_dirname_fits(dirname) || !spool_lock(dirname, false, &lock))
+	{
+		return false;
+	}
+
+	if (lock < 0)
+	{
+		log_info("Skipping the cleanup of spool \"%s\": "
+				 "a start holds its lock", dirname);
+		return true;
+	}
+
+	initPQExpBuffer(&segments);
+	initPQExpBuffer(&indexes);
+
+	bool cleaned = spool_scan(dirname, &segments, &indexes);
+	uint64_t last = spool_highest_below(&segments, UINT64_MAX);
+	uint64_t keep = spool_highest_below(&segments, last);
+	uint64_t seq = spool_lowest(&segments);
+
+	while (cleaned && seq > 0 && seq != keep && seq != last)
+	{
+		SpoolHeader header = { 0 };
+		bool headed = false;
+		uint64_t next = spool_lowest_above(&segments, seq);
+
+		cleaned = spool_segment_header(dirname, next, &header, &headed);
+
+		/*
+		 * A segment is closed when a later one has a valid header, and that
+		 * header holds the end LSN of the last transaction before it. The
+		 * comparison is strict, as the cleanup of the SQLite path is.
+		 */
+		if (!cleaned || !headed || header.lastEndLSN >= storedW)
+		{
+			break;
+		}
+
+		cleaned = spool_remove_segment(dirname, seq, dry_run,
+									   filesDeleted, bytesFreed);
+		seq = next;
+	}
+
+	termPQExpBuffer(&segments);
+	termPQExpBuffer(&indexes);
+
+	(void) close(lock);
+
+	return cleaned;
 }
 
 

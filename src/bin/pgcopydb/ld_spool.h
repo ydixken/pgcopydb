@@ -193,6 +193,9 @@ typedef struct SpoolWriter
 /* the sequence number of the first transaction of a new spool */
 #define SPOOL_FIRST_SEQ 1
 
+/* a start and a cleanup pass of one spool take this file exclusively (A49) */
+#define SPOOL_LOCK_FILE "spool.lock"
+
 /* the frames of one transaction, read by byte range and never past its end */
 typedef struct SpoolFrames
 {
@@ -255,7 +258,10 @@ bool spool_writer_rotate_due(const SpoolWriter *writer);
 bool spool_writer_rotate(SpoolWriter *writer);
 bool spool_writer_open(SpoolWriter *writer, const char *dirname,
 					   uint64_t systemId, uint32_t timeline,
-					   uint64_t maxSegmentSize);
+					   uint64_t maxSegmentSize, uint64_t storedW);
+
+bool spool_cleanup(const char *dirname, uint64_t storedW, bool dry_run,
+				   uint64_t *filesDeleted, uint64_t *bytesFreed);
 
 SpoolFrameStatus spool_relation_decode(const char *buf, uint64_t size,
 									   SpoolRelationRecord *record);

@@ -910,6 +910,7 @@ cli_stream_prune(int argc, char **argv)
 
 	StreamSpecs specs = { 0 };
 
+	specs.paths = copySpecs.cfPaths.cdc;
 	specs.sourceDB = &(copySpecs.catalogs.source);
 
 	uint64_t filesDeleted = 0;

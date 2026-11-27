@@ -592,6 +592,9 @@ typedef struct StreamApplyContext
 	uint64_t sentinelSyncTime;  /* when replay_lsn was last written */
 	uint64_t sentinelWrittenLSN;    /* replay_lsn value last written */
 
+	/* the raw path writes replay_lsn through the guard: W never falls */
+	bool guardReplayLSN;
+
 	ConnStrings *connStrings;
 	char origin[BUFSIZE];
 
@@ -985,6 +988,7 @@ bool stream_replay_reached_endpos(StreamSpecs *specs,
 
 /* follow.c */
 bool follow_export_snapshot(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
+bool copydb_cdc_layout_mode(StreamSpecs *specs, bool *recorded, bool *tagged);
 bool copydb_check_cdc_layout(StreamSpecs *specs);
 bool follow_setup_databases(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
 bool follow_reset_sequences(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
