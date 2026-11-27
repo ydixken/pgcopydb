@@ -704,6 +704,7 @@ struct StreamSpecs
 	uint64_t endpos;
 	uint64_t maxReplayDBSize;   /* rotate replayDB file at this size (bytes) */
 	uint64_t confirmedFlushLSN; /* of the slot, read before the start */
+	uint64_t storedW;           /* sentinel replay_lsn, read before the start */
 	CopyDBSentinel sentinel;
 
 	LogicalStreamMode mode;

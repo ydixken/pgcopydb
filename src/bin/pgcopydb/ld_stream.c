@@ -658,7 +658,8 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 							   stream->system.identifier,
 							   stream->system.timeline,
 							   specs->confirmedFlushLSN,
-							   specs->maxReplayDBSize))
+							   specs->maxReplayDBSize,
+							   specs->storedW))
 		{
 			/* errors have already been logged */
 			return false;
@@ -967,6 +968,9 @@ streamCheckResumePosition(StreamSpecs *specs)
 
 	/* the start of the raw spool never cuts it below this position */
 	specs->confirmedFlushLSN = lsn;
+
+	/* and keeps a leftover of segment cleanup only under this one (A49) */
+	specs->storedW = sentinel.replay_lsn;
 
 	int logLevel = lsn == specs->startpos ? LOG_NOTICE : LOG_INFO;
 
