@@ -3562,6 +3562,25 @@ test_start_cut(const char *dir)
 
 	check(made && refused_twice(writer.dirname, 7, 50, line),
 		  "an invalid index record before a valid one in the segment before a torn last segment ends every start with an error, and no file changes");
+
+	/* a bit of the last record of the index file that the rotation closed */
+	refused = true;
+
+	for (int torn = 0; torn < 2; torn++)
+	{
+		made = make_rotated(&writer, dir, false) &&
+			   flip_byte(spool_file(idx, writer.dirname, 5, ".idx"),
+						 SPOOL_INDEX_RECORD_SIZE + 20);
+		spool_file(seg, writer.dirname, 7, ".seg");
+		made = made && (torn == 0 || truncate(seg, 10) == 0);
+		sformat(line, sizeof(line),
+				"Spool file \"%s\" holds no valid index record at offset %d, and a segment after it exists",
+				idx, SPOOL_INDEX_RECORD_SIZE);
+		refused = refused && made && refused_twice(writer.dirname, 7, 50, line);
+	}
+
+	check(refused,
+		  "an invalid last record in the index file of the segment before a headed or torn last segment ends every start with an error, and no file changes");
 }
 
 

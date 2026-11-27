@@ -3,9 +3,9 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -1927,7 +1927,7 @@
- 		return false;
- 	}
+@@ -1960,7 +1960,7 @@
+ 
+ 	tail->indexSize = (uint64_t) st.st_size;
  
 -	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
 +	for (uint64_t at = 0; at < Min((uint64_t) st.st_size, sizeof(bytes)); at += sizeof(bytes))

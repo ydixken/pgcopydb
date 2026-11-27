@@ -1906,6 +1906,7 @@ typedef struct SpoolTail
 	bool headed;                /* false when the header is torn */
 	SpoolIndexRecord last;      /* the last valid index record */
 	uint64_t keep;              /* index length up to the end of last, or 0 */
+	uint64_t indexSize;
 } SpoolTail;
 
 
@@ -1956,6 +1957,8 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 		log_error("Failed to open spool file \"%s\": %m", tail->index);
 		return false;
 	}
+
+	tail->indexSize = (uint64_t) st.st_size;
 
 	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
 	{
@@ -2232,6 +2235,15 @@ spool_start_read(SpoolStart *start, const char *dirname,
 			log_error("Spool file \"%s\" holds no indexed transaction, but a "
 					  "segment after it was created",
 					  start->before.segment.filename);
+			return false;
+		}
+
+		/* and synced its index file in full, so a cut there drops acknowledged ones */
+		if (start->before.keep < start->before.indexSize)
+		{
+			log_error("Spool file \"%s\" holds no valid index record at offset %"
+					  PRIu64 ", and a segment after it exists",
+					  start->before.index, start->before.keep);
 			return false;
 		}
 

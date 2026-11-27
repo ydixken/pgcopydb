@@ -3,7 +3,7 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2217,15 +2217,6 @@
+@@ -2229,15 +2229,6 @@
  			return false;
  		}
  
@@ -16,6 +16,6 @@ Apply from the repository root with git apply, and never commit it applied.
 -			return false;
 -		}
 -
- 		/* without the header of last, the writer appends to the one before */
- 		if (!start->last.headed)
+ 		/* and synced its index file in full, so a cut there drops acknowledged ones */
+ 		if (start->before.keep < start->before.indexSize)
  		{
