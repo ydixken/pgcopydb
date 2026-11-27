@@ -2393,15 +2393,34 @@ spool_reader_switch(SpoolReader *reader, uint64_t seq)
 }
 
 
-/* the next segment exists, which proves the index file read complete */
+/*
+ * spool_reader_closed sets closed when the index file of segment seq exists,
+ * which proves the index file read complete when seq is a later segment.
+ */
 static bool
-spool_reader_closed(SpoolReader *reader, uint64_t seq)
+spool_reader_closed(SpoolReader *reader, uint64_t seq, bool *closed)
 {
 	char path[MAXPGPATH];
 
+	*closed = false;
+
+	if (seq == reader->segment)
+	{
+		return true;
+	}
+
 	sformat(path, sizeof(path), "%s/%016" PRIX64 ".idx", reader->dirname, seq);
 
-	return seq != reader->segment && file_exists(path);
+	*closed = access(path, F_OK) == 0;
+
+	/* any other error would read as a file not written yet, and the reader wait */
+	if (!*closed && errno != ENOENT)
+	{
+		log_error("Failed to check spool file \"%s\": %m", path);
+		return false;
+	}
+
+	return true;
 }
 
 
@@ -2476,8 +2495,14 @@ spool_reader_read(SpoolReader *reader)
 							reader->chunk[reader->chunkCount - 1].seq + 1 :
 							reader->nextSeq;
 
-			if (offset + SPOOL_INDEX_RECORD_SIZE < size ||
-				spool_reader_closed(reader, next))
+			bool damaged = offset + SPOOL_INDEX_RECORD_SIZE < size;
+
+			if (!damaged && !spool_reader_closed(reader, next, &damaged))
+			{
+				return false;
+			}
+
+			if (damaged)
 			{
 				log_error("Spool file \"%s\" holds no valid index record at "
 						  "offset %" PRIu64, reader->indexFilename, offset);
@@ -2618,8 +2643,15 @@ spool_reader_next(SpoolReader *reader, bool *found)
 			continue;
 		}
 
+		bool closed = false;
+
+		if (!spool_reader_closed(reader, reader->nextSeq, &closed))
+		{
+			return false;
+		}
+
 		/* the next segment has its index file once this one is complete */
-		if (!spool_reader_closed(reader, reader->nextSeq))
+		if (!closed)
 		{
 			/* receive creates a later segment only after it wrote the record */
 			if (later > reader->nextSeq)

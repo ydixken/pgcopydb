@@ -4099,6 +4099,33 @@ test_reader(const char *dir)
 	spool_reader_close(&reader);
 	kill_writer(&writer);
 
+	/* the index file of the next segment is a link to itself, seen at the end or a torn record */
+	bool stopped = true;
+
+	for (int torn = 0; torn < 2; torn++)
+	{
+		made = make_rotated(&writer, dir, false) &&
+			   symlink(spool_file(idx, writer.dirname, 7, ".idx"), idx) == 0 &&
+			   (torn == 0 ||
+				put_bytes(spool_file(name, writer.dirname, 5, ".idx"), -1, junk, 30)) &&
+			   spool_reader_open(&reader, writer.dirname, 0) &&
+			   (torn == 1 ||
+				(next_holds(&reader, &context, firstTxn, lengthof(firstTxn)) &&
+				 next_holds(&reader, &context, secondTxn, lengthof(secondTxn))));
+		sformat(line, sizeof(line), "Failed to check spool file \"%s\"", idx);
+		mark = log_mark();
+
+		bool next = made && spool_reader_next(&reader, &found);
+		char *text = logged_since(mark);
+
+		stopped = stopped && made && !next && count(text, " ERROR ") == 1 &&
+				  one_line(text, " ERROR ", line);
+		spool_reader_close(&reader);
+	}
+
+	check(stopped,
+		  "a reader that cannot look up the index file of the next segment fails with an ERROR line, and does not wait");
+
 	/* rotated twice, and the index file of the middle segment lost */
 	made = new_writer(&writer, dir, &spoolHeader, 50) &&
 		   feed(&writer, firstTxn, lengthof(firstTxn)) &&
