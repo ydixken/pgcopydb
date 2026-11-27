@@ -81,11 +81,18 @@ no_refusal() {
     echo "OK exit ${rc}, no mode refusal: $*"
 }
 
-# spool_dir <dir> <variable mode|-> <option mode|->: a work directory with a
-# pgoutput slot and an origin, started with that variable and that option
+# spool_dir <dir> <variable mode|-> <option mode|-> <slot>: a work directory
+# with a pgoutput slot and an origin, started with that variable and that
+# option.  Each fixture takes its own slot name, which also names its
+# publication and its origin, so no case inherits another one's objects.
+# The output file is named after the directory and removed first: a file
+# that an earlier call left behind would end the wait before this snapshot
+# exported anything, and the SIGTERM below would then interrupt its
+# CREATE PUBLICATION and leave the publication on the source.
 spool_dir() {
-    local dir=$1 env_mode=$2 opt_mode=$3 snap_pid deadline
+    local dir=$1 env_mode=$2 opt_mode=$3 slot=$4 snap_pid deadline base
     local opt=()
+    base=/tmp/${tc}/$(basename "${dir}")
     test "${opt_mode}" = - || opt=(--follow-mode "${opt_mode}")
     if test "${env_mode}" = -; then
         unset PGCOPYDB_FOLLOW_MODE
@@ -93,30 +100,31 @@ spool_dir() {
         export PGCOPYDB_FOLLOW_MODE=${env_mode}
     fi
 
+    rm -f "${base}-snapshot.out"
     pgcopydb snapshot --follow --plugin pgoutput "${opt[@]}" --dir "${dir}" \
-        --slot-name mode_slot > "/tmp/${tc}/snapshot.out" 2> "/tmp/${tc}/snapshot.log" &
+        --slot-name "${slot}" > "${base}-snapshot.out" 2> "${base}-snapshot.log" &
     snap_pid=$!
     deadline=$((SECONDS + 60))
-    until test -s "/tmp/${tc}/snapshot.out"; do
+    until test -s "${base}-snapshot.out"; do
         kill -0 "${snap_pid}" 2> /dev/null ||
-            { cat "/tmp/${tc}/snapshot.log"; fail 'snapshot --follow exited'; }
+            { cat "${base}-snapshot.log"; fail 'snapshot --follow exited'; }
         test "${SECONDS}" -lt "${deadline}" || fail 'snapshot --follow printed no snapshot'
         sleep 0.2
     done
-    pgcopydb stream setup "${opt[@]}" --dir "${dir}" --slot-name mode_slot \
-        --origin mode_origin > "/tmp/${tc}/setup.log" 2>&1 ||
-        { cat "/tmp/${tc}/setup.log"; fail 'stream setup'; }
+    pgcopydb stream setup "${opt[@]}" --dir "${dir}" --slot-name "${slot}" \
+        --origin "${slot}_origin" > "${base}-setup.log" 2>&1 ||
+        { cat "${base}-setup.log"; fail 'stream setup'; }
     kill -TERM "${snap_pid}"
     wait "${snap_pid}" || true
     unset PGCOPYDB_FOLLOW_MODE
 }
 
-# cleanup_dir <dir> <log>: the slot, publication and origin of spool_dir
+# cleanup_dir <dir> <log> <slot>: the slot, publication and origin of spool_dir
 cleanup_dir() {
-    expect 0 'Dropping replication origin "mode_origin"' "$2" \
-           pgcopydb stream cleanup --slot-name mode_slot --origin mode_origin --dir "$1"
-    check 'objects left after the cleanup' '0|0' \
-          "$(src -c "select count(*) from pg_replication_slots where slot_name = 'mode_slot'")|$(pubs)"
+    expect 0 "Dropping replication origin \"$3_origin\"" "$2" \
+           pgcopydb stream cleanup --slot-name "$3" --origin "$3_origin" --dir "$1"
+    check "objects left after the cleanup of $3" '0|0' \
+          "$(src -c "select count(*) from pg_replication_slots where slot_name = '$3'")|$(src -c "select count(*) from pg_publication where pubname = '$3'")"
 }
 
 #
@@ -194,7 +202,7 @@ plugin() {
            env PGCOPYDB_FOLLOW_MODE=performance pgcopydb stream receive \
            --resume --dir /tmp/plugin/fresh
 
-    spool_dir "${dir}" - -
+    spool_dir "${dir}" - - plugin_slot
     timeout 10s sqlite3 -init /dev/null -batch "${dir}/schema/source.db" \
         "insert into wal_worker_setup(id, workers, high_traffic) values (1, 1, 'performance')"
     check 'the hand written tag' performance "$(mode_tag "${dir}")"
@@ -202,11 +210,11 @@ plugin() {
     # cleanup is the remedy of the work directory refusal, so neither the
     # mode nor a missing plugin may stop it
     cp -a "${dir}" "${copy}"
-    expect 0 'Dropping replication origin "mode_origin"' cleanup \
+    expect 0 'Dropping replication origin "plugin_slot_origin"' cleanup \
            env PGCOPYDB_FOLLOW_MODE=performance pgcopydb stream cleanup \
-           --slot-name mode_slot --origin mode_origin --dir "${copy}"
-    check 'objects left after the cleanup' '0|0' \
-          "$(src -c "select count(*) from pg_replication_slots where slot_name = 'mode_slot'")|$(pubs)"
+           --slot-name plugin_slot --origin plugin_slot_origin --dir "${copy}"
+    check 'objects left after the cleanup of plugin_slot' '0|0' \
+          "$(src -c "select count(*) from pg_replication_slots where slot_name = 'plugin_slot'")|$(src -c "select count(*) from pg_publication where pubname = 'plugin_slot'")"
     echo "PASS [${tc}]"
 }
 
@@ -218,17 +226,17 @@ modes() {
     begin_case modes
 
     # no option and no variable is sqlite mode
-    spool_dir /tmp/modes/none - -
+    spool_dir /tmp/modes/none - - none_slot
     check 'setup rows of a directory started without a mode' 0 "$(setup_rows /tmp/modes/none)"
     check 'segments of a directory started without a mode' 0 "$(segs /tmp/modes/none)"
-    cleanup_dir /tmp/modes/none cleanup-none
+    cleanup_dir /tmp/modes/none cleanup-none none_slot
 
     # the option names sqlite while the variable names performance, so the
     # directory must come out the same way
-    spool_dir /tmp/modes/opt performance sqlite
+    spool_dir /tmp/modes/opt performance sqlite opt_slot
     check 'setup rows when the option names sqlite' 0 "$(setup_rows /tmp/modes/opt)"
     check 'segments when the option names sqlite' 0 "$(segs /tmp/modes/opt)"
-    cleanup_dir /tmp/modes/opt cleanup-opt
+    cleanup_dir /tmp/modes/opt cleanup-opt opt_slot
     echo "PASS [${tc}]"
 }
 
@@ -239,10 +247,10 @@ modes() {
 tag_case() {
     begin_case tag
 
-    spool_dir /tmp/tag/pgcopydb performance -
+    spool_dir /tmp/tag/pgcopydb performance - tag_slot
     check 'the setup row of a performance directory' 1 "$(setup_rows /tmp/tag/pgcopydb)"
     check 'the tag of a performance directory' performance "$(mode_tag /tmp/tag/pgcopydb)"
-    cleanup_dir /tmp/tag/pgcopydb cleanup-tag
+    cleanup_dir /tmp/tag/pgcopydb cleanup-tag tag_slot
     echo "PASS [${tc}]"
 }
 
