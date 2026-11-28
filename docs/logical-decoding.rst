@@ -213,6 +213,11 @@ If receive stops before a transaction's COMMIT reaches the spool, apply leaves t
 If the complete transaction is already in the spool, apply can commit it in full before stopping.
 Neither path fabricates applied progress at endpos.
 
+The three cases above are the rules of ``sqlite`` mode.
+In ``performance`` mode, see :ref:`raw_spool`, one worker applies a transaction if and only if its commit position is at or below the cut, and the cut is the larger of endpos and the commits the worker already made.
+The spool indexes a transaction by its commit, so a transaction that begins below endpos and commits above it stays unapplied even when the whole transaction is in the spool, and a raised endpos applies it.
+Taking the larger of the two keeps the target on a prefix of the source when endpos arrives after a commit above it: the cut never falls below what the target holds, and the origin ends above endpos.
+
 Internal model for endpos tracking
 ------------------------------------
 
@@ -243,6 +248,10 @@ Apply also marks itself ``'done'`` when a signal stopped it, so (b) alone does n
 
 ``follow_reached_endpos`` checks (a) first; if (a) misses, it checks (b).
 A WAL worker uses (b) only, because its apply marks itself ``'done'`` at endpos only, see :ref:`wal_workers_endpos`.
+
+A run on the raw spool uses (b) alone, and with the endpos it served: the apply row holds ``'done'`` and that endpos only where the worker reached the finish of its cut.
+Its replay_lsn can hold a commit above endpos, which would make (a) report an endpos the run never drained to, and every other exit leaves the row with ``'error'``.
+So exit code 0 with endpos set implies the marker, a run that a signal stops short of endpos exits with an error, and a resume reads the marker to decide whether it is done.
 
 Transform exit for mid-transaction endpos
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

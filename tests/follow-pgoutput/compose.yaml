@@ -36,6 +36,7 @@ services:
     environment:
       PGCOPYDB_HOST: test
       PGCOPYDB_PORT: "5442"
+      PGCOPYDB_FOLLOW_MODE:
 
   test:
     image: follow-pgoutput
@@ -49,6 +50,7 @@ services:
       PGCOPYDB_HOST: "0.0.0.0"
       PGCOPYDB_PORT: "5442"
       PGCOPYDB_WAL_WORKERS:
+      PGCOPYDB_FOLLOW_MODE:
     env_file:
       - ../uris.env
       - ../paths.env

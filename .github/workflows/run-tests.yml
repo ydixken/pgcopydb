@@ -164,6 +164,7 @@ jobs:
           - catalog-stmt-cache
           - follow-wal2json
           - follow-pgoutput
+          - follow-pgoutput-performance
           - follow-9.6
           - follow-data-only
           - follow-filtering
@@ -181,6 +182,7 @@ jobs:
           - cdc-copy-multi-insert-performance
           - cdc-receive-group-commit
           - cdc-endpos-before-txn
+          - cdc-endpos-before-txn-performance
           - cdc-origin-source
           - cdc-file-rotation-live
           - cdc-wal-workers
@@ -270,6 +272,8 @@ jobs:
             PGVERSION: 16
           - TEST: follow-pgoutput
             PGVERSION: 16
+          - TEST: follow-pgoutput-performance
+            PGVERSION: 16
           - TEST: follow-9.6
             PGVERSION: 16
           - TEST: follow-data-only
@@ -303,6 +307,8 @@ jobs:
           - TEST: cdc-receive-group-commit
             PGVERSION: 16
           - TEST: cdc-endpos-before-txn
+            PGVERSION: 16
+          - TEST: cdc-endpos-before-txn-performance
             PGVERSION: 16
           - TEST: cdc-origin-source
             PGVERSION: 16

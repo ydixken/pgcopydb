@@ -1,0 +1,14 @@
+Control: the performance follow is given only the first publication. Must fail: the row counts of fp.two, whose changes no publication carries.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/tests/follow-pgoutput/copydb.sh
++++ b/tests/follow-pgoutput/copydb.sh
+@@ -46,7 +46,7 @@
+ if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
+ pgcopydb clone --follow --plugin pgoutput --notice
+ else
+-pgcopydb clone --follow --plugin pgoutput --notice --publication fp_a,fp_b
++pgcopydb clone --follow --plugin pgoutput --notice --publication fp_a
+ fi
+ 
+ #

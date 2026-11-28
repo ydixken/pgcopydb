@@ -33,7 +33,8 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-replica-identity-index-performance cdc-partitioned-target-performance \
 	 cdc-pgoutput-resume-performance \
 	 cdc-commit-order-resume-performance cdc-copy-multi-insert-performance \
-	 cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance;
+	 cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance \
+	 cdc-endpos-before-txn-performance follow-pgoutput-performance;
 
 pagila: build
 	$(MAKE) -C $@
@@ -287,6 +288,12 @@ cdc-pgoutput-resume-performance: build
 cdc-receive-group-commit-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-group-commit
 
+cdc-endpos-before-txn-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-endpos-before-txn
+
+follow-pgoutput-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-pgoutput
+
 build:
 	@docker image inspect pagila > /dev/null 2>&1 \
 	  && echo "pagila image already present — skipping build (run 'make force-build' to rebuild)" \
@@ -335,6 +342,8 @@ clean-images:
 .PHONY: cdc-pgoutput-resume-performance cdc-receive-group-commit-performance
 .PHONY: cdc-commit-order-resume-performance cdc-copy-multi-insert-performance
 .PHONY: cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance
+
+.PHONY: cdc-endpos-before-txn-performance follow-pgoutput-performance
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases
 .PHONY: timescaledb citus

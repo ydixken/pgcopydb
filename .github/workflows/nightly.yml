@@ -163,6 +163,7 @@ jobs:
           - follow-9.6
           - follow-data-only
           - follow-pgoutput
+          - follow-pgoutput-performance
           - follow-filtering
           - follow-filtering-performance
           - follow-resume-snapshot
@@ -178,6 +179,7 @@ jobs:
           - cdc-copy-multi-insert-performance
           - cdc-receive-group-commit
           - cdc-endpos-before-txn
+          - cdc-endpos-before-txn-performance
           - cdc-origin-source
           - cdc-wal-workers
           - cdc-wal-workers-endpos

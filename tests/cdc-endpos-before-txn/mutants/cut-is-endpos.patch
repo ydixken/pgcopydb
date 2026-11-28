@@ -1,0 +1,14 @@
+Mutant: the cut is endpos itself, so it ignores the commits the worker already made. Must fail: the cut check of an endpos in the past, where the cut has to be the commit the target already holds.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -748,7 +748,7 @@ stream_apply_spool_cut(StreamApplyContext *context, PipelineStateEntry *current,
+ 	}
+ 
+ 	cut->endpos = endpos;
+-	cut->lsn = Max(endpos, context->previousLSN);
++	cut->lsn = endpos;
+ 
+ 	if (endpos != InvalidXLogRecPtr)
+ 	{
