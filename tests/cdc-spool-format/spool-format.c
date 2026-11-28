@@ -3905,8 +3905,7 @@ test_start_confirmed(const char *dir)
 
 	check(started && count(text, " ERROR ") == 0 &&
 		  file_size(idx) == 2 * SPOOL_INDEX_RECORD_SIZE &&
-		  file_size(spool_file(seg, writer.dirname, 5, ".seg")) ==
-		  (int64_t) SECOND_END &&
+		  file_size(spool_file(seg, writer.dirname, 5, ".seg")) == (int64_t) SECOND_END &&
 		  reader_holds(writer.dirname, 0, kept, lengthof(kept)),
 		  "a cut below the position the slot confirmed is taken when the stored replay position is at or above it");
 	kill_writer(&opened);
