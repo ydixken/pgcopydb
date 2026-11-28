@@ -7,9 +7,7 @@
 # its plugin from the previous run, and the cleanup that is the remedy of the
 # work directory refusal.
 #
-# The predicate that routes a run to the raw spool is still false, so no run
-# writes the mode tag yet.  The case that reads a tag the code wrote is not in
-# the default list; CASE=tag runs it once the predicate holds.
+# Case tag reads the mode tag that a performance run writes itself.
 
 set -euo pipefail
 
@@ -241,8 +239,7 @@ modes() {
 }
 
 #
-# tag: the directory that performance mode writes itself.  Deferred until the
-# routing predicate holds, which is package F12.  Run with CASE=tag.
+# tag: the directory that performance mode writes itself.
 #
 tag_case() {
     begin_case tag
@@ -256,7 +253,7 @@ tag_case() {
 
 pgcopydb ping
 
-for c in ${CASE:-options plugin modes}; do
+for c in ${CASE:-options plugin modes tag}; do
     case "${c}" in
         options) options ;;
         plugin) plugin ;;

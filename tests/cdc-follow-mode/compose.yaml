@@ -30,7 +30,7 @@ services:
     environment:
       PGCOPYDB_TABLE_JOBS: 2
       PGCOPYDB_INDEX_JOBS: 2
-      CASE: ${CASE:-options plugin modes}
+      CASE: ${CASE:-options plugin modes tag}
     depends_on:
       - source
       - target

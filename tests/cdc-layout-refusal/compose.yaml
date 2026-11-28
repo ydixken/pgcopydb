@@ -31,7 +31,7 @@ services:
       PGCOPYDB_TABLE_JOBS: 2
       PGCOPYDB_INDEX_JOBS: 2
       PGCOPYDB_OUTPUT_PLUGIN: pgoutput
-      CASE: ${CASE:-one two nine}
+      CASE: ${CASE:-one two nine refuse}
     depends_on:
       - source
       - target

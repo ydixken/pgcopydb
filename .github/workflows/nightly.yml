@@ -192,6 +192,9 @@ jobs:
           - cdc-follow-mode
           - cdc-layout-refusal
           - cdc-parallel-differential
+          - cdc-origin-source-performance
+          - cdc-parallel-isolation
+          - cdc-parallel-crash
         exclude:
           # timescaledb uses timescale/timescaledb:latest-pg13 for both source
           # and target. pg_restore from PG17+ emits "SET transaction_timeout = 0"

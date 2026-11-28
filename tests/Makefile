@@ -36,7 +36,9 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-pgoutput-resume-performance \
 	 cdc-commit-order-resume-performance cdc-copy-multi-insert-performance \
 	 cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance \
-	 cdc-endpos-before-txn-performance follow-pgoutput-performance;
+	 cdc-endpos-before-txn-performance follow-pgoutput-performance \
+	 cdc-origin-source-performance \
+	 cdc-parallel-isolation cdc-parallel-crash;
 
 pagila: build
 	$(MAKE) -C $@
@@ -184,9 +186,15 @@ cdc-layout-refusal: build
 cdc-origin-source-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-source
 
+# Not in "all" and not in the CI lists: case source times out waiting for
+# cleanup to delete the segment of the canary transaction on the merged head.
+# Run it by hand until that is settled.
 cdc-spool-resend: build
 	$(MAKE) -C $@
 
+# Not in "all" and not in the CI lists: case skipped times out waiting for the
+# RELATION of the resend on the merged head.  Run it by hand until that is
+# settled.
 cdc-spool-relation: build
 	$(MAKE) -C $@
 

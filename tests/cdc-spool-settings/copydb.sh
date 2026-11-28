@@ -11,6 +11,7 @@ set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 src() { timeout 60s psql -AtqX -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" -c "$1"; }
+tgt() { timeout 60s psql -AtqX -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI}" -c "$1"; }
 
 receive_pid=''
 
@@ -102,6 +103,11 @@ run_case() {
     src "alter database $(src 'select current_database()') reset bytea_output"
     src "alter role $(src 'select current_user') reset timezone"
     src "alter role $(src 'select current_user') reset bytea_output"
+    # the clone of the next case restores the schema again, so what the case
+    # before left on the target has to go: the table in pre-data, and the
+    # publication that stream setup created on the source in post-data
+    tgt 'drop table if exists s'
+    tgt 'drop publication if exists pgcopydb'
     src 'drop table if exists s'
     src 'create table s (ts timestamptz, b bytea, v integer, primary key (ts, b))'
 
@@ -169,7 +175,7 @@ run_case() {
 
 pgcopydb ping
 
-for c in ${CASE:-sqlite}; do
+for c in ${CASE:-all}; do
     case "${c}" in
         all) run_case sqlite; run_case performance ;;
         sqlite|performance) run_case "${c}" ;;

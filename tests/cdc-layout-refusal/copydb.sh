@@ -5,10 +5,10 @@
 # without a mode must resume what 9d8b660 wrote, and performance mode must
 # refuse that directory before it changes anything in it.
 #
-# The routing predicate is still false, so no run writes the mode tag and no
-# run is refused for its mode yet.  The cases that read such a refusal are
-# not in the default list; CASE='refuse perfdir' runs them once the predicate
-# holds, which is package F12.
+# Case refuse reads the refusal that a mode mismatch produces.
+# Case perfdir is not in the default list: it leaves the replication slot of
+# the case before it in place, and its snapshot --follow then fails on a slot
+# that already exists.  Run it alone with CASE=perfdir.
 
 set -euo pipefail
 
@@ -266,9 +266,8 @@ nine() {
 }
 
 #
-# refuse: deferred until the routing predicate holds (F12).  Performance mode
-# must refuse a 9d8b660 directory, in each of the eight commands, with
-# nothing in the directory changed.  Run with CASE=refuse.
+# refuse: performance mode must refuse a 9d8b660 directory, in each of the
+# eight commands, with nothing in the directory changed.
 #
 refuse() {
     begin_case refuse
@@ -299,10 +298,9 @@ LIST
 }
 
 #
-# perfdir: deferred until the routing predicate holds (F12).  A directory
-# that performance mode wrote is refused by this binary without a mode, with
-# the mode line and not with the setup line, and 9d8b660 refuses it for its
-# stored setup.  Run with CASE=perfdir.
+# perfdir: a directory that performance mode wrote is refused by this binary
+# without a mode, with the mode line and not with the setup line, and
+# 9d8b660 refuses it for its stored setup.
 #
 perfdir() {
     begin_case perfdir
@@ -336,7 +334,7 @@ perfdir() {
 "${OLD}" --version
 "${NEW}" ping
 
-for c in ${CASE:-one two nine}; do
+for c in ${CASE:-one two nine refuse}; do
     case "${c}" in
         one) one ;;
         two) two ;;
