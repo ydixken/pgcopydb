@@ -1,0 +1,19 @@
+Mutant: sqlite mode writes a setup row with the tag sqlite, where 9d8b660 writes none. Must fail: the nine case check "setup rows of a directory written without a mode", and after it the resume by the 9d8b660 binary.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/snapshot.c
++++ b/src/bin/pgcopydb/snapshot.c
+@@ -683,10 +683,10 @@
+ 	}
+ 
+ 	/* tagged before the slot, so a crash in between meets the check above */
+-	if (stream_uses_raw_spool(&specs) &&
+-		!catalog_write_wal_workers(&(copySpecs->catalogs.source),
++	if (!catalog_write_wal_workers(&(copySpecs->catalogs.source),
+ 								   copySpecs->walWorkers,
+-								   FOLLOW_MODE_PERFORMANCE_TAG,
++								   stream_uses_raw_spool(&specs)
++								   ? FOLLOW_MODE_PERFORMANCE_TAG : "sqlite",
+ 								   NULL, 0))
+ 	{
+ 		/* errors have already been logged */

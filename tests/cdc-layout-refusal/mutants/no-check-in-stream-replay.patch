@@ -1,0 +1,18 @@
+Mutant: stream replay does not check the work directory, where the other six call places still do. Must fail: the refuse case, for stream replay alone. Deferred until F12 switches the routing predicate.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -1118,12 +1118,6 @@
+ 	specs.coordPort = streamDBoptions.port;
+ 	specs.followMode = copySpecs.followMode;
+ 
+-	if (!copydb_check_cdc_layout(&specs))
+-	{
+-		/* errors have already been logged */
+-		exit(EXIT_CODE_BAD_STATE);
+-	}
+-
+ 	/*
+ 	 * Before starting the receive, transform, and apply sub-processes, we need
+ 	 * to set the sentinel endpos to the command line --endpos option, when

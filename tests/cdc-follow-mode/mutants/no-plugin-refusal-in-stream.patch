@@ -1,0 +1,18 @@
+Mutant: stream_start_in_mode does not check the follow mode. Must fail: the options case check for receive-wal2json.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -1698,12 +1698,6 @@
+ {
+ 	CopyDataSpec copySpecs = { 0 };
+ 
+-	if (!cli_validate_follow_mode(&streamDBoptions))
+-	{
+-		/* errors have already been logged */
+-		exit(EXIT_CODE_BAD_ARGS);
+-	}
+-
+ 	(void) find_pg_commands(&(copySpecs.pgPaths));
+ 
+ 	/*

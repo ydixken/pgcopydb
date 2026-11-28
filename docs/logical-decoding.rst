@@ -152,6 +152,24 @@ This is why startup cannot initialize ``C`` to zero without checking old spool f
 On a connection retry, the receiver clears ``K`` but retains ``C`` and its certified feedback floor.
 A process restart reconstructs ``C`` from the retained catalogs and requires a new primary keepalive before promoting feedback beyond ``P``.
 
+.. _value_text_pin:
+
+Value text on the replication connection
+----------------------------------------
+
+The walsender prints every value with its own session settings, and a role, a
+database or a reload can change them between two connections.
+The raw spool of ``--follow-mode performance`` keeps that text, so a change of
+``TimeZone`` or ``bytea_output`` would give the same row two different key
+texts in one spool, and the statements built from them would no longer match.
+
+So on the raw path, receive pins five settings on the replication connection
+before ``START_REPLICATION``: ``extra_float_digits``, ``IntervalStyle``,
+``DateStyle``, ``bytea_output`` and ``TimeZone``.
+It pins them again on every reconnect, and a failed ``SET`` ends the start.
+These are the settings ``pgcopydb compare data`` pins for the same reason.
+``--follow-mode sqlite`` keeps the connection it always had.
+
 .. _apply_groups:
 
 Apply groups

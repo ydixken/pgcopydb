@@ -19,6 +19,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers \
 	 cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume \
 	 cdc-wal-workers-idle wal-workers-assign cdc-spool-format \
+	 cdc-spool-settings cdc-follow-mode cdc-layout-refusal \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering follow-resume-snapshot \
 	 orphaned-target-backend split-table-resume \
@@ -166,6 +167,16 @@ cdc-endpos-before-txn: build
 	$(MAKE) -C $@
 
 cdc-origin-source: build
+	$(MAKE) -C $@
+
+cdc-spool-settings: build
+	$(MAKE) -C $@
+
+cdc-follow-mode: build
+	$(MAKE) -C $@
+
+# builds a second binary from git archive 9d8b660
+cdc-layout-refusal: build
 	$(MAKE) -C $@
 
 # builds its own image from the build stage of the top-level Dockerfile
@@ -333,6 +344,7 @@ clean-images:
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
 .PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format cdc-parallel-crash
+.PHONY: cdc-spool-settings cdc-follow-mode cdc-layout-refusal
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
 .PHONY: cdc-pgoutput-performance cdc-low-level-performance cdc-filtering-pgoutput-performance
 .PHONY: cdc-replica-identity-full-performance cdc-truncate-multi-performance cdc-receive-drain-error-performance
@@ -342,7 +354,6 @@ clean-images:
 .PHONY: cdc-pgoutput-resume-performance cdc-receive-group-commit-performance
 .PHONY: cdc-commit-order-resume-performance cdc-copy-multi-insert-performance
 .PHONY: cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance
-
 .PHONY: cdc-endpos-before-txn-performance follow-pgoutput-performance
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases

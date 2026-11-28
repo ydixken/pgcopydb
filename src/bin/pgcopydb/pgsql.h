@@ -498,6 +498,8 @@ typedef struct LogicalStreamClient
 
 	int fsync_interval;
 	int standby_message_timeout;
+
+	bool pinValueOutput;        /* raw spool: pin the text of every value */
 } LogicalStreamClient;
 
 

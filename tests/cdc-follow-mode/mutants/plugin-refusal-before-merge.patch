@@ -1,0 +1,70 @@
+Mutant: one follow mode check in cli_stream_getopts, where the plugin of the previous run is not merged yet, in place of the four checks. Must fail: the plugin case checks "no mode refusal" for receive-no-plugin and the cleanup exit 0.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -560,6 +560,12 @@
+ 		exit(EXIT_CODE_BAD_ARGS);
+ 	}
+ 
++	if (!cli_validate_follow_mode(&options))
++	{
++		/* errors have already been logged */
++		exit(EXIT_CODE_BAD_ARGS);
++	}
++
+ 	/* prepare safe versions of the connection strings (without password) */
+ 	if (!cli_prepare_pguris(&(options.connStrings)))
+ 	{
+@@ -934,12 +940,6 @@
+ {
+ 	CopyDataSpec copySpecs = { 0 };
+ 
+-	if (!cli_validate_follow_mode(&streamDBoptions))
+-	{
+-		/* errors have already been logged */
+-		exit(EXIT_CODE_BAD_ARGS);
+-	}
+-
+ 	if (argc > 0)
+ 	{
+ 		commandline_help(stderr);
+@@ -1039,12 +1039,6 @@
+ {
+ 	CopyDataSpec copySpecs = { 0 };
+ 
+-	if (!cli_validate_follow_mode(&streamDBoptions))
+-	{
+-		/* errors have already been logged */
+-		exit(EXIT_CODE_BAD_ARGS);
+-	}
+-
+ 	if (argc > 0)
+ 	{
+ 		commandline_help(stderr);
+@@ -1365,12 +1359,6 @@
+ static void
+ cli_stream_apply(int argc, char **argv)
+ {
+-	if (!cli_validate_follow_mode(&streamDBoptions))
+-	{
+-		/* errors have already been logged */
+-		exit(EXIT_CODE_BAD_ARGS);
+-	}
+-
+ 	/*
+ 	 * Legacy pipe mode: `pgcopydb stream apply -`
+ 	 *
+@@ -1698,12 +1686,6 @@
+ {
+ 	CopyDataSpec copySpecs = { 0 };
+ 
+-	if (!cli_validate_follow_mode(&streamDBoptions))
+-	{
+-		/* errors have already been logged */
+-		exit(EXIT_CODE_BAD_ARGS);
+-	}
+-
+ 	(void) find_pg_commands(&(copySpecs.pgPaths));
+ 
+ 	/*
