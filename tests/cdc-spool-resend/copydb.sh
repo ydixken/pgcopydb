@@ -70,16 +70,6 @@ check() {
     fi
 }
 
-# relation_records: the records of the relation log that name the table canary.
-# Each record holds the name once, as a NUL-terminated string, so a count of
-# the exact lines of the printable runs counts the records.
-relation_records() {
-    local log=${XDG_DATA_HOME}/pgcopydb/relation.log n
-    test -f "${log}" || fail "no relation log at ${log}"
-    n=$(tr -c '[:print:]' '\n' < "${log}" | grep -c -x canary || true)
-    echo "${n}"
-}
-
 spool_records() {
     local filter=${1:-true}
     timeout 60s pgcopydb list spool --json | jq "[.[] | select(${filter})] | length"
@@ -121,7 +111,6 @@ canary_rows() { target_sql 'select count(*) from canary'; }
 pad_rows() { target_sql 'select count(*) from pad'; }
 canary_is() { test "$(canary_rows)" = "$1"; }
 pad_caught_up() { test "$(pad_rows)" = "$(source_sql 'select count(*) from pad')"; }
-relations_at_least() { test "$(relation_records)" -ge "$1"; }
 not_indexed() { test "$(spool_records ".xid == $1")" = 0; }
 indexed_once() { test "$(spool_records ".xid == $1")" = 1; }
 
@@ -264,11 +253,6 @@ poll 'the padding on the target' 300 pad_caught_up
 poll 'cleanup to delete the segment of the canary transaction' 300 pruned "${xid_a}"
 poll 'a rotation to leave a segment without an index record' 120 segment_without_index
 
-# a reconnect of the first phase can have sent the canary RELATION again, so
-# the proof of the resend counts from the records that are there now
-before_relations=$(relation_records)
-echo "${RESEND_CASE}: ${before_relations} relation records for canary before the resend"
-
 kill -KILL -- "-${receive_pid}" "-${catchup_pid}" || true
 wait "${receive_pid}" "${catchup_pid}" || true
 receive_pid= catchup_pid=
@@ -283,14 +267,25 @@ check 'the slot moved back below the canary transaction' t \
     "$(source_sql "select confirmed_flush_lsn < '${end_a}'::pg_lsn
                      from pg_replication_slots where slot_name = 'pgcopydb'")"
 
+# a log of its own, so that the position it asks for is readable
 setsid pgcopydb stream receive --resume --notice --max-replaydb-size 64kB \
-    >> "${LOGDIR}/receive.log" 2>&1 &
+    > "${LOGDIR}/receive2.log" 2>&1 &
 receive_pid=$!
 poll 'the slot to be streamed again' 60 slot_active
-# The canary is written once, so a second relation record for it is the proof
-# that the source sent its transaction again, with the segment of the first
-# copy already deleted.
-poll 'the canary RELATION of the resend' 300 relations_at_least $((before_relations + 1))
+
+# The receive clamps its start position up to the slot and logs the result,
+# which is the position it asks the source for; the source then sends the
+# transactions that commit after it, in commit order. A position below the end
+# of the canary transaction therefore means the source sends that transaction
+# again, and nothing else here can show it: the spool skips it without writing
+# a byte, the segment of the first copy is gone, and the relation log holds
+# the definition of canary already.
+asked=$(grep -oE 'replication slot LSN [0-9A-F]+/[0-9A-F]+' \
+            "${LOGDIR}/receive2.log" | tail -n 1 | awk '{print $NF}')
+test -n "${asked}" || fail 'the receive logged no start position'
+echo "${RESEND_CASE}: the receive asks the source to start at ${asked}"
+check 'the receive starts below the canary transaction' t \
+    "$(source_sql "select '${asked}'::pg_lsn < '${end_a}'::pg_lsn")"
 check 'the resend added no index record' 0 "$(spool_records ".xid == ${xid_a}")"
 
 kill -KILL -- "-${receive_pid}" || true
