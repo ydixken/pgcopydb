@@ -615,24 +615,31 @@ case_worker() {
 }
 
 #
-# removal: the last segment loses the page that holds its index records, after
-# the target applied a position inside it and receive reported that position
-# to the slot. The removal then drops no transaction that the target lacks and
-# none the source keeps, so the start takes it: a refusal there writes
-# nothing, so it repeats on every later start and costs a new base copy.
+# removal: the last segment loses the page that holds its index records, with
+# the slot above the position the target applied, which is where the start
+# reads what its cut drops. The removal then drops no transaction that the
+# target lacks and none the source keeps, so the start takes it: a refusal
+# there writes nothing, so it repeats on every later start and costs a new
+# base copy.
 #
 case_removal() {
     local endpos last before kept dropped confirmed first w
 
     setup
     rounds 1 40
+
+    # a catalog write carries no replicated change, so the endpos that the
+    # prefetch confirms to the slot stays above the last COMMIT of the spool.
+    # A quiet source puts both at the same position, where no rule below runs.
+    src -c "comment on table cr.late is 'wal above the last indexed commit'" \
+        > /dev/null
     endpos=$(src -c 'select pg_current_wal_flush_lsn()')
     prefetch "${endpos}" prefetch || fail 'the receive of the workload failed'
     raw_spool
     test "$(segments)" -ge 2 || fail "the workload left $(segments) segment(s), fewer than 2"
 
     # both processes under their supervisor, which stores the position the
-    # target applied and has receive report it to the slot
+    # target applied
     pgcopydb stream sentinel set apply > /dev/null
     pgcopydb follow --resume --not-consistent --endpos "${endpos}" \
             > "${TMPDIR}/follow.log" 2>&1 &
@@ -645,7 +652,12 @@ case_removal() {
     w=$(replay)
     confirmed=$(src -c "select confirmed_flush_lsn from pg_replication_slots
                         where slot_name = '${S}'")
-    check 'the slot confirmed the position the target applied' "${w}" "${confirmed}"
+    # receive reports what it spooled durably, not what the target applied, so
+    # the prefetch alone leaves the slot at its endpos. The start rule reads
+    # what a cut drops only with the slot above the stored position.
+    echo "the slot confirmed ${confirmed}, and the target applied ${w}"
+    check 'the slot confirmed above the position the target applied' t \
+          "$(src -c "select '${confirmed}'::pg_lsn > '${w}'::pg_lsn")"
 
     # without this, the cut would keep the spool at or above what the slot
     # confirmed, and the start would take it whatever this case does next
