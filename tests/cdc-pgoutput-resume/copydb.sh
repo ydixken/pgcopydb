@@ -36,10 +36,15 @@ endpos=$(psql -AtqX -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" \
     -c 'select pg_current_wal_flush_lsn()')
 test -n "${endpos}"
 
+. /var/lib/postgres/spool-probe.sh
+
 pgcopydb stream prefetch --resume --endpos "${endpos}" >/tmp/prefetch.log 2>&1 &
 prefetch_pid=$!
 sharedir=${XDG_DATA_HOME:-/var/lib/postgres/.local/share}/pgcopydb
 
+# The threshold that proves receive holds an incomplete transaction: the
+# SQLite layout spills it to the output.db WAL, the raw spool to its segment.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 # An uncommitted batch spills beyond SQLite's default checkpoint threshold.
 deadline=$((SECONDS + 60))
 wal=""
@@ -69,10 +74,39 @@ test "$(wc -w <<<"${receive_pid}")" -eq 1
 
 # Kill at the flush commit boundary, not at an arbitrary instruction after it.
 sudo timeout 60s gdb -q -batch -x /usr/src/pgcopydb/flush-order.gdb -p "${receive_pid// /}"
+else
+deadline=$((SECONDS + 60))
+seg=""
+while test -z "${seg}"; do
+    kill -0 "${prefetch_pid}"
+    if test "${SECONDS}" -ge "${deadline}"; then
+        cat /tmp/prefetch.log
+        echo 'FAIL: no spool segment exceeded 4 MiB within 60 seconds' >&2
+        exit 1
+    fi
+    for candidate in "${sharedir}"/*.seg; do
+        if test -f "${candidate}" && test "$(stat -c %s "${candidate}")" -gt 4194304; then
+            seg=${candidate}
+            break
+        fi
+    done
+    if test -z "${seg}"; then
+        sleep 0.05
+    fi
+done
+
+echo "Segment threshold reached: $(stat -c %s "${seg}") bytes"
+receive_pid=$(fuser "${seg}" 2>/dev/null)
+test "$(wc -w <<<"${receive_pid}")" -eq 1
+
+# No index record of the incomplete transaction can be durable yet.
+pkill -KILL -x pgcopydb
+fi
 status=0
 wait "${prefetch_pid}" || status=$?
 test "${status}" -eq 137
 
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 sql() { sqlite3 -init /dev/null -batch -noheader -list "${outputdb}" "$1"; }
 commits=$(sql "select count(*) from output where xid = ${xid} and action = 'C'")
 rows=$(sql "select count(*) from output where xid = ${xid}")
@@ -81,8 +115,38 @@ echo "After SIGKILL: xid=${xid}, COMMIT=${commits}, output=${rows}, columns=${co
 test "${commits}" -eq 0
 test "${rows}" -eq 0
 test "${columns}" -eq 0
+else
+# an index record is the only proof of a transaction, and none was synced
+commits=$(spool_commits)
+echo "After SIGKILL: xid=${xid}, spool transactions=${commits}"
+test "${commits}" -eq 0
+
+# The start cut of this receive removes the last segment, which holds no
+# complete transaction, and creates it again. Its run record comes after that,
+# so a worker that reads the record never opens a reader in between, where it
+# would log an error for a file that comes back.
+timeout 300s gdb -q -batch -x /usr/src/pgcopydb/start-order.gdb \
+    --args pgcopydb stream receive --resume --endpos "${endpos}" \
+    > /tmp/start-order.log 2>&1 || { cat /tmp/start-order.log; exit 1; }
+tail -20 /tmp/start-order.log
+grep -q '^ORDER: spool_writer_open$' /tmp/start-order.log
+grep -q '^PASS: the spool open comes before the run record$' /tmp/start-order.log
+
+# Receive syncs the segment and the relation log before it writes the index
+# records, and reports the flushed position only once all three are durable.
+# A receive that dies at the index sync leaves the spool without the
+# transaction, which the next run then receives again in full.
+timeout 300s gdb -q -batch -x /usr/src/pgcopydb/flush-order-raw.gdb \
+    --args pgcopydb stream receive --resume --endpos "${endpos}" \
+    > /tmp/flush-order-raw.log 2>&1 || { cat /tmp/flush-order-raw.log; exit 1; }
+tail -20 /tmp/flush-order-raw.log
+grep -q '^Index sync after ' /tmp/flush-order-raw.log
+grep -q '^PASS: killed receive before the index sync$' /tmp/flush-order-raw.log
+test "$(spool_commits)" -eq 0
+fi
 
 timeout 600s pgcopydb stream prefetch --resume --endpos "${endpos}"
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 commits=$(sql "select count(*) from output where xid = ${xid} and action = 'C'")
 rows=$(sql "select count(*) from output where xid = ${xid}")
 inserts=$(sql "select count(*) from output
@@ -97,6 +161,13 @@ test "${inserts}" -eq 300000
 test "${columns}" -eq 1200000
 test "${linked_columns}" -eq 1200000
 test "$(sql 'pragma integrity_check')" = ok
+else
+# one record per complete transaction, with the change count of the source
+commits=$(spool_commits)
+commit_lsn=$(spool_commit_lsn "${xid}" 300000)
+echo "After resume: spool transactions=${commits}, xid ${xid} commits at ${commit_lsn}"
+test "${commits}" -eq 1
+fi
 
 pgcopydb stream sentinel set apply
 timeout 600s pgcopydb stream catchup --resume --endpos "${endpos}"

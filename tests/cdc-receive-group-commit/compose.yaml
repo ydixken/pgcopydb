@@ -36,6 +36,7 @@ services:
       PGCOPYDB_INDEX_JOBS: 2
       PGCOPYDB_OUTPUT_PLUGIN: pgoutput
       GC_CASE: ${GC_CASE:-}
+      PGCOPYDB_FOLLOW_MODE:
     depends_on:
       - source
       - target

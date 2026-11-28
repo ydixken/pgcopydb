@@ -644,7 +644,26 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 	/* the raw spool takes the place of output.db, and the apply reads it */
 	if (stream_uses_raw_spool(specs))
 	{
-		return stream_open_raw_spool(specs, stream);
+		bool spoolWasOpen = specs->private.spoolOpen;
+
+		if (!stream_open_raw_spool(specs, stream))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		/*
+		 * After the start cut, never before: a worker that reads this row
+		 * opens its reader again, and between the unlink and the create of the
+		 * last segment it would log an error for a file that comes back.
+		 */
+		if (!spoolWasOpen)
+		{
+			(void) pipeline_state_start(specs->sourceDB, "receive",
+										specs->startpos);
+		}
+
+		return true;
 	}
 
 	/* now that we have the current timeline and startpos lsn, open output.db */
@@ -753,7 +772,11 @@ startLogicalStreaming(StreamSpecs *specs)
 
 	log_notice("Connecting to logical decoding replication stream");
 
-	(void) pipeline_state_start(specs->sourceDB, "receive", specs->startpos);
+	/* the raw path records its run after the spool open, in stream_init_timeline */
+	if (!privateContext->rawSpool)
+	{
+		(void) pipeline_state_start(specs->sourceDB, "receive", specs->startpos);
+	}
 
 	/* before START_REPLICATION, so wal_sender_timeout does not run meanwhile */
 	if (!privateContext->rawSpool && !ld_store_upgrade_outputdb(specs))

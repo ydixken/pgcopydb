@@ -141,6 +141,8 @@ jobs:
           - cdc-file-rotation-live
           - cdc-pgoutput
           - cdc-pgoutput-performance
+          - cdc-pgoutput-resume
+          - cdc-pgoutput-resume-performance
           - cdc-keepalive
           - cdc-filtering-pgoutput
           - cdc-filtering-pgoutput-performance

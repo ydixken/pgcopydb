@@ -57,9 +57,16 @@ poll() {
     done
 }
 
+. /var/lib/postgres/spool-probe.sh
+
 # committed COMMIT rows across the spool: what a reader can see
 spooled_commits() {
     local f n=0 c
+    # one index record per complete transaction is the raw spool's COMMIT row
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+        spool_commits
+        return
+    fi
     for f in "${XDG_DATA_HOME}"/pgcopydb/*-output.db; do
         test -e "${f}" || continue
         c=$(timeout 10s sqlite3 -readonly -init /dev/null -batch -noheader "${f}" \
@@ -272,6 +279,9 @@ fi
 test -z "${slot_verdict}${lost}" || fail "${slot_verdict:+${slot_verdict}; }${lost}"
 
 # the burst must have been committed in groups, not one transaction per batch
+# In performance mode a batch is one spool flush, so the same line counts the
+# syncs: the segment, the relation log and the index records go out once per
+# batch, not once per COMMIT.
 if test "${mode}" != guard && test "${mode}" != drop; then
     read -r batches txns < <(grep -o 'batches/txns: .*' "${TMPDIR}/follow.log" \
         | grep -o '[0-9]*/[0-9]*' | awk -F/ '{b += $1; t += $2} END {print b + 0, t + 0}')

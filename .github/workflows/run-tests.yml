@@ -138,6 +138,7 @@ jobs:
           - cdc-pgoutput
           - cdc-pgoutput-performance
           - cdc-pgoutput-resume
+          - cdc-pgoutput-resume-performance
           - cdc-keepalive
           - cdc-filtering-pgoutput
           - cdc-filtering-pgoutput-performance
@@ -212,6 +213,8 @@ jobs:
           - TEST: cdc-pgoutput-performance
             PGVERSION: 16
           - TEST: cdc-pgoutput-resume
+            PGVERSION: 16
+          - TEST: cdc-pgoutput-resume-performance
             PGVERSION: 16
           - TEST: cdc-keepalive
             PGVERSION: 16
