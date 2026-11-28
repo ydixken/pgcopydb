@@ -125,6 +125,15 @@ relations_at_least() { test "$(relation_records)" -ge "$1"; }
 not_indexed() { test "$(spool_records ".xid == $1")" = 0; }
 indexed_once() { test "$(spool_records ".xid == $1")" = 1; }
 
+# pruned: the cleanup pass of applied segments, then the state it leaves.  The
+# follow supervisor runs that pass every five minutes, and this phase runs
+# receive and catchup on their own, so the pass is asked for here instead.
+pruned() {
+    timeout 60s pgcopydb stream prune > "${LOGDIR}/prune.log" 2>&1 ||
+        fail "pgcopydb stream prune exited $?"
+    not_indexed "$1"
+}
+
 poll() {
     local what=$1 deadline=$((SECONDS + $2)) pid
     shift 2
@@ -252,7 +261,7 @@ done
 
 poll 'the canary row on the target' 300 canary_is 1
 poll 'the padding on the target' 300 pad_caught_up
-poll 'cleanup to delete the segment of the canary transaction' 300 not_indexed "${xid_a}"
+poll 'cleanup to delete the segment of the canary transaction' 300 pruned "${xid_a}"
 poll 'a rotation to leave a segment without an index record' 120 segment_without_index
 
 # a reconnect of the first phase can have sent the canary RELATION again, so
