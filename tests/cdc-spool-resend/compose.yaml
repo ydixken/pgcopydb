@@ -49,11 +49,14 @@ services:
       PGCOPYDB_FOLLOW_MODE: performance
       RESEND_CASE: ${RESEND_CASE:-}
     volumes:
-      # the second work directory of the disk-full case
+      # The second work directory of the disk-full case.  The mode is spelled
+      # out because an unset one reaches podman as mode 000, which the docker
+      # user of the image cannot write.
       - type: tmpfs
         target: /mnt/spool-full
         tmpfs:
           size: 33554432
+          mode: 01777
     depends_on:
       - source
       - source14
