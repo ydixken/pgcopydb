@@ -128,6 +128,10 @@ workloads they leave the same target. They differ in these cases:
   - ``performance`` mode pins the value output settings on the replication
     connection, so a key text does not follow a session setting.
 
+This release gives no throughput recommendation for either mode. The
+comparison that would carry one runs both workloads on more than one machine
+class, and it was not run for this release. ``sqlite`` stays the default.
+
 PostgreSQL Logical Decoding Client
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
