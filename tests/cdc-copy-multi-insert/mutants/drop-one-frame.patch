@@ -1,0 +1,19 @@
+Control: receive drops the first change frame of every transaction and does not count it. Must fail: the count of changes per index record of cdc-copy-multi-insert, on the first COPY it checks.
+Apply from the repository root with git apply, and never commit it applied.
+
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..3a96e26 100644
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1406,6 +1406,11 @@ spool_writer_message(SpoolWriter *writer, const char *message, uint32_t length)
+ 
+ 	if (type == 'I' || type == 'U' || type == 'D' || type == 'T')
+ 	{
++		if (writer->txn.changes == 0)
++		{
++			return true;
++		}
++
+ 		writer->txn.changes++;
+ 	}
+ 

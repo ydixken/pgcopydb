@@ -35,6 +35,7 @@ services:
       PGCOPYDB_TABLE_JOBS: 2
       PGCOPYDB_INDEX_JOBS: 2
       PGCOPYDB_OUTPUT_PLUGIN: pgoutput
+      PGCOPYDB_FOLLOW_MODE:
       CASE: ${CASE:-all}
     depends_on:
       - source

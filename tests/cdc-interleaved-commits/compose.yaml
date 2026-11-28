@@ -32,6 +32,7 @@ services:
       PGCOPYDB_TABLE_JOBS: 2
       PGCOPYDB_INDEX_JOBS: 2
       PGCOPYDB_WAL_WORKERS:
+      PGCOPYDB_FOLLOW_MODE:
     depends_on:
       - source
       - target

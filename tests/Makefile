@@ -31,7 +31,9 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-origin-abort-performance cdc-apply-wakeup-performance \
 	 follow-filtering-performance follow-resume-snapshot-performance \
 	 cdc-replica-identity-index-performance cdc-partitioned-target-performance \
-	 cdc-pgoutput-resume-performance;
+	 cdc-pgoutput-resume-performance \
+	 cdc-commit-order-resume-performance cdc-copy-multi-insert-performance \
+	 cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance;
 
 pagila: build
 	$(MAKE) -C $@
@@ -257,6 +259,18 @@ follow-filtering-performance: build
 follow-resume-snapshot-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-resume-snapshot
 
+cdc-commit-order-resume-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-commit-order-resume
+
+cdc-copy-multi-insert-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-copy-multi-insert
+
+cdc-interleaved-commits-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-interleaved-commits
+
+cdc-resend-after-reconnect-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-resend-after-reconnect
+
 # These two suites run both plugins, and test_decoding has no performance mode
 cdc-replica-identity-index-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-replica-identity-index down run-pgoutput down
@@ -319,6 +333,8 @@ clean-images:
 .PHONY: cdc-apply-wakeup-performance follow-filtering-performance follow-resume-snapshot-performance
 .PHONY: cdc-replica-identity-index-performance cdc-partitioned-target-performance
 .PHONY: cdc-pgoutput-resume-performance cdc-receive-group-commit-performance
+.PHONY: cdc-commit-order-resume-performance cdc-copy-multi-insert-performance
+.PHONY: cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases
 .PHONY: timescaledb citus
