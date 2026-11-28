@@ -72,6 +72,7 @@
 	"  --all-databases               Clone all databases found on the source instance\n" \
 	"  --wal-workers                 Number of processes replaying changes, 1 to 16\n" \
 	"  --wal-high-traffic-tables     Tables that get a WAL worker of their own\n" \
+	"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n" \
 
 CommandLine clone_command =
 	make_command(
@@ -112,7 +113,8 @@ CommandLine follow_command =
 		"  --origin                      Use this Postgres replication origin node name\n"
 		"  --endpos                      Stop replaying changes when reaching this LSN\n"
 		"  --wal-workers                 Number of processes replaying changes, 1 to 16\n"
-		"  --wal-high-traffic-tables     Tables that get a WAL worker of their own\n",
+		"  --wal-high-traffic-tables     Tables that get a WAL worker of their own\n"
+		"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n",
 		cli_copy_db_getopts,
 		cli_follow);
 
@@ -656,6 +658,7 @@ clone_and_follow(CopyDataSpec *copySpecs)
 			sizeof(streamSpecs.coordHost));
 	streamSpecs.coordPort = copyDBoptions.port;
 	streamSpecs.walWorkers = copySpecs->walWorkers;
+	streamSpecs.followMode = copySpecs->followMode;
 
 	/*
 	 * When using pgcopydb clone --follow --restart we first cleanup the
@@ -672,6 +675,13 @@ clone_and_follow(CopyDataSpec *copySpecs)
 			/* errors have already been logged */
 			exit(EXIT_CODE_INTERNAL_ERROR);
 		}
+	}
+
+	/* before the snapshot, the slot and the schema fetch write anything */
+	if (!copydb_check_cdc_layout(&streamSpecs))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
 	}
 
 	/*
@@ -913,6 +923,13 @@ cli_follow(int argc, char **argv)
 	strlcpy(specs.coordHost, copyDBoptions.host, sizeof(specs.coordHost));
 	specs.coordPort = copyDBoptions.port;
 	specs.walWorkers = copySpecs.walWorkers;
+	specs.followMode = copySpecs.followMode;
+
+	if (!copydb_check_cdc_layout(&specs))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
 
 	/*
 	 * First create/export a snapshot for the whole clone --follow operations.
@@ -950,8 +967,10 @@ cli_follow(int argc, char **argv)
 		exit(EXIT_CODE_INTERNAL_ERROR);
 	}
 
-	if (sentinel.endpos != InvalidXLogRecPtr &&
-		sentinel.endpos <= sentinel.replay_lsn)
+	if (stream_endpos_done_before(specs.sourceDB,
+								  stream_uses_raw_spool(&specs),
+								  sentinel.endpos,
+								  sentinel.replay_lsn))
 	{
 		log_info("Current endpos %X/%X was previously reached at %X/%X",
 				 LSN_FORMAT_ARGS(sentinel.endpos),
@@ -1203,8 +1222,10 @@ start_follow_process(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs,
 		return false;
 	}
 
-	if (sentinel->endpos != InvalidXLogRecPtr &&
-		sentinel->endpos <= sentinel->replay_lsn)
+	if (stream_endpos_done_before(streamSpecs->sourceDB,
+								  stream_uses_raw_spool(streamSpecs),
+								  sentinel->endpos,
+								  sentinel->replay_lsn))
 	{
 		log_info("Current endpos %X/%X was previously reached at %X/%X",
 				 LSN_FORMAT_ARGS(sentinel->endpos),

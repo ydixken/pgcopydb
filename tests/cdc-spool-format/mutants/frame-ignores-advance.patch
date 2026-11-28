@@ -1,0 +1,20 @@
+Mutant: a definition that does not parse is skipped. Must fail: a definition that does not parse fails the reader before the change after it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2797,12 +2797,8 @@
+ 
+ 	if (type == 'I' || type == 'U' || type == 'D' || type == 'T')
+ 	{
+-		if (!spool_relation_cursor_advance(&reader->relations, reader->record.seq,
+-										   reader->changes, context))
+-		{
+-			/* errors have already been logged */
+-			return false;
+-		}
++		(void) spool_relation_cursor_advance(&reader->relations, reader->record.seq,
++											 reader->changes, context);
+ 
+ 		reader->changes++;
+ 	}

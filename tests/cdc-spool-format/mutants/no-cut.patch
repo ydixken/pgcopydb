@@ -1,0 +1,18 @@
+Mutant: the start syncs the last segment and its index, and keeps their torn tails. Must fail: after the cut of the index tail, a reader reads the next transaction; after the cut of the segment tail, a reader reads the next transaction.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2124,9 +2124,9 @@
+ static bool
+ spool_tail_cut(SpoolTail *tail)
+ {
+-	return spool_cut_file(tail->segment.fd, tail->segment.filename,
+-						  tail->last.endOffset) &&
+-		   spool_cut_file(tail->indexFd, tail->index, tail->keep);
++	return spool_fsync(tail->segment.fd, tail->segment.filename, false,
++					   tail->last.endOffset) &&
++		   spool_fsync(tail->indexFd, tail->index, false, tail->keep);
+ }
+ 
+ 

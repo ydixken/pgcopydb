@@ -3,6 +3,7 @@
 set -euxo pipefail
 
 source /usr/src/pgcopydb/spool.sh
+source /var/lib/postgres/spool-probe.sh
 
 TMPDIR=$(mktemp -d /tmp/pgcopydb-shutdown.XXXXXX)
 export TMPDIR
@@ -51,8 +52,12 @@ pgcopydb clone --drop-if-exists
 xid1=$(source_sql 'begin; select pg_current_xact_id(); insert into shutdown_guard select i, md5(i::text) from generate_series(1, 1000) i; commit')
 receive_bound=$(source_sql 'select pg_current_wal_flush_lsn()')
 timeout 60s pgcopydb stream prefetch --resume --endpos "${receive_bound}"
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 spool_transaction "${xid1}" 1000
 confirmed=${commit_lsn}
+else
+confirmed=$(spool_commit_lsn "${xid1}" 1000)
+fi
 digest_sql="select count(*), md5(string_agg(row(id, payload)::text, ',' order by id)) from shutdown_guard"
 expected=$(source_sql "${digest_sql}")
 pgcopydb stream sentinel set endpos 0/0
@@ -108,8 +113,12 @@ xid2=$(source_sql "begin; select pg_current_xact_id();
     commit")
 receive_bound=$(source_sql 'select pg_current_wal_flush_lsn()')
 timeout 60s pgcopydb stream prefetch --resume --endpos "${receive_bound}"
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 spool_transaction "${xid2}" 1000 2
 endpos=${commit_lsn}
+else
+endpos=$(spool_commit_lsn "${xid2}" 1002)
+fi
 pgcopydb stream sentinel set endpos "${endpos}"
 
 barrier_dir=$(mktemp -d "${TMPDIR}/barrier.XXXXXX")

@@ -1,0 +1,17 @@
+Mutant: after a last segment with a torn header, the start begins a new spool and does not append to the segment before it. Must fail: a last segment with a torn header is removed, the writer appends to the segment before it, and rotation creates the removed one again.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2294,11 +2294,6 @@
+ 			return false;
+ 		}
+ 
+-		/* without the header of last, the writer appends to the one before */
+-		if (!start->last.headed)
+-		{
+-			start->tail = &start->before;
+-		}
+ 	}
+ 
+ 	/* the last valid index record proves the relation log synced up to its length */

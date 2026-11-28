@@ -1,0 +1,16 @@
+Mutant: BEGIN and COMMIT carry the send time of the COMMIT message, as at 9d8b660. Must fail: BEGIN and COMMIT of a spooled transaction carry the commit time of its index record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3448,6 +3448,10 @@
+ 					.lsn = record->endLSN
+ 				};
+ 
++				pos = 17;
++				(void) pgsql_timestamptz_to_string((TimestampTz) pgout_u64(message, &pos, (int) length),
++												   spooled.begin.timestamp,
++												   sizeof(spooled.begin.timestamp));
+ 				strlcpy(commit.timestamp, spooled.begin.timestamp,
+ 						sizeof(commit.timestamp));
+ 

@@ -1,0 +1,18 @@
+Mutant: A record length that no message has reads as a record still arriving. Must fail: a relation log record longer than any message is invalid, not short.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -630,12 +630,6 @@
+ 	}
+ 
+ 	uint32_t length = pgout_u32(buf, &pos, SPOOL_RELATION_HEADER_SIZE);
+-
+-	/* a length that no message has is damage, not a record still arriving */
+-	if (length > SPOOL_MESSAGE_MAX)
+-	{
+-		return SPOOL_FRAME_BAD;
+-	}
+ 
+ 	if (size < SPOOL_RELATION_RECORD_SIZE(length))
+ 	{

@@ -1,0 +1,14 @@
+Mutant: a start and a reader take a segment header of another format version for a torn one. Must fail: a segment header of another format version ends every start with an error that names both versions, and no file changes; a reader fails on a segment header of another format version with an ERROR line that names both versions.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1846,7 +1846,7 @@
+ 
+ 	*headed = spool_header_decode(buf, done, header);
+ 
+-	if (!*headed && spool_header_version(buf, done, &version))
++	if (false && !*headed && spool_header_version(buf, done, &version))
+ 	{
+ 		log_error("Spool file \"%s\" has format version %u, and this pgcopydb "
+ 				  "reads version %d", path, version, SPOOL_FORMAT_VERSION);

@@ -1,0 +1,13 @@
+Mutant: A writer whose relation log failed keeps its segment open. Must fail: a writer whose relation log cannot be opened fails and closes its segment.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1083,7 +1083,6 @@
+ 	if (!spool_writer_open_relations(writer))
+ 	{
+ 		spool_writer_free_relations(writer);
+-		spool_fail(&writer->segment);
+ 		return false;
+ 	}
+ 

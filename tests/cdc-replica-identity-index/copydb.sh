@@ -23,7 +23,7 @@ pgcopydb ping
 psql -d ${PGCOPYDB_SOURCE_PGURI} -f /usr/src/pgcopydb/ddl.sql
 
 # create replication slot + snapshot, then clone the initial data
-pgcopydb snapshot --follow --plugin test_decoding >/tmp/snapshot.out &
+pgcopydb snapshot --follow --plugin "${PGCOPYDB_OUTPUT_PLUGIN}" >/tmp/snapshot.out &
 snapshot_pid=$!
 
 # the snapshot is printed once the slot exists and the snapshot file is written

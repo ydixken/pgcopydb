@@ -1,0 +1,18 @@
+Mutant: Every RELATION and TYPE message is logged, also a repeat. Must fail: a RELATION byte-identical to the last one logged for its relation is not logged again.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1043,12 +1043,6 @@
+ 
+ 	SpoolRelationLast *last =
+ 		spool_relation_last(writer, spool_relation_key(body, bodyLength));
+-
+-	if (last != NULL && last->message.len == bodyLength &&
+-		memcmp(last->message.data, body, bodyLength) == 0)
+-	{
+-		return true;
+-	}
+ 
+ 	if (!spool_usable(log))
+ 	{

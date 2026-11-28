@@ -1,0 +1,14 @@
+Mutant: the adapter builds a statement for a change of a table in schema pgcopydb. Must fail: the statements of a spooled transaction have the SQL and arguments of 9d8b660.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_pgoutput.c
++++ b/src/bin/pgcopydb/ld_pgoutput.c
+@@ -1359,7 +1359,7 @@
+ 	};
+ 	PgoutputMessage *msg = &(privateContext->pgoutputMsg);
+ 
+-	*skip = pgoutput_pgcopydb_change(privateContext, buf, bufLen);
++	*skip = false && pgoutput_pgcopydb_change(privateContext, buf, bufLen);
+ 
+ 	if (*skip)
+ 	{

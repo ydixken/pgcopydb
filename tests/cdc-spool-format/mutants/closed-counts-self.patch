@@ -1,0 +1,17 @@
+Mutant: the index file of the segment read counts as the next one. Must fail: a reader that starts in a later segment waits for its first index record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2487,11 +2487,6 @@
+ 
+ 	*closed = false;
+ 
+-	if (seq == reader->segment)
+-	{
+-		return true;
+-	}
+-
+ 	sformat(path, sizeof(path), "%s/%016" PRIX64 ".idx", reader->dirname, seq);
+ 
+ 	*closed = access(path, F_OK) == 0;

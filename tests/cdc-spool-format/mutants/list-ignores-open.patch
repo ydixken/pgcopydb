@@ -1,0 +1,14 @@
+Mutant: pgcopydb list spool lists a spool it could not open. Must fail: pgcopydb list spool fails on a work directory without a spool.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_list.c
++++ b/src/bin/pgcopydb/cli_list.c
+@@ -2321,7 +2321,7 @@
+ 	bool found = false;
+ 
+ 	if (!copydb_prepare_filepaths(&cfPaths, dir, NULL) ||
+-		!spool_reader_open(&reader, cfPaths.cdc.dir, 0))
++		!(spool_reader_open(&reader, cfPaths.cdc.dir, 0) || true))
+ 	{
+ 		/* errors have already been logged */
+ 		exit(EXIT_CODE_INTERNAL_ERROR);

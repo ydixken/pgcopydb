@@ -1,0 +1,17 @@
+Mutant: a relation log that cannot be read is cut as if it were empty. Must fail: a relation log that cannot be read fails the start.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1895,10 +1895,7 @@
+ 		return false;
+ 	}
+ 
+-	if (!read_file(log->path, &bytes, &size))
+-	{
+-		return false;
+-	}
++	(void) read_file(log->path, &bytes, &size);
+ 
+ 	log->size = (uint64_t) size;
+ 

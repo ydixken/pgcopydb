@@ -1,0 +1,14 @@
+Mutant: spool_writer_create reports success when the relation log failed. Must fail: a writer whose relation log cannot be opened fails and closes its segment.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1084,7 +1084,7 @@
+ 	{
+ 		spool_writer_free_relations(writer);
+ 		spool_fail(&writer->segment);
+-		return false;
++		return true;
+ 	}
+ 
+ 	/* after the create, so that a failed one leaves no buffer to free */

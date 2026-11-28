@@ -1,0 +1,14 @@
+Mutant: a reader always starts in the first segment. Must fail: a reader opened after an end LSN starts in the segment that holds the next transaction.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2664,7 +2664,7 @@
+ 			opened = false;
+ 		}
+ 
+-		if (opened && header.lastEndLSN <= after && seqs[i] > start)
++		if (false && header.lastEndLSN <= after && seqs[i] > start)
+ 		{
+ 			start = seqs[i];
+ 		}

@@ -1,0 +1,18 @@
+Mutant: a list of spool files that could not grow is used as an empty one. Must fail: a spool directory whose list cannot be kept in memory fails the start.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1594,12 +1594,6 @@
+ 
+ 	(void) closedir(dir);
+ 
+-	if (listed && (PQExpBufferBroken(segments) || PQExpBufferBroken(indexes)))
+-	{
+-		log_error(ALLOCATION_FAILED_ERROR);
+-		return false;
+-	}
+-
+ 	return listed;
+ }
+ 

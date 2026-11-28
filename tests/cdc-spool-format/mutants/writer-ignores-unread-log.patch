@@ -1,0 +1,14 @@
+Mutant: A writer starts on a relation log that it could not read. Must fail: a writer that cannot read its relation log fails.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -993,7 +993,7 @@
+ 		return false;
+ 	}
+ 
+-	bool opened = spool_relation_cursor_open(&cursor, writer->dirname);
++	bool opened = spool_relation_cursor_open(&cursor, writer->dirname) || true;
+ 
+ 	/* a record appended after a cut one would never be read */
+ 	if (opened && cursor.tail > 0)

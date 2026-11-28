@@ -1,0 +1,18 @@
+Mutant: the start keeps the valid records of the relation log of a new spool whose only segment it removes. Must fail: a start that fails after it removed the only segment of a new spool leaves a new spool, which the next start begins.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2311,12 +2311,6 @@
+ 		return false;
+ 	}
+ 
+-	/* nothing of a new spool is indexed, and a new session sends each definition again */
+-	if (start->removed && seq == SPOOL_FIRST_SEQ)
+-	{
+-		start->relations.end = 0;
+-	}
+-
+ 	/*
+ 	 * The writer syncs the first header before it logs a record, and a start
+ 	 * empties the log before it removes that segment, so here they are damage.

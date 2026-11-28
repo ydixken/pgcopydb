@@ -1,0 +1,24 @@
+Mutant: the start keeps the index records that follow an invalid one. Must fail: an invalid index record before a valid one cuts the index file at the record before it, and the start reports that cut.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2204,18 +2204,6 @@
+ 			 * decides whether that cut is safe. The read goes on past that
+ 			 * gap, because what the cut drops decides it (A47).
+ 			 */
+-			if (at + i > tail->keep)
+-			{
+-				tail->gap = true;
+-
+-				if (tail->dropped == InvalidXLogRecPtr)
+-				{
+-					tail->dropped = record.endLSN;
+-				}
+-
+-				continue;
+-			}
+-
+ 			tail->last = record;
+ 			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+ 		}

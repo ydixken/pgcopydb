@@ -1,0 +1,14 @@
+Mutant: the statement source keeps a change of schema pgcopydb, which the adapter did not build. Must fail: the statements of a spooled transaction have the SQL and arguments of 9d8b660.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3406,7 +3406,7 @@
+ 					return false;
+ 				}
+ 
+-				if (skip)
++				if (skip && false)
+ 				{
+ 					break;
+ 				}

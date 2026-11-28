@@ -1,0 +1,14 @@
+Mutant: rotation is due after any COMMIT, whatever the segment size. Must fail: rotation is not due while the segment is below the limit.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1451,7 +1451,7 @@ spool_writer_rotate_due(const SpoolWriter *writer)
+ 	return writer->maxSegmentSize > 0 &&
+ 		   writer->state == SPOOL_TXN_NONE &&
+ 		   writer->nextSeq > writer->header.firstSeq &&
+-		   spool_end(&writer->segment) >= writer->maxSegmentSize;
++		   true;
+ }
+ 
+ 

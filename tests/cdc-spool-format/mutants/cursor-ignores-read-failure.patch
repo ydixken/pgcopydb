@@ -1,0 +1,14 @@
+Mutant: A read reports success for a relation log it cannot read. Must fail: a cursor on a directory without a relation log fails.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -742,7 +742,7 @@
+ 	if (!read_file(cursor->filename, &bytes, &fileSize))
+ 	{
+ 		/* errors have already been logged */
+-		return false;
++		return true;
+ 	}
+ 
+ 	/* the records read before point into the bytes up to cursor->size */

@@ -1,0 +1,14 @@
+Mutant: the start does not check the last indexed transaction of the segment before a torn last segment. Must fail: a segment before a torn last segment that ends before its last index record ends every start with an error, and no file changes; a damaged frame in the last indexed transaction of the segment before a torn last segment ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2305,7 +2305,7 @@
+ 	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
+ 					  start->last.last.relationLogEnd;
+ 
+-	if ((start->tail != NULL && !spool_tail_check(start->tail)) ||
++	if ((start->tail == &start->last && !spool_tail_check(start->tail)) ||
+ 		!spool_relations_read(&start->relations, dirname, synced))
+ 	{
+ 		return false;

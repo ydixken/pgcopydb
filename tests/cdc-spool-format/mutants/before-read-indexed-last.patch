@@ -1,0 +1,14 @@
+Mutant: a last segment with a torn header and indexed transactions after another segment is handed to the segment before it. Must fail: an indexed last segment with a torn header after another segment ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2261,7 +2261,7 @@
+ 		start->header = start->last.header;
+ 	}
+ 
+-	if (start->removed && before > 0)
++	if (before > 0)
+ 	{
+ 		if (!spool_tail_read(&start->before, dirname, before,
+ 							 spool_listed(indexes, before)) ||

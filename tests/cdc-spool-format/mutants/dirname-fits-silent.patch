@@ -1,0 +1,18 @@
+Mutant: a spool directory name of any length is accepted. Must fail: a writer opened on a directory whose file names do not fit fails with an ERROR line; a reader on a directory whose file names do not fit fails with an ERROR line and holds no descriptor.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1510,12 +1510,6 @@
+ static bool
+ spool_dirname_fits(const char *dirname)
+ {
+-	if (strlen(dirname) + strlen("/0000000000000000.seg") >= MAXPGPATH)
+-	{
+-		log_error("Spool directory name \"%s\" is too long", dirname);
+-		return false;
+-	}
+-
+ 	return true;
+ }
+ 

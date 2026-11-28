@@ -1,0 +1,17 @@
+Mutant: the reader never reads past the first read chunk of an index file, and waits there. Must fail: a reader returns every record of an index file of more than one read chunk in order, then waits.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2552,6 +2552,11 @@
+ 
+ 	uint64_t size = (uint64_t) st.st_size;
+ 
++	if (reader->indexOffset >= sizeof(bytes))
++	{
++		return true;
++	}
++
+ 	if (size < reader->indexOffset)
+ 	{
+ 		log_error("Spool file \"%s\" has %" PRIu64 " bytes, and %" PRIu64

@@ -1,0 +1,14 @@
+Mutant: receive reports the flushed position before the batch commit syncs the segment, the relation log and the index records. Must fail: flush-order-raw.gdb, which wants the flushed position below the written one at the index sync.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_stream.c
++++ b/src/bin/pgcopydb/ld_stream.c
+@@ -1027,6 +1027,8 @@
+ stream_commit_batch(LogicalStreamContext *context, int trigger)
+ {
+ 	StreamContext *privateContext = (StreamContext *) context->private;
++
++	context->tracking->flushed_lsn = context->tracking->written_lsn;
+ 
+ 	if (privateContext->rawSpool)
+ 	{

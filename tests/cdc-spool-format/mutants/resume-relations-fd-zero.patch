@@ -1,0 +1,16 @@
+Mutant: a start that refuses before it opened the relation log closes descriptor 0. Must fail: a refused start leaves descriptor 0 open.
+Apply from the repository root with git apply, and never commit it applied.
+
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..1c24cea 100644
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2781,7 +2781,7 @@ spool_writer_resume(SpoolWriter *writer, const char *dirname,
+ 	SpoolStart start = {
+ 		.last = { .segment = { .fd = -1 }, .indexFd = -1 },
+ 		.before = { .segment = { .fd = -1 }, .indexFd = -1 },
+-		.relations = { .fd = -1 }
++		.relations = { 0 }
+ 	};
+ 
+ 	bool resumed = spool_start_read(&start, dirname, segments, indexes, fresh,

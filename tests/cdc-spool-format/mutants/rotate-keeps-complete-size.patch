@@ -1,0 +1,13 @@
+Mutant: rotation keeps the end of the last complete transaction in the old segment. Must fail: a transaction cut off before the first COMMIT of a new segment, then sent in full, leaves the header and the transaction.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1497,7 +1497,6 @@ spool_writer_rotate(SpoolWriter *writer)
+ 	}
+ 
+ 	writer->header = header;
+-	writer->completeSize = SPOOL_HEADER_SIZE;
+ 
+ 	return true;
+ }

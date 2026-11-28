@@ -1,0 +1,16 @@
+Mutant: an index file whose size cannot be read is read as empty. Must fail: a start that cannot read the size of the index file fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1980,7 +1980,9 @@
+ 
+ 	tail->indexFd = open(tail->index, O_RDWR);
+ 
+-	if (tail->indexFd < 0 || fstat(tail->indexFd, &st) != 0)
++	(void) fstat(tail->indexFd, &st);
++
++	if (tail->indexFd < 0)
+ 	{
+ 		log_error("Failed to open spool file \"%s\": %m", tail->index);
+ 		return false;

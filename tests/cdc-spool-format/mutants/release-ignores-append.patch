@@ -1,0 +1,17 @@
+Mutant: spool_release goes on after a held message that the segment refused. Must fail: a change that releases a held BEGIN onto a closed segment fails with one refusal; a held BEGIN whose release the full volume refuses is an error that names the segment, and no refusal follows it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1157,10 +1157,7 @@ spool_release(SpoolWriter *writer)
+ 		int pos = 0;
+ 		uint32_t length = pgout_u32(held->data + offset, &pos, 4);
+ 
+-		if (!spool_append(&writer->segment, held->data + offset + 4, length))
+-		{
+-			return false;
+-		}
++		(void) spool_append(&writer->segment, held->data + offset + 4, length);
+ 
+ 		offset += 4 + (size_t) length;
+ 	}

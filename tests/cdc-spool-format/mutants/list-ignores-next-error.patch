@@ -1,0 +1,15 @@
+Mutant: pgcopydb list spool stops at a damaged index record and exits 0. Must fail: pgcopydb list spool fails on a damaged index record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_list.c
++++ b/src/bin/pgcopydb/cli_list.c
+@@ -2341,8 +2341,7 @@
+ 	{
+ 		if (!spool_reader_next(&reader, &found))
+ 		{
+-			/* errors have already been logged */
+-			exit(EXIT_CODE_INTERNAL_ERROR);
++			break;
+ 		}
+ 
+ 		if (!found)

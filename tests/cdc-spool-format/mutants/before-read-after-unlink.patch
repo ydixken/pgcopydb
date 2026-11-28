@@ -1,0 +1,18 @@
+Mutant: the start removes a last segment without an indexed transaction before it reads the segment before it. Must fail: a segment before a torn last segment that holds no indexed transaction ends every start with an error, and no file changes; a segment before a headed last segment without an indexed transaction that holds none either ends every start with an error, and no file changes; a spool of another source system behind a torn last segment ends every start with an error that names both, and no file changes; a spool of another source system before a headed last segment of the source ends every start with an error that names both, and no file changes; an invalid index record before a valid one in the segment before a torn last segment ends every start with an error, and no file changes; a relation log damaged below the length that the index record before a headed last segment holds ends every start with an error, and no file changes; the relation log of a start that removes a headed last segment is bound by the last index record of the segment before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2261,6 +2261,12 @@
+ 		start->header = start->last.header;
+ 	}
+ 
++	if (start->removed && before > 0 &&
++		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename)))
++	{
++		return false;
++	}
++
+ 	if (start->removed && before > 0)
+ 	{
+ 		if (!spool_tail_read(&start->before, dirname, before,

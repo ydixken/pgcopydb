@@ -1,0 +1,14 @@
+Mutant: The key of a last message leaves out the type byte. Must fail: a TYPE and a RELATION with the same OID each keep their last message.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -610,7 +610,7 @@
+ {
+ 	int pos = 1;
+ 
+-	return ((uint64_t) (unsigned char) message[0] << 32) |
++	return ((uint64_t) 0 << 32) |
+ 		   pgout_u32(message, &pos, length);
+ }
+ 

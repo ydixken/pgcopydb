@@ -85,6 +85,53 @@ idea of the downtime window needed for your very own case. This will inform
 your decision about using the Change Data Capture mode, which makes a
 migration a lot more complex to drive to success.
 
+Follow modes
+^^^^^^^^^^^^
+
+A follow run uses one of two pipelines, selected by ``--follow-mode`` or by
+``PGCOPYDB_FOLLOW_MODE``:
+
+  - ``sqlite`` is the default and the only mode for ``test_decoding`` and
+    ``wal2json``. Receive stores the decoded stream in SQLite, apply
+    transforms it inline, and ``--wal-workers`` above 1 runs one replication
+    slot per worker. This is the pipeline described in the rest of this
+    section.
+
+  - ``performance`` runs ``pgoutput`` on one replication slot and writes no
+    SQLite spool. Receive appends the replication stream unchanged to a
+    checksummed file spool, and apply decodes from the spool and sends the
+    statements to the target. See :ref:`raw_spool` for the files and the
+    durability rules.
+
+The mode belongs to the work directory: a run that resumes a directory of the
+other mode is refused before it writes anything. A directory written before
+this option existed is a ``sqlite`` directory, so every run in flight resumes
+unchanged. ``performance`` requires ``--plugin pgoutput``, it is not
+compatible with ``--wal-high-traffic-tables``, and it requires
+``--wal-workers 1``.
+
+Both modes apply whole source transactions in commit order, and for most
+workloads they leave the same target. They differ in these cases:
+
+  - A transaction that begins before ``--endpos`` and commits after it is left
+    out in ``performance`` mode, where the cut is a commit position.
+
+  - A relation whose definition changes during the follow is decoded with the
+    new definition in ``performance`` mode, and with the definition of the
+    first message in ``sqlite`` mode.
+
+  - A key column that neither the new nor the old tuple carries ends a
+    ``performance`` run. In ``sqlite`` mode the statement leaves that column
+    out of its ``WHERE`` clause, which can match more rows than the source
+    changed.
+
+  - ``performance`` mode pins the value output settings on the replication
+    connection, so a key text does not follow a session setting.
+
+This release gives no throughput recommendation for either mode. The
+comparison that would carry one runs both workloads on more than one machine
+class, and it was not run for this release. ``sqlite`` stays the default.
+
 PostgreSQL Logical Decoding Client
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -1,0 +1,14 @@
+Mutant: A writer started on a relation log forgets its last messages. Must fail: a writer started on a relation log logs only the definitions that differ from the last ones in it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1003,7 +1003,7 @@
+ 		opened = false;
+ 	}
+ 
+-	for (int i = 0; opened && i < cursor.count; i++)
++	for (int i = 0; opened && i < 0; i++)
+ 	{
+ 		SpoolRelationEntry *entry = spool_relation_entry(&cursor, i);
+ 

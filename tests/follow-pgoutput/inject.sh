@@ -43,6 +43,14 @@ psql -d ${PGCOPYDB_SOURCE_PGURI} -c 'select pg_switch_wal()'
 psql -d ${PGCOPYDB_SOURCE_PGURI} -f /usr/src/pgcopydb/dml.sql
 psql -d ${PGCOPYDB_SOURCE_PGURI} -c 'select pg_switch_wal()'
 
+# The performance pass runs on two publications, one table each, so write to
+# both: the pagila DML above is in neither of them.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+    psql -d ${PGCOPYDB_SOURCE_PGURI} \
+        -c "insert into fp.one select i, 'a' from generate_series(1, 5) i" \
+        -c "insert into fp.two select i, 'b' from generate_series(1, 5) i"
+fi
+
 # Set endpos to current flush LSN to signal follow where to stop (over TCP)
 echo "Setting endpos to current WAL position..."
 pgcopydb stream sentinel set endpos --current --debug ${HP} || { echo "Failed to set endpos"; exit 1; }

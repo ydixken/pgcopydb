@@ -1,0 +1,15 @@
+Mutant: the limit 0 does not turn rotation off. Must fail: with the limit 0, rotation is never due.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1448,8 +1448,7 @@ spool_writer_rotate_due(const SpoolWriter *writer)
+ bool
+ spool_writer_rotate_due(const SpoolWriter *writer)
+ {
+-	return writer->maxSegmentSize > 0 &&
+-		   writer->state == SPOOL_TXN_NONE &&
++	return writer->state == SPOOL_TXN_NONE &&
+ 		   writer->nextSeq > writer->header.firstSeq &&
+ 		   spool_end(&writer->segment) >= writer->maxSegmentSize;
+ }

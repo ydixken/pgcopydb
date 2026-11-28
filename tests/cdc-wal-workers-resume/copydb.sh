@@ -485,11 +485,140 @@ setup_kills() {
     echo "PASS [${tc}]"
 }
 
+#
+# mode: the follow mode options, and the refusal of a directory whose tag
+# says performance; the predicate is still false, so the tag is written here
+#
+
+# what a refused run must leave as it was: the files, the slot and the origin
+mode_state() {
+    (cd "$1" && find . -type f ! -name '*.pid' ! -name '*-shm' ! -name '*-wal' | sort |
+        while read -r f; do
+            case ${f} in
+                *.db) echo "${f} $(lite "${f}" .dump | sha256sum | cut -c1-16)" ;;
+                *) echo "${f} $(sha256sum < "${f}" | cut -c1-16)" ;;
+            esac
+        done)
+    src -c "select slot_name, confirmed_flush_lsn from pg_replication_slots where slot_name = 'mode_slot'"
+    tgt -c "select roname, pg_replication_origin_progress(roname, false) from pg_replication_origin where roname = 'mode_origin'"
+}
+
+# mode_expect is expect with a kill after the deadline: a broken refusal can
+# turn into a run that a single SIGTERM does not stop
+mode_expect() {
+    local want=$1 msg=$2 log=/tmp/${tc}/$3.log rc=0
+    shift 3
+    timeout -k 5 60 "$@" > "${log}" 2>&1 || rc=$?
+    if [ "${rc}" -ne "${want}" ] || ! grep -qF -- "${msg}" "${log}"; then
+        cat "${log}"
+        fail "want exit ${want} and \"${msg}\", got exit ${rc}: $*"
+    fi
+    echo "OK exit ${rc}: $*"
+}
+
+modes() {
+    begin_case mode
+    local dir=/tmp/mode/pgcopydb snap_pid before lsn name
+    local tagged='Refusing the work directory: it was started with --follow-mode performance, and this run uses --follow-mode sqlite'
+    local plugin='Option --follow-mode performance requires --plugin pgoutput, found --plugin test_decoding'
+    local parse='Failed to parse --follow-mode "bogus", expected sqlite or performance'
+    local fresh=(--dir /tmp/mode/fresh --plugin pgoutput)
+    local args
+
+    # options are checked before any connection, on a directory nobody starts
+    mode_expect "${BAD_ARGS}" "${parse}" opt-bogus pgcopydb follow --follow-mode bogus "${fresh[@]}"
+    mode_expect "${BAD_ARGS}" "${parse}" env-bogus env PGCOPYDB_FOLLOW_MODE=bogus pgcopydb follow "${fresh[@]}"
+    mode_expect "${BAD_ARGS}" "${parse}" stream-opt-bogus pgcopydb stream receive --follow-mode bogus "${fresh[@]}"
+    mode_expect "${BAD_ARGS}" "${parse}" snapshot-opt-bogus pgcopydb snapshot --follow --follow-mode bogus "${fresh[@]}"
+    mode_expect "${BAD_ARGS}" 'Option --follow-mode performance is not compatible with --wal-high-traffic-tables' high-traffic \
+           pgcopydb follow --follow-mode performance --wal-high-traffic-tables public.t "${fresh[@]}"
+    # sqlite mode reaches the list check that performance mode refuses before
+    mode_expect "${BAD_ARGS}" 'Option --wal-high-traffic-tables requires --wal-workers above 1' high-traffic-sqlite \
+           env PGCOPYDB_FOLLOW_MODE=sqlite pgcopydb follow --wal-high-traffic-tables public.t "${fresh[@]}"
+    mode_expect "${BAD_ARGS}" 'Option --follow-mode performance requires --wal-workers 1, found --wal-workers 2' two-workers \
+           env PGCOPYDB_FOLLOW_MODE=performance pgcopydb clone --follow --wal-workers 2 "${fresh[@]}"
+    mode_expect "${BAD_ARGS}" 'Option --follow-mode performance is not compatible with stream apply -' apply-pipe \
+           pgcopydb stream apply --follow-mode performance --dir /tmp/mode/fresh -
+    test ! -e /tmp/mode/fresh || fail 'a refused option created /tmp/mode/fresh'
+
+    # a test_decoding directory with a slot and an origin, tagged by hand
+    pgcopydb snapshot --follow --plugin test_decoding --dir "${dir}" --slot-name mode_slot \
+        > /tmp/mode/snapshot.out 2> /tmp/mode/snapshot.log &
+    snap_pid=$!
+    for _ in $(seq 120); do
+        test -s /tmp/mode/snapshot.out && break
+        kill -0 "${snap_pid}" 2> /dev/null || break
+        sleep 0.5
+    done
+    test -s /tmp/mode/snapshot.out || { cat /tmp/mode/snapshot.log; fail 'snapshot --follow printed no snapshot'; }
+    pgcopydb stream setup --dir "${dir}" --slot-name mode_slot --origin mode_origin > /tmp/mode/setup.log 2>&1 ||
+        { cat /tmp/mode/setup.log; fail 'stream setup'; }
+    kill -TERM "${snap_pid}"
+    wait "${snap_pid}" || true
+    wait_slots_inactive
+    check 'setup rows of a sqlite directory' 0 "$(lite "${dir}/schema/source.db" 'select count(*) from wal_worker_setup')"
+    timeout 10s sqlite3 -init /dev/null -batch "${dir}/schema/source.db" \
+        "insert into wal_worker_setup(id, workers, high_traffic) values (1, 1, 'performance')"
+    lsn=$(src -c 'select pg_current_wal_lsn()')
+
+    # every command that receives or applies refuses it in sqlite mode, before
+    # it writes; stream replay ignores --dir and reads the default under TMPDIR
+    before=$(mode_state "${dir}")
+    while IFS='|' read -r name args; do
+        # shellcheck disable=SC2086
+        mode_expect 3 "${tagged}" "refused-${name// /-}" env TMPDIR=/tmp/mode pgcopydb ${args} --dir "${dir}"
+        settled "a refused ${name}"
+        check "nothing changed by a refused ${name}" "${before}" "$(mode_state "${dir}")"
+    done <<LIST
+snapshot --follow|snapshot --follow --slot-name mode_slot
+stream receive|stream receive --resume --slot-name mode_slot --endpos ${lsn}
+stream prefetch|stream prefetch --resume --slot-name mode_slot --endpos ${lsn}
+stream catchup|stream catchup --resume --slot-name mode_slot --origin mode_origin --endpos ${lsn}
+stream replay|stream replay --resume --slot-name mode_slot --origin mode_origin --endpos ${lsn}
+stream apply|stream apply --resume --origin mode_origin
+follow|follow --resume --not-consistent --slot-name mode_slot --origin mode_origin --endpos ${lsn}
+clone --follow|clone --follow --resume --not-consistent --slot-name mode_slot --origin mode_origin --endpos ${lsn}
+LIST
+
+    # the variable sets the mode, and the option wins over it, in each parser
+    mode_expect "${BAD_ARGS}" "${plugin}" env-follow env PGCOPYDB_FOLLOW_MODE=performance pgcopydb follow --resume --dir "${dir}"
+    mode_expect 3 "${tagged}" env-sqlite-follow env PGCOPYDB_FOLLOW_MODE=sqlite pgcopydb follow --resume --not-consistent --dir "${dir}"
+    mode_expect 3 "${tagged}" opt-wins-follow \
+           env PGCOPYDB_FOLLOW_MODE=performance pgcopydb follow --follow-mode sqlite --resume --not-consistent --dir "${dir}"
+    mode_expect "${BAD_ARGS}" "${plugin}" opt-clone pgcopydb clone --follow --follow-mode performance --resume --dir "${dir}"
+    mode_expect 3 "${tagged}" opt-wins-receive \
+           env PGCOPYDB_FOLLOW_MODE=performance pgcopydb stream receive --follow-mode sqlite --resume --dir "${dir}"
+    mode_expect 3 "${tagged}" opt-wins-snapshot \
+           env PGCOPYDB_FOLLOW_MODE=performance pgcopydb snapshot --follow --follow-mode sqlite --dir "${dir}"
+    # each command checks the plugin of performance mode
+    mode_expect "${BAD_ARGS}" "${plugin}" plugin-snapshot pgcopydb snapshot --follow --follow-mode performance --dir "${dir}"
+    for name in receive prefetch catchup replay apply; do
+        mode_expect "${BAD_ARGS}" "${plugin}" "plugin-${name}" pgcopydb stream "${name}" --follow-mode performance --resume --dir "${dir}"
+    done
+    settled 'the refused runs'
+    check 'nothing changed by the refused runs' "${before}" "$(mode_state "${dir}")"
+
+    # stream apply --target - has no mode check: it goes on to open the spool
+    mode_expect 0 'Creating replay CDC file' stdout-apply pgcopydb stream apply --target - --dir "${dir}"
+
+    # stream cleanup is the remedy, so no mode stops it
+    mode_expect 0 'Dropping replication origin "mode_origin"' cleanup \
+           env PGCOPYDB_FOLLOW_MODE=performance pgcopydb stream cleanup --follow-mode performance \
+           --slot-name mode_slot --origin mode_origin --dir "${dir}"
+    check 'objects left after the cleanup' '0|0' \
+          "$(src -c "select count(*) from pg_replication_slots where slot_name = 'mode_slot'")|$(tgt -c "select count(*) from pg_replication_origin where roname = 'mode_origin'")"
+    echo "PASS [${tc}]"
+}
+
 for c in ${CASE:-all}; do
     case "${c}" in
         all) kills; setup_kills ;;
+        mode) modes ;;
         kills) kills ;;
         setup) setup_kills ;;
         *) fail "unknown case ${c}" ;;
     esac
 done
+
+# a full pass also runs the mode case
+test "${CASE:-all}" != all || modes

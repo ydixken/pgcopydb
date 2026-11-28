@@ -1,0 +1,21 @@
+Mutant: a frame may end past the end offset of its index record. Must fail: an index record whose end offset falls inside a frame fails the reader.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1799,13 +1799,12 @@
+ 		uint64_t size = SPOOL_FRAME_SIZE(pgout_u32(spool_frames_at(frames), &pos,
+ 												   (int) Min(left, 4)));
+ 
+-		if (size <= left && !spool_frames_fill(frames, size))
++		if (!spool_frames_fill(frames, size))
+ 		{
+ 			return false;
+ 		}
+ 
+-		if (size > left ||
+-			spool_frame_decode(spool_frames_at(frames), size,
++		if (spool_frame_decode(spool_frames_at(frames), size,
+ 							   message, length) != SPOOL_FRAME_OK)
+ 		{
+ 			log_error("Spool file \"%s\" holds no valid frame at offset %" PRIu64,

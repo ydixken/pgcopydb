@@ -1,0 +1,17 @@
+Mutant: a reader that cannot list its directory while it waits goes on waiting. Must fail: a reader that cannot list its directory while it waits fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2752,10 +2752,7 @@
+ 				return false;
+ 			}
+ 
+-			if (!spool_reader_last_segment(reader, &later))
+-			{
+-				return false;
+-			}
++			(void) spool_reader_last_segment(reader, &later);
+ 
+ 			/* with one, read again: receive may have written it since the read */
+ 			if (later <= reader->nextSeq)

@@ -1,0 +1,28 @@
+Mutant: the work directory check never refuses a directory of the other mode. Must fail: the refuse case, where every command must exit 3 with the refusal line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/snapshot.c
++++ b/src/bin/pgcopydb/snapshot.c
+@@ -846,22 +846,6 @@
+ 	if (!found && IS_EMPTY_STRING_BUFFER(slot.slotName))
+ 	{
+ 		return true;
+-	}
+-
+-	bool raw = stream_uses_raw_spool(specs);
+-
+-	if (tagged != raw)
+-	{
+-		const char *recorded = tagged ? "performance" : "sqlite";
+-
+-		log_fatal("Refusing the work directory: it was started with "
+-				  "--follow-mode %s, and this run uses --follow-mode %s; "
+-				  "resume with --follow-mode %s, or run pgcopydb stream "
+-				  "cleanup and start over with --restart",
+-				  recorded,
+-				  raw ? "performance" : "sqlite",
+-				  recorded);
+-		return false;
+ 	}
+ 
+ 	return true;

@@ -1,0 +1,14 @@
+Mutant: A read does not lower the pending position to the records it added. Must fail: a record cut off at the end of the log is read once it is whole.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -798,8 +798,6 @@
+ 
+ 	cursor->size = offset;
+ 	cursor->tail = (uint64_t) fileSize - offset;
+-	spool_relation_pending(cursor);
+-
+ 	if (status == SPOOL_FRAME_BAD)
+ 	{
+ 		log_error("Spool file \"%s\" holds no valid relation log record "

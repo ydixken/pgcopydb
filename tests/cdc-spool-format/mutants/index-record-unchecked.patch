@@ -1,0 +1,21 @@
+Mutant: a flush writes an index record of its own that it could not read back. Must fail: a flush refuses an index record of its own that is not valid.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1486,13 +1486,8 @@
+ 	{
+ 		SpoolIndexRecord record = { 0 };
+ 
+-		if (!spool_index_decode(pending->data + at, SPOOL_INDEX_RECORD_SIZE,
+-								&record))
+-		{
+-			log_error("BUG: the index record at offset %zu of spool file "
+-					  "\"%s\" is not valid", at, writer->index.filename);
+-			return false;
+-		}
++		(void) spool_index_decode(pending->data + at, SPOOL_INDEX_RECORD_SIZE,
++								  &record);
+ 
+ 		record.relationLogEnd = writer->relationLog.synced;
+ 		spool_index_encode(&record, pending->data + at);

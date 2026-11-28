@@ -1,0 +1,15 @@
+Mutant: an only segment with a torn header is refused also when its name is sequence number 1. Must fail: a first segment with a torn header is removed, the directory synced, and the spool starts again.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2247,8 +2247,7 @@
+ 	start->tail = seq > 0 && !start->removed ? &start->last : NULL;
+ 
+ 	/* a torn header hides where the spool goes on: only a new one restarts */
+-	if (start->removed && !start->last.headed && before == 0 &&
+-		seq != SPOOL_FIRST_SEQ)
++	if (start->removed && !start->last.headed && before == 0)
+ 	{
+ 		log_error("Spool file \"%s\" has no valid header, and no segment "
+ 				  "before it to continue from", start->last.segment.filename);

@@ -1,0 +1,13 @@
+Mutant: A writer that failed to start keeps its relation log open. Must fail: a writer refuses a relation log that ends inside a record, and closes its files.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -969,7 +969,6 @@
+ 	}
+ 
+ 	termPQExpBuffer(&writer->lasts);
+-	spool_fail(&writer->relationLog);
+ }
+ 
+ 

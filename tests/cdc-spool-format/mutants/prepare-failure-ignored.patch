@@ -1,0 +1,14 @@
+Mutant: the adapter builds a statement from a change that preparePgoutputMessage could not decode. Must fail: a change of a relation that the relation log does not define is an error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_pgoutput.c
++++ b/src/bin/pgcopydb/ld_pgoutput.c
+@@ -1366,7 +1366,7 @@
+ 		return true;
+ 	}
+ 
+-	if (!preparePgoutputMessage(&context))
++	if (!preparePgoutputMessage(&context) && false)
+ 	{
+ 		/* errors have already been logged */
+ 		return false;

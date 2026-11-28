@@ -1,0 +1,14 @@
+Mutant: the statement source decodes a frame that the reader could not read. Must fail: a damaged frame of a spooled transaction is an error, and no statement comes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3331,7 +3331,7 @@
+ 		uint32_t length = 0;
+ 		bool done = false;
+ 
+-		if (!spool_reader_frame(reader, privateContext, &message, &length, &done))
++		if (!spool_reader_frame(reader, privateContext, &message, &length, &done) && false)
+ 		{
+ 			/* errors have already been logged */
+ 			return false;

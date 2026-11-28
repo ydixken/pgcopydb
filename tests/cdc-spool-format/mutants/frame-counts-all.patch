@@ -1,0 +1,14 @@
+Mutant: every frame of a transaction counts as a change. Must fail: a reader applies before each change the definition logged before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2795,7 +2795,7 @@
+ 
+ 	char type = (*message)[SPOOL_XLOGDATA_HEADER_SIZE];
+ 
+-	if (type == 'I' || type == 'U' || type == 'D' || type == 'T')
++	if (type != 0)
+ 	{
+ 		if (!spool_relation_cursor_advance(&reader->relations, reader->record.seq,
+ 										   reader->changes, context))

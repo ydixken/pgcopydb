@@ -1,0 +1,14 @@
+Mutant: the frames of a transaction include its keepalive markers and empty XLogData messages. Must fail: a reader returns the frames of a transaction without its keepalive markers and empty XLogData messages.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1816,7 +1816,7 @@
+ 		frames->offset += size;
+ 
+ 		/* a keepalive marker has 17 bytes, and an empty XLogData message 25 */
+-		if (*length > SPOOL_XLOGDATA_HEADER_SIZE)
++		if (*length > 0)
+ 		{
+ 			return true;
+ 		}

@@ -1,0 +1,14 @@
+Mutant: an index file shorter than what the reader read is read again from where it was. Must fail: an index file shorter than what the reader read fails it with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2552,7 +2552,7 @@
+ 
+ 	uint64_t size = (uint64_t) st.st_size;
+ 
+-	if (size < reader->indexOffset)
++	if (false)
+ 	{
+ 		log_error("Spool file \"%s\" has %" PRIu64 " bytes, and %" PRIu64
+ 				  " were read before", reader->indexFilename, size,

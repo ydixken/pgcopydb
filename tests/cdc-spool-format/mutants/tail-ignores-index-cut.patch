@@ -1,0 +1,14 @@
+Mutant: a failed cut of the index file is ignored. Must fail: a cut that cannot truncate its file fails the start with an ERROR line that names it; a cut that cannot sync its file fails the start with an ERROR line that names it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2126,7 +2126,7 @@
+ {
+ 	return spool_cut_file(tail->segment.fd, tail->segment.filename,
+ 						  tail->last.endOffset) &&
+-		   spool_cut_file(tail->indexFd, tail->index, tail->keep);
++		   (spool_cut_file(tail->indexFd, tail->index, tail->keep) || true);
+ }
+ 
+ 

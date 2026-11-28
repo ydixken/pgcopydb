@@ -1,0 +1,19 @@
+Mutant: rotation ignores a failed create of the next segment, and stores its header. Must fail: rotation onto a segment file that exists fails and leaves the file as it was.
+Apply from the repository root with git apply, and never commit it applied.
+
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..20f0811 100644
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1623,10 +1623,7 @@ spool_writer_rotate(SpoolWriter *writer)
+ 		.fd = -1
+ 	};
+ 
+-	if (!spool_segment_create(segment, writer->dirname, &header))
+-	{
+-		return false;
+-	}
++	(void) spool_segment_create(segment, writer->dirname, &header);
+ 
+ 	writer->header = header;
+ 	writer->completeSize = SPOOL_HEADER_SIZE;

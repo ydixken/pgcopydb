@@ -1,0 +1,21 @@
+Mutant: the start accepts a segment before a last one without an indexed transaction that holds none either. Must fail: a segment before a torn last segment that holds no indexed transaction ends every start with an error, and no file changes; a segment before a headed last segment without an indexed transaction that holds none either ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2270,15 +2270,6 @@
+ 			return false;
+ 		}
+ 
+-		/* a later segment exists only once the flush indexed this one */
+-		if (start->before.keep == 0)
+-		{
+-			log_error("Spool file \"%s\" holds no indexed transaction, but a "
+-					  "segment after it was created",
+-					  start->before.segment.filename);
+-			return false;
+-		}
+-
+ 		/* and synced its index file in full, so a cut there drops acknowledged ones */
+ 		if (start->before.keep < start->before.indexSize)
+ 		{

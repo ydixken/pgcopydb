@@ -1,0 +1,14 @@
+Mutant: a rewind after the start goes back to the segment header. Must fail: a writer opened on a spool continues after its last indexed transaction, with the final_lsn and end LSN of its record.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2146,7 +2146,7 @@
+ 		.nextSeq = tail->last.seq + 1,
+ 		.lastFinalLSN = tail->last.finalLSN,
+ 		.lastEndLSN = tail->last.endLSN,
+-		.completeSize = tail->last.endOffset
++		.completeSize = SPOOL_HEADER_SIZE
+ 	};
+ 
+ 	/* the cut synced the segment at that length */

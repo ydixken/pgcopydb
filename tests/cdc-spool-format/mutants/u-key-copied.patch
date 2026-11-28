@@ -1,0 +1,14 @@
+Mutant: the statement source copies a key column of status u into the old key, as 9d8b660 does. Must fail: an UPDATE whose key column is unchanged TOAST data is an error that names relation and column.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_pgoutput.c
++++ b/src/bin/pgcopydb/ld_pgoutput.c
+@@ -1375,7 +1375,7 @@
+ 	/* an old tuple sends values for key columns only, and 9d8b660 drops a u */
+ 	for (int i = 0; i < msg->ncols_old; i++)
+ 	{
+-		if (msg->old_cols[i].status == 'u')
++		if (false && msg->old_cols[i].status == 'u')
+ 		{
+ 			log_error("pgoutput: %s on %s.%s carries no value for replica "
+ 					  "identity column \"%s\", which is unchanged TOAST data",

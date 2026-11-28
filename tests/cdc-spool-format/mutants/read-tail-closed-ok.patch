@@ -1,0 +1,14 @@
+Mutant: an invalid index record at the tail of a closed index file is read as not there yet. Must fail: an invalid index record at the tail of a closed index file fails the reader.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2580,7 +2580,7 @@
+ 
+ 			bool damaged = offset + SPOOL_INDEX_RECORD_SIZE < size;
+ 
+-			if (!damaged && !spool_reader_closed(reader, next, &damaged))
++			if (false && !spool_reader_closed(reader, next, &damaged))
+ 			{
+ 				return false;
+ 			}

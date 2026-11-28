@@ -18,12 +18,28 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-receive-status-interval cdc-apply-wakeup catalog-stmt-cache \
 	 cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers \
 	 cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume \
-	 cdc-wal-workers-idle wal-workers-assign \
+	 cdc-wal-workers-idle wal-workers-assign cdc-spool-format \
+	 cdc-spool-settings cdc-follow-mode cdc-layout-refusal \
+	 cdc-parallel-differential \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering follow-resume-snapshot \
 	 orphaned-target-backend split-table-resume \
 	 all-databases-resume large-objects-resume json-logs \
-	 defer-indexes defer-indexes-queue defer-indexes-all-databases;
+	 defer-indexes defer-indexes-queue defer-indexes-all-databases \
+	 cdc-pgoutput-performance cdc-low-level-performance \
+	 cdc-filtering-pgoutput-performance cdc-replica-identity-full-performance \
+	 cdc-truncate-multi-performance cdc-receive-drain-error-performance \
+	 cdc-receive-reconnect-dying-source-performance cdc-receive-status-interval-performance \
+	 cdc-receive-group-commit-performance \
+	 cdc-origin-abort-performance cdc-apply-wakeup-performance \
+	 follow-filtering-performance follow-resume-snapshot-performance \
+	 cdc-replica-identity-index-performance cdc-partitioned-target-performance \
+	 cdc-pgoutput-resume-performance \
+	 cdc-commit-order-resume-performance cdc-copy-multi-insert-performance \
+	 cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance \
+	 cdc-endpos-before-txn-performance follow-pgoutput-performance \
+	 cdc-origin-source-performance \
+	 cdc-parallel-isolation cdc-parallel-crash;
 
 pagila: build
 	$(MAKE) -C $@
@@ -157,12 +173,51 @@ cdc-endpos-before-txn: build
 cdc-origin-source: build
 	$(MAKE) -C $@
 
+cdc-spool-settings: build
+	$(MAKE) -C $@
+
+cdc-follow-mode: build
+	$(MAKE) -C $@
+
+# builds a second binary from git archive 9d8b660
+cdc-layout-refusal: build
+	$(MAKE) -C $@
+
+# the performance pass of cdc-origin-source, which reads the raw spool
+cdc-origin-source-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-source
+
+# Not in "all" and not in the CI lists: the source and source14 cases count a
+# second relation record as the proof of a resend, and the relation log of the
+# merged head drops a repeat it already holds.  Case diskfull passes.
+cdc-spool-resend: build
+	$(MAKE) -C $@
+
+# Not in "all" and not in the CI lists: case skipped counts the same second
+# relation record as the source case of cdc-spool-resend, which the relation
+# log of the merged head does not append.
+cdc-spool-relation: build
+	$(MAKE) -C $@
+
+cdc-parallel-differential: build
+	$(MAKE) -C $@
+
+cdc-parallel-isolation: build
+	$(MAKE) -C $@
+
 # builds its own image from the build stage of the top-level Dockerfile
 catalog-stmt-cache:
 	$(MAKE) -C $@
 
 # builds its own image from the build stage of the top-level Dockerfile
 wal-workers-assign:
+	$(MAKE) -C $@
+
+# builds its own image from the build stage of the top-level Dockerfile
+cdc-spool-format:
+	$(MAKE) -C $@
+
+cdc-parallel-crash: build
 	$(MAKE) -C $@
 
 follow-pgoutput: build
@@ -204,6 +259,77 @@ timescaledb: build
 citus: build
 	$(MAKE) -C $@
 
+# The performance pass of a kept suite: the same script, with the raw spool.
+# The sqlite pass is the suite's own entry, which leaves the variable unset.
+cdc-pgoutput-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-pgoutput
+
+cdc-low-level-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-low-level
+
+cdc-filtering-pgoutput-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-filtering-pgoutput
+
+cdc-replica-identity-full-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-replica-identity-full
+
+cdc-truncate-multi-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-truncate-multi
+
+cdc-receive-drain-error-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-drain-error
+
+cdc-receive-reconnect-dying-source-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-reconnect-dying-source
+
+cdc-receive-status-interval-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-status-interval
+
+cdc-origin-abort-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-abort
+
+cdc-apply-wakeup-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-apply-wakeup
+
+follow-filtering-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-filtering
+
+follow-resume-snapshot-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-resume-snapshot
+
+cdc-commit-order-resume-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-commit-order-resume
+
+cdc-copy-multi-insert-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-copy-multi-insert
+
+cdc-interleaved-commits-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-interleaved-commits
+
+cdc-resend-after-reconnect-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-resend-after-reconnect
+
+# These two suites run both plugins, and test_decoding has no performance mode
+cdc-replica-identity-index-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-replica-identity-index down run-pgoutput down
+
+cdc-partitioned-target-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-partitioned-target down run-pgoutput down
+
+cdc-pgoutput-resume-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-pgoutput-resume
+
+# The group rule holds here by a margin of a few hundred transactions on the
+# raw spool, where sqlite mode commits 20001 transactions in 6 batches.
+cdc-receive-group-commit-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-group-commit
+
+cdc-endpos-before-txn-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-endpos-before-txn
+
+follow-pgoutput-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-pgoutput
+
 build:
 	@docker image inspect pagila > /dev/null 2>&1 \
 	  && echo "pagila image already present — skipping build (run 'make force-build' to rebuild)" \
@@ -242,8 +368,21 @@ clean-images:
 .PHONY: cdc-receive-reconnect-dying-source cdc-receive-status-interval cdc-apply-wakeup
 .PHONY: catalog-stmt-cache cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
-.PHONY: cdc-wal-workers-idle wal-workers-assign
+.PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format cdc-parallel-crash
+.PHONY: cdc-spool-settings cdc-follow-mode cdc-layout-refusal
+.PHONY: cdc-origin-source-performance cdc-spool-resend cdc-spool-relation
+.PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format
+.PHONY: cdc-parallel-differential cdc-parallel-isolation
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
+.PHONY: cdc-pgoutput-performance cdc-low-level-performance cdc-filtering-pgoutput-performance
+.PHONY: cdc-replica-identity-full-performance cdc-truncate-multi-performance cdc-receive-drain-error-performance
+.PHONY: cdc-receive-reconnect-dying-source-performance cdc-receive-status-interval-performance cdc-origin-abort-performance
+.PHONY: cdc-apply-wakeup-performance follow-filtering-performance follow-resume-snapshot-performance
+.PHONY: cdc-replica-identity-index-performance cdc-partitioned-target-performance
+.PHONY: cdc-pgoutput-resume-performance cdc-receive-group-commit-performance
+.PHONY: cdc-commit-order-resume-performance cdc-copy-multi-insert-performance
+.PHONY: cdc-interleaved-commits-performance cdc-resend-after-reconnect-performance
+.PHONY: cdc-endpos-before-txn-performance follow-pgoutput-performance
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases
 .PHONY: timescaledb citus

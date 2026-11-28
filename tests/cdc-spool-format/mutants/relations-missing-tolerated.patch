@@ -1,0 +1,14 @@
+Mutant: a missing relation log is taken for a new one, also when the index proves a length of it synced. Must fail: a missing relation log of a spool whose index records hold a synced length ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1883,7 +1883,7 @@
+ 
+ 	log->fd = open(log->path, O_WRONLY);
+ 
+-	if (log->fd < 0 && errno == ENOENT && synced == 0)
++	if (log->fd < 0 && errno == ENOENT)
+ 	{
+ 		/* a new spool, whose writer creates the log */
+ 		return true;

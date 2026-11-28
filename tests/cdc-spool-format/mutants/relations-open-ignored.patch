@@ -1,0 +1,15 @@
+Mutant: a relation log that cannot be opened is not cut, and the start goes on. Must fail: a start that cannot open the relation log, the segment or its index fails with an ERROR line.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1891,8 +1891,7 @@
+ 
+ 	if (log->fd < 0)
+ 	{
+-		log_error("Failed to open spool file \"%s\": %m", log->path);
+-		return false;
++		return true;
+ 	}
+ 
+ 	if (!read_file(log->path, &bytes, &size))

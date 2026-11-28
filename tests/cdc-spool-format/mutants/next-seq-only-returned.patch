@@ -1,0 +1,17 @@
+Mutant: a reader moves its next sequence number only past the records it returns. Must fail: a reader opened at the end LSN of the last record reads the next segment once a rotation creates it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2704,10 +2704,9 @@
+ 		{
+ 			SpoolIndexRecord *record = &reader->chunk[reader->chunkNext++];
+ 
+-			reader->nextSeq = record->seq + 1;
+-
+ 			if (record->endLSN > reader->after)
+ 			{
++				reader->nextSeq = record->seq + 1;
+ 				reader->record = *record;
+ 				reader->changes = 0;
+ 				reader->frames.offset = record->beginOffset;

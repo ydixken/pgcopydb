@@ -1,0 +1,14 @@
+Mutant: The wrapper keeps the cached entry, so the first definition of a relation wins. Must fail: a changed definition replaces the cached one at its position.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_pgoutput.c
++++ b/src/bin/pgcopydb/ld_pgoutput.c
+@@ -369,7 +369,7 @@
+ 	uint32_t relOid = pgout_u32(buf, &pos, bufLen);
+ 	PgoutputRelationCache *rel = NULL;
+ 
+-	HASH_FIND_INT(privateContext->pgoutputRelationCache, &relOid, rel);
++	(void) relOid;
+ 
+ 	if (rel != NULL)
+ 	{

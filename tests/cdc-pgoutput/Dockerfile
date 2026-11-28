@@ -12,6 +12,7 @@ COPY ./ddl.sql ddl.sql
 COPY ./special-dml.sql special-dml.sql
 COPY ./special-ddl.sql special-ddl.sql
 COPY ./stmt.sql stmt.sql
+COPY ./apply.sql apply.sql
 COPY ./output.pgout output.pgout
 
 USER docker

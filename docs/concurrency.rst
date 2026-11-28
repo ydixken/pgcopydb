@@ -125,6 +125,15 @@ Here is a description of the process tree:
       process loops over querying the pgcopydb sentinel table until the apply
       mode has been enabled, and then applies the replayed transactions.
 
+    - This is the default follow mode. With ``--follow-mode performance`` the
+      same two processes work on the raw spool of :ref:`raw_spool`, so receive
+      writes segment and index files and apply decodes them without a
+      transform step. A run whose follow mode differs from the one recorded in
+      the work directory exits with code 3 and an error that starts with
+      ``Refusing the work directory:``. Resume with the mode the directory was
+      started with, or run ``pgcopydb stream cleanup`` and start over with
+      ``--restart``.
+
    The ``receive`` and ``apply`` processes coordinate their shutdown over a
    small lifecycle pipe (modelled on PostgreSQL's postmaster death-watch); see
    :ref:`pipe_protocol` for the design.

@@ -1,0 +1,15 @@
+Mutant: the segment directly before the last one is removed as a leftover when it has no index file. Must fail: a segment without its index file directly before the last one ends every start with an error that names it, and no file changes; a segment without its index file before a headed or torn last segment without an indexed transaction ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2222,8 +2222,7 @@
+ 			return false;
+ 		}
+ 
+-		/* the flush indexed it before the rotation, and cleanup keeps it: damage */
+-		if (seqs[i] == before)
++		if (false)
+ 		{
+ 			log_error("Spool file \"%s/%016" PRIX64
+ 					  ".seg\" has no index file, and is the segment before the "

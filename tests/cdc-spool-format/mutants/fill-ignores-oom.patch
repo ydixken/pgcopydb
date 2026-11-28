@@ -1,0 +1,18 @@
+Mutant: the frames of a transaction are read into a buffer that could not grow. Must fail: a transaction that cannot be read into memory fails the reader.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1746,11 +1746,7 @@
+ 	resetPQExpBuffer(buffer);
+ 	frames->bufferStart = frames->offset;
+ 
+-	if (!enlargePQExpBuffer(buffer, want))
+-	{
+-		log_error(ALLOCATION_FAILED_ERROR);
+-		return false;
+-	}
++	(void) enlargePQExpBuffer(buffer, want);
+ 
+ 	if (!spool_pread(frames->fd, frames->filename, buffer->data, want,
+ 					 frames->offset, &done))

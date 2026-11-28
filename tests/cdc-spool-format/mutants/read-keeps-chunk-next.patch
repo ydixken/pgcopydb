@@ -1,0 +1,13 @@
+Mutant: a read of index records keeps the position in the records read before. Must fail: a reader returns the transactions of every segment in commit order, with their frames.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2541,7 +2541,6 @@
+ 	uint64_t done = 0;
+ 
+ 	reader->chunkCount = 0;
+-	reader->chunkNext = 0;
+ 
+ 	/* the size first: receive appends, so every byte below it is written */
+ 	if (fstat(reader->indexFd, &st) != 0)

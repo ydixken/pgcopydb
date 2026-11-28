@@ -1,0 +1,17 @@
+Mutant: spool_sync takes an empty write block for a synced segment. Must fail: a frame that ends at the write block boundary is written out unsynced, and spool_sync syncs it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -499,6 +499,11 @@ spool_sync(SpoolSegment *segment)
+ bool
+ spool_sync(SpoolSegment *segment)
+ {
++	if (segment->blockLength == 0 && spool_usable(segment))
++	{
++		return true;
++	}
++
+ 	if (!spool_usable(segment) || !spool_write_block(segment))
+ 	{
+ 		return false;

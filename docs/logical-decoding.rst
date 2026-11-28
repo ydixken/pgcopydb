@@ -98,6 +98,7 @@ The receiver must therefore account for changes already stored locally that the 
 ``sentinel.replay_lsn`` records durable target progress.
 Apply writes a new value at most once a second, and at once when it reaches endpos or exits, so it can trail the target origin by about a second and never leads it.
 The SQLite apply path uses ``synchronous_commit=on``, drains the pipeline, and sends ``SET CONSTRAINTS ALL IMMEDIATE``, the origin setup, and the COMMIT as one simple query before publishing the source COMMIT LSN.
+In performance mode receive reports a flush position only after it has synced the segment, the relation log and the index record of a transaction, so a position it reports is always readable again after a crash.
 PostgreSQL 16 and later advance the origin when a transaction aborts after its origin setup.
 So the server never gets the setup without the COMMIT, and deferred triggers and constraint checks run before the setup.
 When that query fails, apply moves the origin back to ``previousLSN`` before it exits.
@@ -151,6 +152,24 @@ This is why startup cannot initialize ``C`` to zero without checking old spool f
 On a connection retry, the receiver clears ``K`` but retains ``C`` and its certified feedback floor.
 A process restart reconstructs ``C`` from the retained catalogs and requires a new primary keepalive before promoting feedback beyond ``P``.
 
+.. _value_text_pin:
+
+Value text on the replication connection
+----------------------------------------
+
+The walsender prints every value with its own session settings, and a role, a
+database or a reload can change them between two connections.
+The raw spool of ``--follow-mode performance`` keeps that text, so a change of
+``TimeZone`` or ``bytea_output`` would give the same row two different key
+texts in one spool, and the statements built from them would no longer match.
+
+So on the raw path, receive pins five settings on the replication connection
+before ``START_REPLICATION``: ``extra_float_digits``, ``IntervalStyle``,
+``DateStyle``, ``bytea_output`` and ``TimeZone``.
+It pins them again on every reconnect, and a failed ``SET`` ends the start.
+These are the settings ``pgcopydb compare data`` pins for the same reason.
+``--follow-mode sqlite`` keeps the connection it always had.
+
 .. _apply_groups:
 
 Apply groups
@@ -168,6 +187,10 @@ Deferred triggers on the target fire at the group COMMIT, so they see the rows o
 A group can stay open on the target while apply transforms the next source transaction, so on PostgreSQL 17 and later the apply session sets ``transaction_timeout`` to 0.
 Apply sends no pipeline sync inside a group, so the target never reports it idle and ``idle_in_transaction_session_timeout`` does not end it.
 ``PGCOPYDB_APPLY_GROUP_TXNS=1`` commits every source transaction on its own.
+
+Performance mode groups the same way and reads its members from the raw spool instead of ``replayDB``.
+A group closes at the cut, at a group limit, and before a member that has to be applied alone.
+It has no KEEPALIVE row to close at, because a keepalive is a marker frame in the spool and not a transaction.
 
 Why pgcopydb supports endpos mid-transaction
 ---------------------------------------------
@@ -208,6 +231,11 @@ If receive stops before a transaction's COMMIT reaches the spool, apply leaves t
 If the complete transaction is already in the spool, apply can commit it in full before stopping.
 Neither path fabricates applied progress at endpos.
 
+The three cases above are the rules of ``sqlite`` mode.
+In ``performance`` mode, see :ref:`raw_spool`, one worker applies a transaction if and only if its commit position is at or below the cut, and the cut is the larger of endpos and the commits the worker already made.
+The spool indexes a transaction by its commit, so a transaction that begins below endpos and commits above it stays unapplied even when the whole transaction is in the spool, and a raised endpos applies it.
+Taking the larger of the two keeps the target on a prefix of the source when endpos arrives after a commit above it: the cut never falls below what the target holds, and the origin ends above endpos.
+
 Internal model for endpos tracking
 ------------------------------------
 
@@ -238,6 +266,10 @@ Apply also marks itself ``'done'`` when a signal stopped it, so (b) alone does n
 
 ``follow_reached_endpos`` checks (a) first; if (a) misses, it checks (b).
 A WAL worker uses (b) only, because its apply marks itself ``'done'`` at endpos only, see :ref:`wal_workers_endpos`.
+
+A run on the raw spool uses (b) alone, and with the endpos it served: the apply row holds ``'done'`` and that endpos only where the worker reached the finish of its cut.
+Its replay_lsn can hold a commit above endpos, which would make (a) report an endpos the run never drained to, and every other exit leaves the row with ``'error'``.
+So exit code 0 with endpos set implies the marker, a run that a signal stops short of endpos exits with an error, and a resume reads the marker to decide whether it is done.
 
 Transform exit for mid-transaction endpos
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -292,6 +324,13 @@ after a committed batch.
 The in-memory ``pipeline_state`` is checkpointed to ``sourceDB`` periodically
 and once more at end of processing, rather than once per transaction.
 
+Performance mode has no transform stage: its driver reads the transaction index
+in commit order, decodes the frames of one transaction, and sends the statements
+of that transaction to the target. There is no stage boundary to make progress
+across, so the loop ends when the index holds no further record below the cut.
+The ``apply`` row of ``pipeline_state`` then records the cut it reached, where
+the SQLite path records the last COMMIT it applied.
+
 Restart safety
 ~~~~~~~~~~~~~~
 
@@ -300,6 +339,49 @@ Receive accounts for every relevant retained output file before certifying new k
 Transactions already acknowledged during prefetch remain available in that spool even when PostgreSQL does not redeliver them.
 The BEGIN cursor uses ``>=`` so it includes a next transaction beginning exactly at the previous COMMIT LSN.
 An incomplete transaction can be completed by redelivery without advancing the apply cursor past its missing COMMIT.
+
+In performance mode the answer is a different one, because the spool is a set of files and not an SQLite store.
+A complete transaction is one index record, and an incomplete one has none, so there is nothing to complete by redelivery.
+Receive skips a BEGIN whose ``final_lsn`` is at or below the last complete transaction, which is how it drops what the walsender sends a second time.
+
+Receive syncs a segment, then the relation log, and only then writes and syncs the index records of that batch, so an index record that reads back proves that the frames it names and the relation records before it are on disk.
+A kill leaves at most frames that no index record names, and the next start cuts the segment back to the last record it can read, which the source sends again.
+A power loss can also drop bytes that were written and not yet synced, and a file whose directory entry was never synced.
+The start cuts those tails too, and it refuses the spool when such a cut would fall below the position the replication slot confirmed as flushed, because the source no longer sends what is below it.
+
+Segment cleanup deletes a segment only when the segment after it ends at or below the stored replay position, and it unlinks the index file before the segment.
+A kill inside a pass therefore leaves at most the lowest segment without its index file.
+The next start removes that leftover, but only when the stored replay position says the target applied every transaction of the segment after it.
+Otherwise the leftover is damage and not a leftover, and the start refuses it with both positions in the message.
+
+The one worker commits a group and then stores its replay position, so a kill between the two leaves the target origin ahead of the stored position.
+The next run reads that origin, and it reads it only after it took the origin session, which succeeds once the backend of the killed run is gone and its last commit is settled.
+A start whose origin is below the stored replay position is refused: the target lost commits that the spool no longer holds.
+
+.. _raw_spool:
+
+Raw spool (performance mode)
+----------------------------
+
+With ``--follow-mode performance`` and ``--plugin pgoutput``, receive writes no SQLite spool.
+It appends the replication stream to numbered segment files in the CDC directory, and keeps an index beside each segment and one relation log for the spool:
+
+- ``<seq>.seg`` holds the stream as frames. A frame is the length of the message, the message, and the CRC-32C of both.
+  Kind ``w`` is the CopyData message as it arrived, the 25-byte XLogData header followed by the ``pgoutput`` message.
+  Kind ``k`` is a keepalive marker that receive writes itself, with the position and the send time.
+- ``<seq>.idx`` holds one 72-byte record per complete transaction, in commit order: the sequence number, the xid and the change count, the begin and end offset in the segment, ``final_lsn`` from the BEGIN body, the end LSN of the commit record, the commit time, the synced length of the relation log, and the CRC-32C.
+- ``relation.log`` holds every RELATION and TYPE message, each with the position it was logged at, its length, the message unchanged, and the CRC-32C.
+  Apply needs it after a restart, because the walsender sends a relation definition once per connection.
+
+A frame keeps the value text the walsender printed, so receive pins the settings of that connection: see :ref:`value_text_pin`.
+
+Receive syncs in this order, and only then reports a flush position: the segment, the relation log, then the index record.
+A reader therefore never meets an index record whose frames or relation definitions are missing.
+``pgcopydb list spool`` prints the index records of a work directory and reads no frame.
+``pgcopydb stream prune`` removes a closed segment, the index file first so that every index file left has its segment, once the stored low-water mark is above that segment's last commit.
+
+The segment number, not a file pair, is the unit of rotation and of cleanup, and the relation log stays as long as the spool does.
+Apply holds no cursor in SQLite: it restarts from the target replication origin, skips every transaction at or below it, and stops at the cut.
 
 .. _wal_workers_endpos:
 
@@ -436,3 +518,7 @@ Invariant summary
      - apply replay cursor; origin restart
 
 A WAL worker sets its slot, ``context->previousLSN``, its origin and ``sentinel.replay_lsn`` at endpos only once the conditions in :ref:`wal_workers_endpos` hold, or all four at the start of a COMMIT record that endpos falls inside.
+
+The table describes sqlite mode.
+In performance mode ``context->previousLSN`` and the origin move only at a confirmed group COMMIT as well, and the two values the table reads from the SQLite spool come from the raw spool instead: the network flush position from a synced index record, and the apply cursor from the target origin.
+``pipeline_state["apply"].run_end_lsn`` holds the cut of a run that reached endpos, and the done marker, not the two sentinel values, decides whether a resume has anything left to do.

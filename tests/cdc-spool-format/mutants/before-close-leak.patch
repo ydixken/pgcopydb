@@ -1,0 +1,13 @@
+Mutant: the start leaves the files of the segment before the last one open. Must fail: a start that removes a headed last segment leaves no file of it or of the segment before it open.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2398,7 +2398,6 @@
+ 				   spool_start_act(&start, writer, dirname, maxSegmentSize);
+ 
+ 	spool_tail_close(&start.last);
+-	spool_tail_close(&start.before);
+ 	(void) close(start.relations.fd);
+ 
+ 	return resumed;

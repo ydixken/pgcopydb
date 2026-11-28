@@ -1,0 +1,14 @@
+Mutant: the statement source hands a statement over that the builder could not write. Must fail: a statement that the builder cannot write ends the transaction, and no statement follows.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3288,7 +3288,7 @@
+ 
+ 	strlcpy(stmt.timestamp, waiting->timestamp, sizeof(stmt.timestamp));
+ 
+-	return stream_write_statement(spooled->specs->replayNoOpUpdates, &stmt, waiting) &&
++	return (stream_write_statement(spooled->specs->replayNoOpUpdates, &stmt, waiting) || true) &&
+ 		   stream_spool_hand(spooled, &stmt);
+ }
+ 

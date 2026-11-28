@@ -1,0 +1,14 @@
+Mutant: a relation log that cannot be opened for any reason is a new one when no index record proves it synced. Must fail: a relation log that cannot be opened ends every start of a spool without an index record, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1883,7 +1883,7 @@
+ 
+ 	log->fd = open(log->path, O_WRONLY);
+ 
+-	if (log->fd < 0 && errno == ENOENT && synced == 0)
++	if (log->fd < 0 && synced == 0)
+ 	{
+ 		/* a new spool, whose writer creates the log */
+ 		return true;

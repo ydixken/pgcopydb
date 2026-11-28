@@ -1,0 +1,14 @@
+Mutant: An advance does not raise the pending position past the records it applied. Must fail: a record is applied at its own position, and not before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -879,8 +879,6 @@
+ 			return false;
+ 		}
+ 	}
+-
+-	spool_relation_pending(cursor);
+ 
+ 	return true;
+ }

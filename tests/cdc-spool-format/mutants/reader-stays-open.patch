@@ -1,0 +1,15 @@
+Mutant: a reader that is open already is kept, and not opened again. Must fail: a worker that opens its reader again after a receive start reads the segment that the start created.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -610,8 +610,7 @@
+ {
+ 	if (*opened)
+ 	{
+-		(void) spool_reader_close(reader);
+-		*opened = false;
++		return true;
+ 	}
+ 
+ 	if (!spool_reader_open(reader, context->paths.dir, context->previousLSN))

@@ -1,0 +1,16 @@
+Mutant: a resume decides "done at endpos" from the two sentinel values on the raw path too. Must fail: the apply row check of an endpos in the past, where the worker quits before it records its finish.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -178,9 +178,7 @@ stream_endpos_done_before(DatabaseCatalog *sourceDB, bool rawSpool,
+ 		return false;
+ 	}
+ 
+-	return rawSpool
+-		   ? stream_apply_marker_at_endpos(sourceDB, endpos)
+-		   : endpos <= replayLSN;
++	return endpos <= replayLSN;
+ }
+ 
+ 

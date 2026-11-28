@@ -1,0 +1,14 @@
+Mutant: a start that begins a new spool refuses an empty relation log too. Must fail: a start on a directory with an empty relation log and no segment begins a new spool.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2321,7 +2321,7 @@
+ 	 * The writer syncs the first header before it logs a record, and a start
+ 	 * empties the log before it removes that segment, so here they are damage.
+ 	 */
+-	if (start->tail == NULL && !start->last.headed && start->relations.size > 0)
++	if (start->tail == NULL && !start->last.headed && start->relations.fd >= 0)
+ 	{
+ 		log_error("Spool file \"%s\" holds %" PRIu64
+ 				  " bytes, but the spool has no segment with a valid header",

@@ -34,7 +34,8 @@ CommandLine snapshot_command =
 		"  --follow                      Implement logical decoding to replay changes\n"
 		"  --plugin                      Output plugin to use (pgoutput, test_decoding, wal2json)\n"
 		"  --wal2json-numeric-as-string  Print numeric data type as string when using wal2json output plugin\n"
-		"  --slot-name                   Use this Postgres replication slot name\n",
+		"  --slot-name                   Use this Postgres replication slot name\n"
+		"  --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)\n",
 		cli_create_snapshot_getopts,
 		cli_create_snapshot);
 
@@ -54,6 +55,7 @@ cli_create_snapshot_getopts(int argc, char **argv)
 		{ "plugin", required_argument, NULL, 'p' },
 		{ "wal2json-numeric-as-string", no_argument, NULL, 'w' },
 		{ "slot-name", required_argument, NULL, 's' },
+		{ "follow-mode", required_argument, NULL, 1009 },
 		{ "version", no_argument, NULL, 'V' },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "notice", no_argument, NULL, 'v' },
@@ -128,6 +130,17 @@ cli_create_snapshot_getopts(int argc, char **argv)
 			{
 				options.slot.wal2jsonNumericAsString = true;
 				log_trace("--wal2json-numeric-as-string");
+				break;
+			}
+
+			case 1009:      /* --follow-mode */
+			{
+				if (!cli_parse_follow_mode(optarg, &(options.followMode)))
+				{
+					/* errors have already been logged */
+					exit(EXIT_CODE_BAD_ARGS);
+				}
+				log_trace("--follow-mode %s", optarg);
 				break;
 			}
 
@@ -251,6 +264,12 @@ cli_create_snapshot_getopts(int argc, char **argv)
 		exit(EXIT_CODE_BAD_ARGS);
 	}
 
+	if (options.follow && !cli_validate_follow_mode(&options))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_ARGS);
+	}
+
 	/* publish our option parsing in the global variable */
 	createSNoptions = options;
 
@@ -344,6 +363,13 @@ cli_create_snapshot(int argc, char **argv)
 		streamSpecs.maxReplayDBSize = createSNoptions.maxReplayDBSize > 0
 									  ? createSNoptions.maxReplayDBSize
 									  : (1ULL << 30);
+		streamSpecs.followMode = copySpecs.followMode;
+
+		if (!copydb_check_cdc_layout(&streamSpecs))
+		{
+			/* errors have already been logged */
+			exit(EXIT_CODE_BAD_STATE);
+		}
 
 		/*
 		 * Make sure to register our setup here, as usually the command

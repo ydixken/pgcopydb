@@ -1,0 +1,14 @@
+Mutant: the start takes an invalid last record in the index file of the segment before the last one for a torn tail. Must fail: an invalid last record in the index file of the segment before a headed or torn last segment ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2280,7 +2280,7 @@
+ 		}
+ 
+ 		/* and synced its index file in full, so a cut there drops acknowledged ones */
+-		if (start->before.keep < start->before.indexSize)
++		if (false)
+ 		{
+ 			log_error("Spool file \"%s\" holds no valid index record at offset %"
+ 					  PRIu64 ", and a segment after it exists",

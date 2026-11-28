@@ -1,0 +1,14 @@
+Mutant: pgcopydb list spool --json prints the end LSN as the commit time. Must fail: pgcopydb list spool --json prints each index record with its segment, sequence number, xid, changes, offsets, LSNs and commit time.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_list.c
++++ b/src/bin/pgcopydb/cli_list.c
+@@ -2375,7 +2375,7 @@
+ 			json_object_set_number(jsObj, "end_offset", (double) record->endOffset);
+ 			json_object_set_string(jsObj, "final_lsn", finalLSN);
+ 			json_object_set_string(jsObj, "end_lsn", endLSN);
+-			json_object_set_string(jsObj, "commit_time", commitTime);
++			json_object_set_string(jsObj, "commit_time", endLSN);
+ 
+ 			json_array_append_value(jsArray, jsRecord);
+ 		}

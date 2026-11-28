@@ -1,0 +1,13 @@
+Mutant: a reader reads the next index file from the offset where the last one ended. Must fail: a reader returns the transactions of every segment in commit order, with their frames.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2470,7 +2470,6 @@
+ 
+ 	reader->segment = seq;
+ 	reader->nextSeq = seq;
+-	reader->indexOffset = 0;
+ 
+ 	return true;
+ }

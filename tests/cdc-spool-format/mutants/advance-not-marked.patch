@@ -1,0 +1,14 @@
+Mutant: An advance does not mark the records it applied. Must fail: a record is applied at its own position, and not before it; a record already applied is not applied again.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -868,8 +868,6 @@
+ 		{
+ 			continue;
+ 		}
+-
+-		entry->applied = true;
+ 
+ 		/* the decoder of 9d8b660 reads no TYPE message */
+ 		if (message[0] == 'R' && !spool_relation_superseded(cursor, i) &&

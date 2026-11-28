@@ -1,0 +1,15 @@
+Mutant: a start that removes a last segment without an indexed transaction cuts or creates a segment before the removal is synced. Must fail: the start syncs the directory after it removes a torn last segment, before it cuts the segment before it; a last segment without an index file is removed, the directory synced, and the segment created again from its header; a first segment with a torn header is removed, the directory synced, and the spool starts again.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2363,8 +2363,7 @@
+ 
+ 	/* the index file first, as cleanup does, and on disk before create, which uses O_EXCL */
+ 	if (start->removed &&
+-		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename) ||
+-		 !spool_sync_directory(dirname)))
++		(!unlink_file(start->last.index) || !unlink_file(start->last.segment.filename)))
+ 	{
+ 		return false;
+ 	}

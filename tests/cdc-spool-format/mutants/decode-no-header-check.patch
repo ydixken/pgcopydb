@@ -1,0 +1,17 @@
+Mutant: The decoder reads the length of a record cut before it. Must fail: a relation log record cut at any byte is short.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -623,11 +623,6 @@
+ spool_relation_decode(const char *buf, uint64_t size, SpoolRelationRecord *record)
+ {
+ 	int pos = 16;
+-
+-	if (size < SPOOL_RELATION_HEADER_SIZE)
+-	{
+-		return SPOOL_FRAME_SHORT;
+-	}
+ 
+ 	uint32_t length = pgout_u32(buf, &pos, SPOOL_RELATION_HEADER_SIZE);
+ 

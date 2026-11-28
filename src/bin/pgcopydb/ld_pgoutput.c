@@ -83,7 +83,7 @@ pgout_i16(const char *buf, int *pos, int bufLen)
 }
 
 
-static uint32_t
+uint32_t
 pgout_u32(const char *buf, int *pos, int bufLen)
 {
 	if (*pos + 4 > bufLen)
@@ -108,7 +108,7 @@ pgout_i32(const char *buf, int *pos, int bufLen)
 }
 
 
-static uint64_t
+uint64_t
 pgout_u64(const char *buf, int *pos, int bufLen)
 {
 	if (*pos + 8 > bufLen)
@@ -356,6 +356,40 @@ pgoutput_cache_relation(StreamContext *privateContext,
 }
 
 
+/*
+ * pgoutput_replace_relation caches the RELATION message at buf, from its type
+ * byte, in place of the cached definition of its relation, as the raw spool
+ * logs a changed definition and pgoutput_cache_relation keeps the first one.
+ */
+bool
+pgoutput_replace_relation(StreamContext *privateContext,
+						  const char *buf, int bufLen)
+{
+	int pos = 1;
+	uint32_t relOid = pgout_u32(buf, &pos, bufLen);
+	PgoutputRelationCache *rel = NULL;
+
+	HASH_FIND_INT(privateContext->pgoutputRelationCache, &relOid, rel);
+
+	if (rel != NULL)
+	{
+		PgoutputAttrCache *attr = NULL;
+		PgoutputAttrCache *next = NULL;
+
+		HASH_ITER(hh, rel->attrs, attr, next)
+		{
+			HASH_DEL(rel->attrs, attr);
+			free(attr);
+		}
+
+		HASH_DEL(privateContext->pgoutputRelationCache, rel);
+		free(rel);
+	}
+
+	return pgoutput_cache_relation(privateContext, buf, bufLen, 1);
+}
+
+
 /* ----------
  * Tuple decoder.
  * ----------
@@ -458,6 +492,31 @@ decode_tuple(const char *buf, int bufLen, int *pos,
 }
 
 
+/*
+ * pgoutput_pgcopydb_change is true for a change of a table in schema pgcopydb,
+ * which gives no statement. For TRUNCATE it looks up the relation count as an
+ * OID, as 9d8b660 does, so that both modes drop the same messages.
+ */
+static bool
+pgoutput_pgcopydb_change(StreamContext *privateContext, const char *buf, int bufLen)
+{
+	int pos = 1;
+	uint32_t relOid = pgout_u32(buf, &pos, bufLen);
+	PgoutputRelationCache *rel = NULL;
+
+	HASH_FIND_INT(privateContext->pgoutputRelationCache, &relOid, rel);
+
+	if (rel != NULL && strcmp(rel->nspname, "pgcopydb") == 0)
+	{
+		log_debug("pgoutput: filtering out %c message for pgcopydb.%s",
+				  buf[0], rel->relname);
+		return true;
+	}
+
+	return false;
+}
+
+
 /* ----------
  * Public API: parsePgoutputMessageActionAndXid
  * ----------
@@ -545,16 +604,8 @@ parsePgoutputMessageActionAndXid(LogicalStreamContext *context)
 				log_error("pgoutput: DML message too short (%d bytes)", bufLen);
 				return false;
 			}
-			uint32_t relOid = pgout_u32(buf, &pos, bufLen);
-
-			/* look up relation to check if it's in pgcopydb schema */
-			PgoutputRelationCache *rel = NULL;
-			HASH_FIND_INT(privateContext->pgoutputRelationCache, &relOid, rel);
-
-			if (rel != NULL && strcmp(rel->nspname, "pgcopydb") == 0)
+			if (pgoutput_pgcopydb_change(privateContext, buf, bufLen))
 			{
-				log_debug("pgoutput: filtering out %c message for pgcopydb.%s",
-						  msgtype, rel->relname);
 				metadata->filterOut = true;
 				break;
 			}
@@ -986,6 +1037,11 @@ typedef struct PgoutputColContext
 	char **values;
 } PgoutputColContext;
 
+static bool pgoutput_build_statement(LogicalTransactionStatement *stmt,
+									 PgoutputColContext *ctx,
+									 const char *nspname, const char *relname,
+									 char old_type);
+
 
 /*
  * fill_tuple populates a LogicalMessageTuple from the subset of columns in
@@ -1208,7 +1264,6 @@ parsePgoutputMessage(StreamContext *privateContext,
 
 	(void) catalog_sql_finalize(&query);
 
-	/* Build the context struct */
 	PgoutputColContext ctx = {
 		.colCount = colCount,
 		.colCap = colCap,
@@ -1271,9 +1326,117 @@ parsePgoutputMessage(StreamContext *privateContext,
 		(void) catalog_sql_finalize(&nsq);
 	}
 
-	StreamAction action = (StreamAction) metadata->action;
+	stmt->action = (StreamAction) metadata->action;
 
-	switch (action)
+	bool built = pgoutput_build_statement(stmt, &ctx, nspname, relname, old_type);
+
+	/* free the temporary column arrays */
+	for (int i = 0; i < colCount; i++)
+	{
+		free(values[i]);
+	}
+	free(sections);
+	free(positions);
+	free(names);
+	free(statuses);
+	free(values);
+
+	return built;
+}
+
+
+/*
+ * pgoutput_spool_change is parsePgoutputMessage for performance mode: it fills
+ * in stmt from the change at buf, a pgoutput message from its type byte, or
+ * sets skip for a change that gives no statement.
+ */
+bool
+pgoutput_spool_change(StreamContext *privateContext, const char *buf, int bufLen,
+					  LogicalTransactionStatement *stmt, bool *skip)
+{
+	LogicalStreamContext context = {
+		.private = privateContext, .buffer = buf, .bufferLen = bufLen
+	};
+	PgoutputMessage *msg = &(privateContext->pgoutputMsg);
+
+	*skip = pgoutput_pgcopydb_change(privateContext, buf, bufLen);
+
+	if (*skip)
+	{
+		return true;
+	}
+
+	if (!preparePgoutputMessage(&context))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/* an old tuple sends values for key columns only, and 9d8b660 drops a u */
+	for (int i = 0; i < msg->ncols_old; i++)
+	{
+		if (msg->old_cols[i].status == 'u')
+		{
+			log_error("pgoutput: %s on %s.%s carries no value for replica "
+					  "identity column \"%s\", which is unchanged TOAST data",
+					  msg->action == 'U' ? "UPDATE" : "DELETE",
+					  msg->nspname, msg->relname, msg->old_cols[i].name);
+			return false;
+		}
+	}
+
+	/* the columns as ld_store_insert_pgoutput_message stores them */
+	int count = msg->ncols_old + msg->ncols_new;
+	PgoutputColContext ctx = {
+		.sections = (char (*)[2])calloc(Max(count, 1), 2),
+		.names = (char (*)[PG_NAMEDATALEN])calloc(Max(count, 1), PG_NAMEDATALEN),
+		.statuses = (char (*)[2])calloc(Max(count, 1), 2),
+		.values = (char **) calloc(Max(count, 1), sizeof(char *))
+	};
+
+	if (!ctx.sections || !ctx.names || !ctx.statuses || !ctx.values)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		return false;
+	}
+
+	for (int i = 0; i < count; i++)
+	{
+		bool old = i < msg->ncols_old;
+		int at = old ? i : i - msg->ncols_old;
+		PgoutputColumn *col = old ? &msg->old_cols[at] : &msg->new_cols[at];
+
+		ctx.sections[i][0] = old ? (msg->oldType == 'O' ? 'O' : 'K') :
+							 (msg->action == 'T' ? 'T' : 'N');
+		strlcpy(ctx.names[i], col->name, PG_NAMEDATALEN);
+		ctx.statuses[i][0] = col->status;
+		ctx.values[i] = col->status == 't' ? col->value : NULL;
+	}
+
+	ctx.colCount = count;
+
+	bool built = pgoutput_build_statement(stmt, &ctx, msg->nspname, msg->relname,
+										  msg->oldType);
+
+	free(ctx.sections);
+	free(ctx.names);
+	free(ctx.statuses);
+	free(ctx.values);
+
+	return built;
+}
+
+
+/*
+ * pgoutput_build_statement fills in stmt, whose action is set, from the
+ * columns of ctx and the relation and old tuple type of its message.
+ */
+static bool
+pgoutput_build_statement(LogicalTransactionStatement *stmt,
+						 PgoutputColContext *ctx,
+						 const char *nspname, const char *relname, char old_type)
+{
+	switch (stmt->action)
 	{
 		case STREAM_ACTION_INSERT:
 		{
@@ -1288,7 +1451,7 @@ parsePgoutputMessage(StreamContext *privateContext,
 				log_error(ALLOCATION_FAILED_ERROR);
 				return false;
 			}
-			if (!fill_tuple(&stmt->stmt.insert.new.array[0], &ctx, 'N'))
+			if (!fill_tuple(&stmt->stmt.insert.new.array[0], ctx, 'N'))
 			{
 				return false;
 			}
@@ -1314,11 +1477,11 @@ parsePgoutputMessage(StreamContext *privateContext,
 
 			/* old tuple: section = old_type ('K' or 'O') */
 			char old_sec = (old_type == 'O') ? 'O' : 'K';
-			if (!fill_tuple(&stmt->stmt.update.old.array[0], &ctx, old_sec))
+			if (!fill_tuple(&stmt->stmt.update.old.array[0], ctx, old_sec))
 			{
 				return false;
 			}
-			if (!fill_tuple(&stmt->stmt.update.new.array[0], &ctx, 'N'))
+			if (!fill_tuple(&stmt->stmt.update.new.array[0], ctx, 'N'))
 			{
 				return false;
 			}
@@ -1340,7 +1503,7 @@ parsePgoutputMessage(StreamContext *privateContext,
 			}
 
 			char old_sec = (old_type == 'O') ? 'O' : 'K';
-			if (!fill_tuple(&stmt->stmt.delete.old.array[0], &ctx, old_sec))
+			if (!fill_tuple(&stmt->stmt.delete.old.array[0], ctx, old_sec))
 			{
 				return false;
 			}
@@ -1351,9 +1514,9 @@ parsePgoutputMessage(StreamContext *privateContext,
 		{
 			LogicalMessageTruncate *truncate = &(stmt->stmt.truncate);
 
-			for (int i = 0; i < colCount; i++)
+			for (int i = 0; i < ctx->colCount; i++)
 			{
-				truncate->count += (sections[i][0] == 'T');
+				truncate->count += (ctx->sections[i][0] == 'T');
 			}
 
 			/* an output.db written before 'T' columns existed has one relation */
@@ -1379,12 +1542,12 @@ parsePgoutputMessage(StreamContext *privateContext,
 				truncate->tables[0].relname = quote_and_dup(relname);
 			}
 
-			for (int i = 0, j = 0; i < colCount; i++)
+			for (int i = 0, j = 0; i < ctx->colCount; i++)
 			{
-				if (sections[i][0] == 'T')
+				if (ctx->sections[i][0] == 'T')
 				{
-					truncate->tables[j].nspname = quote_and_dup(names[i]);
-					truncate->tables[j].relname = quote_and_dup(values[i]);
+					truncate->tables[j].nspname = quote_and_dup(ctx->names[i]);
+					truncate->tables[j].relname = quote_and_dup(ctx->values[i]);
 					++j;
 				}
 			}
@@ -1396,21 +1559,10 @@ parsePgoutputMessage(StreamContext *privateContext,
 		default:
 		{
 			log_error("BUG: parsePgoutputMessage called with action %c",
-					  metadata->action);
+					  stmt->action);
 			return false;
 		}
 	}
-
-	/* free the temporary column arrays */
-	for (int i = 0; i < colCount; i++)
-	{
-		free(values[i]);
-	}
-	free(sections);
-	free(positions);
-	free(names);
-	free(statuses);
-	free(values);
 
 	return true;
 }

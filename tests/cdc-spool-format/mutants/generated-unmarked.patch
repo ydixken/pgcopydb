@@ -1,0 +1,14 @@
+Mutant: the statement source does not mark the generated columns of the source catalog. Must fail: an INSERT leaves out a generated column of the source catalog.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3274,7 +3274,7 @@
+ 		return true;
+ 	}
+ 
+-	if (cache != NULL && !markGeneratedColumnsFromStatement(cache, waiting))
++	if (false && !markGeneratedColumnsFromStatement(cache, waiting))
+ 	{
+ 		log_error("Failed to mark generated columns from transaction");
+ 		return false;

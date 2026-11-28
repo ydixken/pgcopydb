@@ -1,0 +1,14 @@
+Mutant: the cut stops by the position the BEGIN carries instead of the commit position. Must fail: the rows check of the cut at the BEGIN position, which applies the transaction the cut leaves.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -1122,7 +1122,7 @@ stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context)
+ 		}
+ 
+ 		/* a transaction committing above the cut is not applied */
+-		if (cut.endpos != InvalidXLogRecPtr && cut.lsn < record->endLSN)
++		if (cut.endpos != InvalidXLogRecPtr && cut.lsn < record->finalLSN)
+ 		{
+ 			log_info("Apply leaves txn %u committing at %X/%X above the cut "
+ 					 "%X/%X of endpos %X/%X",

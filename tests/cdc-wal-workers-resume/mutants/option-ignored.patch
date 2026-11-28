@@ -1,0 +1,16 @@
+Mutant: clone, fork and follow parse --follow-mode and ignore it. Must fail: the mode case check "pgcopydb follow --follow-mode performance --wal-high-traffic-tables".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -1471,7 +1471,9 @@
+ 
+ 			case 1009:      /* --follow-mode */
+ 			{
+-				if (!cli_parse_follow_mode(optarg, &(options.followMode)))
++				FollowMode ignored = FOLLOW_MODE_SQLITE;
++
++				if (!cli_parse_follow_mode(optarg, &ignored))
+ 				{
+ 					/* errors have already been logged */
+ 					exit(EXIT_CODE_BAD_ARGS);

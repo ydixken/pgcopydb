@@ -1,0 +1,23 @@
+Mutant: the segment of the next record counts as a later one. Must fail: a reader waits at the end of an index file until the next segment has its index file.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2743,7 +2743,7 @@
+ 		if (!closed)
+ 		{
+ 			/* receive creates a later segment only after it wrote the record */
+-			if (later > reader->nextSeq)
++			if (later >= reader->nextSeq)
+ 			{
+ 				log_error("Spool directory \"%s\" holds no index record of "
+ 						  "sequence number %" PRIu64 ", and segment %016" PRIX64
+@@ -2758,7 +2758,7 @@
+ 			}
+ 
+ 			/* with one, read again: receive may have written it since the read */
+-			if (later <= reader->nextSeq)
++			if (later < reader->nextSeq)
+ 			{
+ 				return true;
+ 			}

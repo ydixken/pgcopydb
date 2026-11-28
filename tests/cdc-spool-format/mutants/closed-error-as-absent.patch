@@ -1,0 +1,14 @@
+Mutant: a reader that cannot look up the next index file takes it for one not written yet. Must fail: a reader that cannot look up the index file of the next segment fails with an ERROR line, and does not wait.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2497,7 +2497,7 @@
+ 	*closed = access(path, F_OK) == 0;
+ 
+ 	/* any other error would read as a file not written yet, and the reader wait */
+-	if (!*closed && errno != ENOENT)
++	if (false && !*closed && errno != ENOENT)
+ 	{
+ 		log_error("Failed to check spool file \"%s\": %m", path);
+ 		return false;

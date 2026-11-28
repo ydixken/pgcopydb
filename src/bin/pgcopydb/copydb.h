@@ -342,6 +342,7 @@ typedef struct CopyDataSpec
 
 	int walWorkers;
 	char walHighTrafficTables[WAL_HIGH_TRAFFIC_TABLES_BUFSIZE];
+	FollowMode followMode;
 
 	/*
 	 * Database name for log messages in per-database workers.  Empty string
@@ -449,7 +450,8 @@ bool copydb_close_snapshot(CopyDataSpec *copySpecs);
 bool copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 											const char *logrep_pguri,
 											ReplicationSlot *slot,
-											char *cdcPathDir);
+											char *cdcPathDir,
+											uint64_t maxSegmentSize);
 
 /* extensions.c */
 bool copydb_extension_options_are_consistent(CopyDataSpec *specs);
@@ -631,6 +633,8 @@ bool sentinel_update_write_flush_lsn(DatabaseCatalog *catalog,
 									 uint64_t flush_lsn);
 
 bool sentinel_update_replay_lsn(DatabaseCatalog *catalog, uint64_t replay_lsn);
+bool sentinel_update_replay_lsn_guarded(DatabaseCatalog *catalog,
+										uint64_t replay_lsn);
 
 bool sentinel_get(DatabaseCatalog *catalog, CopyDBSentinel *sentinel);
 bool sentinel_fetch(SQLiteQuery *query);
@@ -642,6 +646,7 @@ bool sentinel_sync_recv(DatabaseCatalog *catalog,
 
 bool sentinel_sync_apply(DatabaseCatalog *catalog,
 						 uint64_t replay_lsn,
+						 bool guarded,
 						 CopyDBSentinel *sentinel);
 
 

@@ -1,0 +1,13 @@
+Mutant: the statement source takes the end of the frames of an index record for its end, with or without a COMMIT. Must fail: the frames of an index record that hold no COMMIT are an error, and no COMMIT comes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3339,6 +3339,7 @@
+ 
+ 		if (done)
+ 		{
++			return true;
+ 			log_error("Index record %" PRIu64
+ 					  " of \"%s\" is damaged: its frames in \"%s\" end at offset %" PRIu64
+ 					  " without a COMMIT",

@@ -1,0 +1,14 @@
+Mutant: a relation log that could not be read is reported as damage below its synced length too. Must fail: a relation log that cannot be read fails the start.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1895,7 +1895,7 @@
+ 		return false;
+ 	}
+ 
+-	if (!read_file(log->path, &bytes, &size))
++	if (!read_file(log->path, &bytes, &size) && synced == 0)
+ 	{
+ 		return false;
+ 	}

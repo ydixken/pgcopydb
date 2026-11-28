@@ -4127,6 +4127,21 @@ pgsql_timestamptz_to_string(TimestampTz ts, char *str, size_t size)
 
 
 /*
+ * The raw spool stores the text the walsender prints, which a role, database
+ * or reload setting changes. The values are the ones the fork's compare pins
+ * for the same reason (compare_open_catalog_session).
+ */
+static GUC replicationValueSettings[] = {
+	{ "extra_float_digits", "3" },
+	{ "IntervalStyle", "'postgres'" },
+	{ "DateStyle", "'ISO, YMD'" },
+	{ "bytea_output", "'hex'" },
+	{ "TimeZone", "'UTC'" },
+	{ NULL, NULL }
+};
+
+
+/*
  * Send the START_REPLICATION logical replication command.
  */
 bool
@@ -4221,6 +4236,15 @@ pgsql_start_replication(LogicalStreamClient *client)
 			log_info("Sending standby status every %d ms, "
 					 "wal_sender_timeout is %d ms",
 					 interval, context.intVal);
+		}
+
+		if (client->pinValueOutput &&
+			!pgsql_set_gucs(pgsql, replicationValueSettings))
+		{
+			log_error("Failed to set the value output settings on the "
+					  "replication connection, see above for details");
+			destroyPQExpBuffer(query);
+			return false;
 		}
 	}
 
@@ -4632,6 +4656,8 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 		context->cur_record_lsn = cur_record_lsn;
 		context->buffer = copybuf + hdr_len;
 		context->bufferLen = r - hdr_len;
+		context->copyData = copybuf;
+		context->copyDataLen = r;
 		context->now = client->now;
 
 		/* the tracking LSN information is updated in the writeFunction */

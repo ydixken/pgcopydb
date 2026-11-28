@@ -1,0 +1,14 @@
+Mutant: the segment before a removed one can be the removed one. Must fail: a last segment with a torn header and an empty index file is removed with it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1641,7 +1641,7 @@
+ 
+ 	for (int i = 0; i < count; i++)
+ 	{
+-		if (seqs[i] < bound && seqs[i] > highest)
++		if (seqs[i] <= bound && seqs[i] > highest)
+ 		{
+ 			highest = seqs[i];
+ 		}

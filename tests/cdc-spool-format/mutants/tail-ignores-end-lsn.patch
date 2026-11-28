@@ -1,0 +1,14 @@
+Mutant: the start takes a last index record whose end LSN is not the one of its COMMIT. Must fail: a last index record whose end LSN is not the one of its COMMIT ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2107,7 +2107,7 @@
+ 	}
+ 
+ 	/* a valid record of another transaction would report that one as durable */
+-	if (checked && endLSN != tail->last.endLSN)
++	if (false && checked && endLSN != tail->last.endLSN)
+ 	{
+ 		log_error("Spool file \"%s\" ends its last indexed transaction with a "
+ 				  "COMMIT of end LSN %X/%X, and its index record holds %X/%X",

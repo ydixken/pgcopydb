@@ -1,0 +1,14 @@
+Mutant: a start whose create of the next segment fails returns as if it had opened the writer. Must fail: a start that cannot sync the segment it creates again fails with an ERROR line that names it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2371,7 +2371,7 @@
+ 
+ 	if (start->tail == NULL)
+ 	{
+-		return spool_writer_create(writer, dirname, &start->header, maxSegmentSize);
++		return spool_writer_create(writer, dirname, &start->header, maxSegmentSize) || true;
+ 	}
+ 
+ 	return spool_tail_cut(start->tail) &&

@@ -1,0 +1,24 @@
+Mutant: the start checks the last indexed transaction after it cut the relation log. Must fail: a segment that ends before its last index record ends every start with an error, and no file changes; a last indexed transaction that does not end with a COMMIT ends every start with an error, and no file changes; a last indexed transaction with a damaged frame ends every start with an error, and no file changes; a segment with indexed transactions and a torn header ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2305,8 +2305,7 @@
+ 	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
+ 					  start->last.last.relationLogEnd;
+ 
+-	if ((start->tail != NULL && !spool_tail_check(start->tail)) ||
+-		!spool_relations_read(&start->relations, dirname, synced))
++	if (!spool_relations_read(&start->relations, dirname, synced))
+ 	{
+ 		return false;
+ 	}
+@@ -2374,7 +2373,7 @@
+ 		return spool_writer_create(writer, dirname, &start->header, maxSegmentSize);
+ 	}
+ 
+-	return spool_tail_cut(start->tail) &&
++	return spool_tail_check(start->tail) && spool_tail_cut(start->tail) &&
+ 		   spool_tail_append(start->tail, writer, dirname, maxSegmentSize);
+ }
+ 

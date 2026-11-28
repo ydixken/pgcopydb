@@ -1,0 +1,14 @@
+Mutant: a read of frames takes a whole write block, also past the end of the transaction. Must fail: a reader returns the transactions of every segment in commit order, with their frames.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1741,7 +1741,7 @@
+ 		return true;
+ 	}
+ 
+-	uint64_t want = Max(need, Min(frames->end - frames->offset, SPOOL_BLOCK_SIZE));
++	uint64_t want = Max(need, SPOOL_BLOCK_SIZE);
+ 
+ 	resetPQExpBuffer(buffer);
+ 	frames->bufferStart = frames->offset;

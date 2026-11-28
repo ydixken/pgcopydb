@@ -1,0 +1,23 @@
+Mutant: a start reads no stored replay position, so it refuses a cut that drops only transactions the target already holds. Must fail: a cut below the position the slot confirmed is taken when the stored replay position is at or above it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2717,7 +2717,7 @@
+ 	uint64_t dropped = start->last.dropped <= confirmedFlushLSN ?
+ 					   start->last.dropped : InvalidXLogRecPtr;
+ 
+-	if (damaged && kept < confirmedFlushLSN && storedW < confirmedFlushLSN)
++	if (damaged && kept < confirmedFlushLSN)
+ 	{
+ 		/* the cut keeps the tail up to its last indexed transaction */
+ 		if (start->tail != NULL &&
+@@ -2736,7 +2736,7 @@
+ 			return false;
+ 		}
+ 
+-		if (dropped > storedW)
++		if (dropped > InvalidXLogRecPtr)
+ 		{
+ 			log_error("Spool file \"%s\" holds no valid index record at offset %"
+ 					  PRIu64 ", and a cut there drops the transaction that ends "

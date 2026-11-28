@@ -1,0 +1,14 @@
+Mutant: a reader of a spool without a segment looks for sequence number 0. Must fail: a reader opened on a directory with an empty relation log and no segment reads the first transaction once it is there.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2673,7 +2673,7 @@
+ 	}
+ 
+ 	/* without an index file, the next record is the first one of the lowest segment */
+-	if (count == 0 && spool_lowest(&segments) > 0)
++	if (count == 0)
+ 	{
+ 		reader->nextSeq = spool_lowest(&segments);
+ 	}

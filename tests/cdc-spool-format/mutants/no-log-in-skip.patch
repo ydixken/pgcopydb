@@ -1,0 +1,14 @@
+Mutant: The tracker hides the RELATION and TYPE messages of a skipped transaction. Must fail: a RELATION inside a transaction sent again is logged at the position of the next transaction.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1355,7 +1355,7 @@
+ 		return false;
+ 	}
+ 
+-	if ((type == 'R' || type == 'Y') &&
++	if ((type == 'R' || type == 'Y') && writer->state != SPOOL_TXN_SKIP &&
+ 		!spool_writer_log_relation(writer, message, length, type, lsn))
+ 	{
+ 		return false;

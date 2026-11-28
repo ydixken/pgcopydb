@@ -1,0 +1,14 @@
+Mutant: clone and follow never check the plugin of performance mode. Must fail: the mode case check "env PGCOPYDB_FOLLOW_MODE=performance pgcopydb follow --resume --dir".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -588,7 +588,7 @@
+ 	int n = options->walWorkers;
+ 	ReplicationSlot *slot = &(options->slot);
+ 
+-	if (!cli_validate_follow_mode(options))
++	if (false && !cli_validate_follow_mode(options))
+ 	{
+ 		/* errors have already been logged */
+ 		return false;

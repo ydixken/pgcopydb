@@ -1,0 +1,14 @@
+Mutant: the start that appends to the last segment cuts the relation log without the length of its last index record. Must fail: a relation log whose valid records end before the length that the last index record holds ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2303,7 +2303,7 @@
+ 
+ 	/* the last valid index record proves the relation log synced up to its length */
+ 	uint64_t synced = start->removed ? start->before.last.relationLogEnd :
+-					  start->last.last.relationLogEnd;
++					  0;
+ 
+ 	if ((start->tail != NULL && !spool_tail_check(start->tail)) ||
+ 		!spool_relations_read(&start->relations, dirname, synced))

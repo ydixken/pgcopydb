@@ -1,0 +1,16 @@
+Mutant: a cleanup pass also takes the last segment and the one before it. Must fail: a cleanup pass keeps the last segment and the one before it, so that a torn last segment has a segment before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index a798b76..93f7fbf 100644
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2691,7 +2691,7 @@ spool_cleanup(const char *dirname, uint64_t storedW, bool dry_run,
+ 	uint64_t keep = spool_highest_below(&segments, last);
+ 	uint64_t seq = spool_lowest(&segments);
+ 
+-	while (cleaned && seq > 0 && seq != keep && seq != last)
++	while (cleaned && seq > 0)
+ 	{
+ 		SpoolHeader header = { 0 };
+ 		bool headed = false;

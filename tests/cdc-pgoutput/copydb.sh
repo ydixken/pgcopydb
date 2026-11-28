@@ -58,6 +58,12 @@ SHAREDIR=${XDG_DATA_HOME:-/var/lib/postgres/.local/share}/pgcopydb
 
 ls -la ${SHAREDIR}/
 
+. /var/lib/postgres/spool-probe.sh
+
+# The decoded columns live in output.db, which performance mode does not write.
+# There the statement pins below answer which columns reach a WHERE clause.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
+
 OUTPUTDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-output.db' -type f | head -1)
 
 sqlite3 ${OUTPUTDB} "select count(*) as output_rows from output;"
@@ -144,6 +150,14 @@ else
   cat /tmp/result.jsonl | head -5
 fi
 
+else
+
+spool_txns=$(spool_commits)
+echo "raw spool transactions: ${spool_txns}"
+test "${spool_txns}" -gt 0
+
+fi
+
 #
 # Run prefetch again — should be a no-op (idempotent).
 #
@@ -159,6 +173,8 @@ pgcopydb stream catchup --resume --endpos "${lsn}" -vv
 #
 # replayDB now exists: validate the replay table and the SQL templates.
 #
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
+
 REPLAYDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-replay.db' -type f | head -1)
 
 sqlite3 ${REPLAYDB} "select count(*) as replay_rows from replay;"
@@ -167,6 +183,22 @@ sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
   "select s.sql from stmt s join replay r on r.stmt_hash = s.hash where r.action not in ('B','C','R','K','X','E') group by s.hash order by min(r.id)" \
   > /tmp/stmt-actual.sql
 diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
+
+else
+
+# The raw spool keeps no statement table: the printer builds the same text from
+# the frames. It drops the TRUNCATE, which carries no argument list, and
+# stmt.sql holds that one as two lines, the statement and its trailing newline.
+spool_stmts > /tmp/stmt-actual.sql
+grep -v -e '^TRUNCATE ONLY ' -e '^$' /usr/src/pgcopydb/stmt.sql |
+    diff - /tmp/stmt-actual.sql
+
+fi
+
+# pin the statement text and transaction shape that the SQLite path applies
+. /var/lib/postgres/spool-probe.sh
+spool_apply_shape > /tmp/apply-actual.sql
+diff /usr/src/pgcopydb/apply.sql /tmp/apply-actual.sql
 
 # Applying the same endpos again should be a no-op (already reached).
 pgcopydb stream catchup --resume --endpos "${lsn}" -vv
@@ -183,6 +215,11 @@ test "${src_count}" -eq "${tgt_count}"
 #
 # Multi-row DELETE batching validation (issue #828).
 #
+# One replay row per batched statement, which only the replay table counts.
+# In performance mode apply.sql above pins the same batching: it holds one
+# EXECUTE of each of these two statements.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
+
 multi_delete_count=$(sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
     "select count(*)
      from stmt s
@@ -200,6 +237,8 @@ multi_delete_composite_count=$(sqlite3 -init /dev/null -list -noheader ${REPLAYD
 
 echo "multi_delete_composite_count (expected 1 batched statement): ${multi_delete_composite_count}"
 test "${multi_delete_composite_count}" -eq 1
+
+fi
 
 src_multi=`psql -AtqX -d ${PGCOPYDB_SOURCE_PGURI} -c "select count(*) from multi_delete_test"`
 tgt_multi=`psql -AtqX -d ${PGCOPYDB_TARGET_PGURI} -c "select count(*) from multi_delete_test"`

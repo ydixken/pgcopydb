@@ -1,0 +1,17 @@
+Mutant: pgcopydb list spool runs with an option it does not know. Must fail: pgcopydb list spool refuses an unknown option.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_list.c
++++ b/src/bin/pgcopydb/cli_list.c
+@@ -2296,11 +2296,6 @@
+ 		}
+ 	}
+ 
+-	if (errors > 0)
+-	{
+-		exit(EXIT_CODE_BAD_ARGS);
+-	}
+-
+ 	/* publish our option parsing in the global variable */
+ 	listDBoptions = options;
+ 

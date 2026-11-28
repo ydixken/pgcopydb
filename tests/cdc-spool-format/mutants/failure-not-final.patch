@@ -1,0 +1,23 @@
+Mutant: a failed write or sync leaves the segment open, as before the fix. Must fail: after a failed write, spool_sync and spool_append refuse the segment and write nothing; after a failed fsync, spool_sync refuses the segment, though a second fsync returns 0.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -263,16 +263,7 @@ spool_fsync(int fd, const char *path, bool directory, uint64_t length)
+ static void
+ spool_fail(SpoolSegment *segment)
+ {
+-	if (segment->fd >= 0)
+-	{
+-		(void) close(segment->fd);
+-	}
+-
+-	free(segment->block);
+-
+-	segment->fd = -1;
+-	segment->block = NULL;
+-	segment->blockLength = 0;
++	(void) segment;
+ }
+ 
+ 

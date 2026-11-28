@@ -1,0 +1,30 @@
+Mutant: the start does not read the frames of the last indexed transaction. Must fail: a last indexed transaction with a damaged frame ends every start with an error, and no file changes; a segment that ends before its last index record ends every start with an error, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2080,21 +2080,9 @@
+ 	sformat(frames.filename, sizeof(frames.filename), "%s", segment->filename);
+ 	initPQExpBuffer(&frames.buffer);
+ 
+-	while (checked && !done)
+-	{
+-		const char *message = NULL;
+-		uint32_t length = 0;
+-
+-		checked = spool_frames_next(&frames, &message, &length, &done);
+-
+-		if (checked && !done)
+-		{
+-			int pos = SPOOL_XLOGDATA_HEADER_SIZE + 10;
+-
+-			type = message[SPOOL_XLOGDATA_HEADER_SIZE];
+-			endLSN = type == 'C' ? pgout_u64(message, &pos, (int) length) : 0;
+-		}
+-	}
++	(void) done;
++	type = 'C';
++	endLSN = tail->last.endLSN;
+ 
+ 	termPQExpBuffer(&frames.buffer);
+ 

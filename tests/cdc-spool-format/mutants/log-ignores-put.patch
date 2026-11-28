@@ -1,0 +1,20 @@
+Mutant: A failed write to the relation log is not reported. Must fail: a RELATION that the full volume refuses is an error that names the relation log, and its frame is not appended.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1061,10 +1061,11 @@
+ 	spool_put_u32(head + 16, bodyLength);
+ 	spool_put_u32(crcBytes, spool_relation_crc(head, body, bodyLength));
+ 
+-	return spool_put(log, head, sizeof(head)) &&
++	(void) (spool_put(log, head, sizeof(head)) &&
+ 		   spool_put(log, body, bodyLength) &&
+-		   spool_put(log, crcBytes, sizeof(crcBytes)) &&
+-		   spool_relation_remember(writer, body, bodyLength);
++		   spool_put(log, crcBytes, sizeof(crcBytes)));
++
++	return spool_relation_remember(writer, body, bodyLength);
+ }
+ 
+ 

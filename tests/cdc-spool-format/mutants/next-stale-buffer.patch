@@ -1,0 +1,13 @@
+Mutant: the frames of a record are read from the bytes of the last one. Must fail: a reader returns the transactions of every segment in commit order, with their frames.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2714,7 +2714,6 @@
+ 				reader->frames.end = record->endOffset;
+ 
+ 				/* the buffer may hold the bytes of another segment */
+-				resetPQExpBuffer(&reader->frames.buffer);
+ 				reader->frames.bufferStart = record->beginOffset;
+ 
+ 				*found = true;

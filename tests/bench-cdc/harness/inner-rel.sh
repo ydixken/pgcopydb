@@ -2,7 +2,7 @@
 # pgcopydb steps run inside the runner container, one follow in $W/rel with
 # slot and origin bench (bench_w1.. for WAL workers). The variant comes from
 # the environment: N workers, WW=1 passes --wal-workers N, HT the hot tables.
-# Usage: inner-rel.sh init | endpos LSN | start | wait-receive SECS | apply-on | wait-exit SECS | cleanup
+# Usage: inner-rel.sh init | endpos LSN | start | wait-receive SECS | apply-on | wait-exit SECS | drain LSN | cleanup
 set -euo pipefail
 
 W=${W:-/var/run/pgcopydb}
@@ -10,6 +10,9 @@ D=$W/rel
 L=$W/logs
 FLOG=$L/follow.log
 N=${N:?N} WW=${WW:?WW} HT=${HT:-}
+# RL=1: the variant drains the slot with pg_recvlogical instead of applying
+RL=${RL:-0}
+RL_SLOT=bench_rl
 cmd=${1:?command}
 mkdir -p "$L"
 
@@ -66,6 +69,9 @@ case $cmd in
     pgcopydb stream sentinel set prefetch --dir "$D" 2>>"$L/sentinel.log"
     pgcopydb stream sentinel get --dir "$D" --json 2>>"$L/sentinel.log" | tee "$L/sentinel-init.json" |
       grep -Eq '"apply": *false' || { echo "inner-rel.sh: sentinel apply is not off" >&2; exit 1; }
+    # the drain's slot is created where follow created its own, before the backlog,
+    # so both variants retain WAL from the same point
+    if ((RL)); then src "select pg_create_logical_replication_slot('$RL_SLOT', 'pgoutput')" >/dev/null; fi
     ;;
   endpos)
     pgcopydb stream sentinel set endpos --dir "$D" "${2:?LSN}" >/dev/null 2>>"$L/sentinel.log"
@@ -103,6 +109,8 @@ case $cmd in
     echo "spool_open_t=$(first 'output CDC file')"
     echo "spool_growth_t=$(awk -v s0="${s0:-0}" '$2 > s0 { print $1; exit }' "$L/spool.tsv")"
     echo "spool_bytes_recv=$(du -sb "$D/cdc" | cut -f1)"
+    # a build that ignores PGCOPYDB_FOLLOW_MODE writes no segment, so PERF-1 reads this
+    echo "spool_segments=$(find "$D/cdc" -maxdepth 1 -name '*.seg' | grep -c . || true)"
     # each receive's last word on what it wrote and flushed to the spool
     fin=$(grep -E 'Streamed up to write_lsn .* stopping: endpos is' "$FLOG" || true)
     echo "recv_write_lsns=$(sed -n 's/.*write_lsn \([0-9A-F/]*\),.*/\1/p' <<<"$fin" | paste -sd, -)"
@@ -144,8 +152,23 @@ case $cmd in
     fi
     echo "spool_bytes_exit=$(du -sb "$D/cdc" | cut -f1)"
     ;;
+  drain)
+    # the pgoutput options that follow passes (cli_common.c), and the endpos of the run
+    endpos=${2:?LSN}
+    start=$(date +%s.%N)
+    rc=0
+    pg_recvlogical -d "$PGCOPYDB_SOURCE_PGURI" --slot "$RL_SLOT" --start --no-loop \
+      --endpos "$endpos" -o proto_version=1 -o publication_names=bench \
+      -f "$W/rl.out" >"$L/rl.log" 2>&1 || rc=$?
+    echo "rl_start_t=$start"
+    echo "rl_end_t=$(date +%s.%N)"
+    echo "rl_rc=$rc"
+    echo "rl_bytes=$(stat -c %s "$W/rl.out" 2>/dev/null || echo 0)"
+    ;;
   cleanup)
     pgcopydb stream cleanup --dir "$D" --slot-name bench --origin bench >>"$L/cleanup.log" 2>&1
+    # the drain's slot is not pgcopydb's, so stream cleanup leaves it behind
+    if ((RL)); then src "select pg_drop_replication_slot('$RL_SLOT')" >/dev/null; fi
     ;;
   *)
     echo "inner-rel.sh: unknown command $cmd" >&2

@@ -1,0 +1,14 @@
+Mutant: the statement source keeps a change that the adapter could not build. Must fail: an UPDATE whose key column is unchanged TOAST data is an error that names relation and column.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_transform.c
++++ b/src/bin/pgcopydb/ld_transform.c
+@@ -3398,7 +3398,7 @@
+ 				strlcpy(stmt->timestamp, spooled.begin.timestamp,
+ 						sizeof(stmt->timestamp));
+ 
+-				if (!pgoutput_spool_change(privateContext, buf, bufLen, stmt, &skip))
++				if (!pgoutput_spool_change(privateContext, buf, bufLen, stmt, &skip) && false)
+ 				{
+ 					log_error("Failed to decode the change at %X/%X of spooled "
+ 							  "transaction %" PRIu64, LSN_FORMAT_ARGS(lsn),

@@ -67,6 +67,9 @@ test ${failed} -eq 0
 
 # pin the generated SQL: keyless tables use one (tableoid, ctid) per change
 SHAREDIR=${XDG_DATA_HOME:-/var/lib/postgres/.local/share}/pgcopydb
+. /var/lib/postgres/spool-probe.sh
+
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 REPLAYDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-replay.db' -type f | head -1)
 test -s "${REPLAYDB}"
 
@@ -74,6 +77,16 @@ sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
   "select s.sql from stmt s join replay r on r.stmt_hash = s.hash where r.action not in ('B','C','R','K','X','E') group by s.hash order by min(r.id)" \
   > /tmp/stmt-actual.sql
 diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
+else
+# the raw spool keeps no statement table, and the printer builds the same text
+spool_stmts > /tmp/stmt-actual.sql
+diff /usr/src/pgcopydb/stmt.sql /tmp/stmt-actual.sql
+fi
+
+# pin the statement text and transaction shape that the SQLite path applies
+. /var/lib/postgres/spool-probe.sh
+spool_apply_shape > /tmp/apply-actual.sql
+diff /usr/src/pgcopydb/apply.sql /tmp/apply-actual.sql
 
 # cleanup replication slot + origin
 pgcopydb stream cleanup

@@ -1,0 +1,23 @@
+Mutant: the start cuts the spool whatever the replication slot confirmed as flushed. Must fail: a valid index record above the damage whose transaction ends at or below the position the slot confirmed ends every start with an error that names both positions, and no file changes; a torn record at the tail of the index file ends every start with an error when the frames above the cut hold a COMMIT at or below the position the slot confirmed, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2736,17 +2736,6 @@
+ 			return false;
+ 		}
+ 
+-		if (dropped > storedW)
+-		{
+-			log_error("Spool file \"%s\" holds no valid index record at offset %"
+-					  PRIu64 ", and a cut there drops the transaction that ends "
+-							 "at %X/%X, at or below the %X/%X that the "
+-							 "replication slot confirmed as flushed",
+-					  start->last.index, start->last.keep,
+-					  LSN_FORMAT_ARGS(dropped),
+-					  LSN_FORMAT_ARGS(confirmedFlushLSN));
+-			return false;
+-		}
+ 	}
+ 
+ 	if (start->last.gap)

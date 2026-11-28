@@ -1,0 +1,14 @@
+Mutant: A message that cannot be copied is reported as kept. Must fail: a changed definition that cannot be kept in memory is an error; a writer that cannot keep the definitions of its relation log in memory fails.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -950,7 +950,7 @@
+ 	if (PQExpBufferBroken(&last->message))
+ 	{
+ 		log_error(ALLOCATION_FAILED_ERROR);
+-		return false;
++		return true;
+ 	}
+ 
+ 	return true;

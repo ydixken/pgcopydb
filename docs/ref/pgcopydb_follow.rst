@@ -161,6 +161,18 @@ Finally, it is also possible to setup the streaming replication options
 before using the ``pgcopydb follow`` command: see the
 :ref:`pgcopydb_stream_setup` and :ref:`pgcopydb_stream_cleanup` commands.
 
+A column added while follow runs
+--------------------------------
+
+A column that is added to a table on the source and on the target while
+``pgcopydb follow`` runs reaches the target in performance mode
+(``--follow-mode performance``): pgoutput sends the new definition of the
+table, and the changes after it carry the added column.
+
+In sqlite mode, which is the default, the first definition that pgoutput sent
+for a table wins for the rest of the run, as it does in the releases before
+performance mode.
+
 Replica Identity and lack of Primary Keys
 -----------------------------------------
 
@@ -318,6 +330,7 @@ __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-S
     Last write-ahead log location written to disk by this standby server.
 
     In the pgcopydb case, the sentinel field write_lsn is the position written to the SQLite CDC store by the streaming process, which may still be in an uncommitted batch.
+    In performance mode it is the position receive appended to the current spool segment, which may not be synced yet.
 
   - ``flush_lsn``
 
@@ -332,6 +345,8 @@ __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-S
     The earlier prefetch acknowledgement may exceed this applied position, so wire flush reports can decrease at that transition even though the slot's confirmed_flush_lsn does not.
     The receiver checks retained CDC files at startup, including rotated files, before allowing this keepalive advancement.
 
+    In performance mode flush_lsn is the commit position of the newest index record that receive has synced, and the write order of :ref:`raw_spool` makes that record proof that its frames and relation definitions are durable too.
+
   - ``replay_lsn``
 
     The Postgres documentation for ``pg_stat_replication.replay_lsn`` is:
@@ -342,6 +357,8 @@ __ https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-S
     __ https://www.postgresql.org/docs/current//replication-origins.html
 
     Apply writes a new replay_lsn at most once per second, and at once when it reaches endpos or exits, so replay_lsn can trail the target replication origin by about a second.
+
+    In performance mode it is the same position, read from the raw spool rather than from the SQLite store, and it is the low-water mark that decides which spool segments cleanup may delete.
 
     The streaming process uses replay_lsn to certify its feedback to the source.
     The `pg_stat_replication`__ flush_lsn and replay_lsn may exceed sentinel.replay_lsn after a primary keepalive confirms progress through WAL with no pending replicated changes.
@@ -505,6 +522,13 @@ The following options are available to ``pgcopydb follow``:
   transaction will not be consumed and will be replayed again when the slot
   is next read from. Individual messages are never truncated.
 
+  In ``performance`` mode, see :ref:`raw_spool`, exit status 0 with endpos set
+  means that apply recorded its finish at that endpos. A run that a signal
+  stops short of endpos exits with an error and records none, and the next run
+  resumes to endpos. A transaction that commits above endpos is left for a
+  later run even when the spool holds all of it, so the origin can stay below
+  endpos after a clean finish.
+
   See also documentation for `pg_recvlogical`__.
 
   __ https://www.postgresql.org/docs/current/app-pgrecvlogical.html
@@ -555,6 +579,14 @@ The following options are available to ``pgcopydb follow``:
 
   A value above 1 requires a source running Postgres 13 or later, the pgoutput plugin, a publication that pgcopydb manages (no ``--publication``), no ``--all-databases``, a slot name of at most 51 bytes and an origin of at most 59 bytes.
   The slot name and the origin must not end in ``_w<digits>`` or ``_t<digits>``, because WAL workers name their own slots, origins and publications that way.
+
+--follow-mode
+
+  Pipeline that the follow processes use, ``sqlite`` (the default) or ``performance``.
+  ``sqlite`` is the SQLite CDC store, at every worker count.
+  ``performance`` writes the raw spool of :ref:`raw_spool` instead, and it requires ``--plugin pgoutput``, refuses ``--wal-high-traffic-tables``, and for now requires ``--wal-workers 1``.
+  The mode belongs to the work directory: a run whose mode differs from the recorded one is refused with ``Refusing the work directory:`` before it writes.
+  A directory written by a pgcopydb that had no follow mode is a ``sqlite`` directory.
 
 --wal-high-traffic-tables
 
@@ -611,6 +643,11 @@ PGCOPYDB_WAL_WORKERS
   Number of WAL workers, from 1 to 16.
   When ``--wal-workers`` is omitted from the command line, then this environment variable is used.
   Only ``pgcopydb clone`` and ``pgcopydb follow`` use it: ``pgcopydb snapshot --follow`` always sets up a single WAL worker.
+
+PGCOPYDB_FOLLOW_MODE
+
+  Follow pipeline, ``sqlite`` or ``performance``.
+  When ``--follow-mode`` is omitted from the command line, then this environment variable is used.
 
 PGCOPYDB_WAL_HIGH_TRAFFIC_TABLES
 

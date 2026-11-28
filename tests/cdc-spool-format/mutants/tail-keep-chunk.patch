@@ -1,0 +1,14 @@
+Mutant: the start takes the offset of a record in its read chunk for its offset in the index file. Must fail: a start on an index file of more records than one read chunk keeps them all, and cuts only its torn tail.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2217,7 +2217,7 @@
+ 			}
+ 
+ 			tail->last = record;
+-			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
++			tail->keep = i + SPOOL_INDEX_RECORD_SIZE;
+ 		}
+ 	}
+ 

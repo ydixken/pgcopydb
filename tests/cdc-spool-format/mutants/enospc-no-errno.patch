@@ -1,0 +1,14 @@
+Mutant: a failed write is logged without %m. Must fail: a full volume fails spool_sync with an ERROR line that names the file and the system error.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -316,7 +316,7 @@ spool_write(SpoolSegment *segment, const char *buf, size_t length)
+ 				errno = ENOSPC;
+ 			}
+ 
+-			log_error("Failed to write to spool file \"%s\": %m",
++			log_error("Failed to write to spool file \"%s\"",
+ 					  segment->filename);
+ 			return false;
+ 		}

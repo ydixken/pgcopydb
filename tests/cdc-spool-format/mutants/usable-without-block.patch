@@ -1,0 +1,14 @@
+Mutant: spool_usable checks the descriptor and not the write block. Must fail: a segment without a write block is refused.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -279,7 +279,7 @@
+ static bool
+ spool_usable(const SpoolSegment *segment)
+ {
+-	if (segment->fd < 0 || segment->block == NULL)
++	if (segment->fd < 0)
+ 	{
+ 		log_error("BUG: refusing spool file \"%s\", which was not opened, "
+ 				  "or which a failed write, sync or truncate closed",

@@ -98,6 +98,7 @@ typedef struct PgoutputMessage
 /* Forward declarations to avoid circular includes */
 struct StreamContext;
 struct DatabaseCatalog;
+struct LogicalTransactionStatement;
 
 
 bool parsePgoutputMessageActionAndXid(LogicalStreamContext *context);
@@ -106,6 +107,14 @@ bool parsePgoutputMessage(struct StreamContext *context,
 						  struct DatabaseCatalog *outputDB,
 						  int64_t outputId);
 void free_pgoutput_message(PgoutputMessage *msg);
+bool pgoutput_replace_relation(struct StreamContext *context,
+							   const char *buf, int bufLen);
+bool pgoutput_spool_change(struct StreamContext *context,
+						   const char *buf, int bufLen,
+						   struct LogicalTransactionStatement *stmt, bool *skip);
+
+uint32_t pgout_u32(const char *buf, int *pos, int bufLen);
+uint64_t pgout_u64(const char *buf, int *pos, int bufLen);
 
 
 #endif  /* LD_PGOUTPUT_H */

@@ -1,0 +1,14 @@
+Mutant: The key of a last message leaves out the OID. Must fail: two relations keep one last message each; a record of another relation logged after a record does not hide it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -611,7 +611,7 @@
+ 	int pos = 1;
+ 
+ 	return ((uint64_t) (unsigned char) message[0] << 32) |
+-		   pgout_u32(message, &pos, length);
++		   (0 * pgout_u32(message, &pos, length));
+ }
+ 
+ 

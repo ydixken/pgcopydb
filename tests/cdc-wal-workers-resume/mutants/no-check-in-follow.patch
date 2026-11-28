@@ -1,0 +1,14 @@
+Mutant: follow has no mode check. Must fail: the mode case check "pgcopydb follow --resume --not-consistent --slot-name mode_slot".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_clone_follow.c
++++ b/src/bin/pgcopydb/cli_clone_follow.c
+@@ -925,7 +925,7 @@
+ 	specs.walWorkers = copySpecs.walWorkers;
+ 	specs.followMode = copySpecs.followMode;
+ 
+-	if (!copydb_check_cdc_layout(&specs))
++	if (false && !copydb_check_cdc_layout(&specs))
+ 	{
+ 		/* errors have already been logged */
+ 		exit(EXIT_CODE_BAD_STATE);

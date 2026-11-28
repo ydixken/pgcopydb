@@ -1,0 +1,14 @@
+Mutant: the rule for transactions sent again compares the header LSN of BEGIN and not its final_lsn. Must fail: a BEGIN whose header LSN is below the last final_lsn is kept by its own final_lsn; a BEGIN with header LSN 0/0 and an empty XLogData message are accepted.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1200,7 +1200,7 @@ spool_writer_begin(SpoolWriter *writer, const char *me
+ 	};
+ 
+ 	/* the header LSN of a BEGIN is 0/0 when it has an origin */
+-	if (finalLSN <= writer->lastFinalLSN)
++	if (lsn <= writer->lastFinalLSN)
+ 	{
+ 		writer->state = SPOOL_TXN_SKIP;
+ 		return true;

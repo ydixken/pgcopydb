@@ -442,6 +442,8 @@ typedef struct LogicalStreamContext
 
 	const char *buffer;         /* expose internal buffer */
 	int bufferLen;              /* byte length of binary plugin data in buffer */
+	const char *copyData;       /* the whole message, from its 25-byte header */
+	int copyDataLen;
 	StreamOutputPlugin plugin;
 
 	bool forceFeedback;
@@ -496,6 +498,8 @@ typedef struct LogicalStreamClient
 
 	int fsync_interval;
 	int standby_message_timeout;
+
+	bool pinValueOutput;        /* raw spool: pin the text of every value */
 } LogicalStreamClient;
 
 

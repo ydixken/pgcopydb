@@ -404,12 +404,18 @@ copydb_wal_workers_source(CopyDataSpec *copySpecs, PGSQL *src)
 }
 
 
+/* holds no dot, so no --wal-high-traffic-tables list can equal it */
+#define FOLLOW_MODE_PERFORMANCE_TAG "performance"
+
+
 /*
  * copydb_check_reused_wal_workers refuses a re-used slot set up for other WAL
  * workers, and checks every worker slot without creating or copying one.
  */
 static bool
-copydb_check_reused_wal_workers(CopyDataSpec *copySpecs, ReplicationSlot *slot)
+copydb_check_reused_wal_workers(CopyDataSpec *copySpecs,
+								StreamSpecs *specs,
+								ReplicationSlot *slot)
 {
 	int walWorkers = copySpecs->walWorkers > 1 ? copySpecs->walWorkers : 1;
 	int workers = 1;
@@ -426,8 +432,11 @@ copydb_check_reused_wal_workers(CopyDataSpec *copySpecs, ReplicationSlot *slot)
 		return false;
 	}
 
+	/* copydb_check_cdc_layout already refused a directory of the other mode */
+	bool raw = stream_uses_raw_spool(specs);
+
 	if (workers != walWorkers ||
-		!streq(highTraffic, copySpecs->walHighTrafficTables))
+		(!raw && !streq(highTraffic, copySpecs->walHighTrafficTables)))
 	{
 		log_fatal("Failed to re-use replication slot \"%s\": it was set up "
 				  "with --wal-workers %d --wal-high-traffic-tables \"%s\", "
@@ -607,9 +616,14 @@ bool
 copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 									   const char *logrep_pguri,
 									   ReplicationSlot *slot,
-									   char *cdcPathDir)
+									   char *cdcPathDir,
+									   uint64_t maxSegmentSize)
 {
 	TransactionSnapshot *sourceSnapshot = &(copySpecs->sourceSnapshot);
+	StreamSpecs specs = { 0 };
+
+	specs.slot.plugin = slot->plugin;
+	specs.followMode = copySpecs->followMode;
 
 	/*
 	 * Now is the time to check if a previous command such as
@@ -625,7 +639,7 @@ copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 	if (slot->lsn != InvalidXLogRecPtr &&
 		!IS_EMPTY_STRING_BUFFER(slot->snapshot))
 	{
-		if (!copydb_check_reused_wal_workers(copySpecs, slot))
+		if (!copydb_check_reused_wal_workers(copySpecs, &specs, slot))
 		{
 			/* errors have already been logged */
 			return false;
@@ -655,7 +669,6 @@ copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 
 	sourceSnapshot->kind = SNAPSHOT_KIND_LOGICAL;
 
-	StreamSpecs specs = { 0 };
 	LogicalStreamClient *stream = &(sourceSnapshot->stream);
 
 	if (!pgsql_init_stream(stream,
@@ -665,6 +678,17 @@ copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 						   slot->slotName,
 						   InvalidXLogRecPtr,
 						   InvalidXLogRecPtr))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	/* tagged before the slot, so a crash in between meets the check above */
+	if (stream_uses_raw_spool(&specs) &&
+		!catalog_write_wal_workers(&(copySpecs->catalogs.source),
+								   copySpecs->walWorkers,
+								   FOLLOW_MODE_PERFORMANCE_TAG,
+								   NULL, 0))
 	{
 		/* errors have already been logged */
 		return false;
@@ -753,9 +777,90 @@ copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 	specs.replayDB = &(copySpecs->catalogs.replay);
 	specs.private.startpos = slot->lsn;
 
+	/*
+	 * The start of the spool checks its cut against these. The slot is new, so
+	 * it confirmed the position it was created at and the target has replayed
+	 * nothing, and the apply of the first run reads the files this creates.
+	 */
+	specs.confirmedFlushLSN = slot->lsn;
+	specs.storedW = InvalidXLogRecPtr;
+	specs.maxReplayDBSize = maxSegmentSize;
+
 	if (!stream_init_timeline(&specs, stream))
 	{
 		/* errors have already been logged */
+		return false;
+	}
+
+	/* receive opens the spool again, and this process writes no frame */
+	if (stream_uses_raw_spool(&specs))
+	{
+		spool_writer_close(&(specs.private.spool));
+	}
+
+	return true;
+}
+
+
+/*
+ * copydb_cdc_layout_mode reads the follow mode that the work directory
+ * records: recorded is false for a directory that no run has tagged either
+ * way, and tagged is true for the performance tag of a setup row.
+ */
+bool
+copydb_cdc_layout_mode(StreamSpecs *specs, bool *recorded, bool *tagged)
+{
+	int workers = 0;
+	char highTraffic[WAL_HIGH_TRAFFIC_TABLES_BUFSIZE] = { 0 };
+
+	if (!catalog_read_wal_worker_setup(specs->sourceDB,
+									   &workers,
+									   highTraffic,
+									   sizeof(highTraffic),
+									   recorded))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	*tagged = *recorded && streq(highTraffic, FOLLOW_MODE_PERFORMANCE_TAG);
+
+	return true;
+}
+
+
+bool
+copydb_check_cdc_layout(StreamSpecs *specs)
+{
+	ReplicationSlot slot = { 0 };
+	bool found = false;
+	bool tagged = false;
+
+	if (!catalog_read_replication_slot(specs->sourceDB, &slot) ||
+		!copydb_cdc_layout_mode(specs, &found, &tagged))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (!found && IS_EMPTY_STRING_BUFFER(slot.slotName))
+	{
+		return true;
+	}
+
+	bool raw = stream_uses_raw_spool(specs);
+
+	if (tagged != raw)
+	{
+		const char *recorded = tagged ? "performance" : "sqlite";
+
+		log_fatal("Refusing the work directory: it was started with "
+				  "--follow-mode %s, and this run uses --follow-mode %s; "
+				  "resume with --follow-mode %s, or run pgcopydb stream "
+				  "cleanup and start over with --restart",
+				  recorded,
+				  raw ? "performance" : "sqlite",
+				  recorded);
 		return false;
 	}
 

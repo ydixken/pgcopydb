@@ -1,0 +1,14 @@
+Mutant: rotation runs while frames wait in the write block. Must fail: rotation waits until the flush has synced the frames.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1472,7 +1472,7 @@ spool_writer_rotate(SpoolWriter *writer)
+ 
+ 	/* an empty block is no proof of a sync: spool_put writes full blocks out */
+ 	if (!spool_writer_rotate_due(writer) ||
+-		segment->size > segment->synced || segment->blockLength > 0 ||
++		segment->size > segment->synced ||
+ 		writer->pendingIndex.len > 0)
+ 	{
+ 		log_error("BUG: spool file \"%s\" rotates only when due, and after "

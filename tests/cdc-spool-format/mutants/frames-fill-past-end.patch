@@ -1,0 +1,14 @@
+Mutant: the reader reads a frame whose length ends past its transaction before it refuses it. Must fail: a frame whose length ends past its transaction fails the reader as damage, and is not read.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1799,7 +1799,7 @@
+ 		uint64_t size = SPOOL_FRAME_SIZE(pgout_u32(spool_frames_at(frames), &pos,
+ 												   (int) Min(left, 4)));
+ 
+-		if (size <= left && !spool_frames_fill(frames, size))
++		if (!spool_frames_fill(frames, size))
+ 		{
+ 			return false;
+ 		}

@@ -1,0 +1,14 @@
+Mutant: the writer that appends after the cut forgets the source system, so its next rotation writes system 0 into the new header. Must fail: a rotation after a start writes the source system, timeline and last transaction into the new header.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2148,6 +2148,8 @@
+ 		.lastEndLSN = tail->last.endLSN,
+ 		.completeSize = tail->last.endOffset
+ 	};
++
++	writer->header.systemId = 0;
+ 
+ 	/* the cut synced the segment at that length */
+ 	writer->segment.size = tail->last.endOffset;

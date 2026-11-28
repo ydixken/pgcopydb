@@ -1,0 +1,14 @@
+Mutant: A position counts as before an equal one. Must fail: a record is applied at its own position, and not before it.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -667,7 +667,7 @@
+ spool_position_before(uint64_t seq, uint64_t changes,
+ 					  uint64_t otherSeq, uint64_t otherChanges)
+ {
+-	return seq < otherSeq || (seq == otherSeq && changes < otherChanges);
++	return seq < otherSeq || (seq == otherSeq && changes <= otherChanges);
+ }
+ 
+ 

@@ -1,0 +1,13 @@
+Mutant: a rewind keeps the held BEGIN and ORIGIN frames. Must fail: a transaction cut off while its BEGIN and ORIGIN wait in memory, then sent in full, leaves no byte of the first attempt.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -1409,7 +1409,6 @@ spool_writer_rewind(SpoolWriter *writer)
+ {
+ 	SpoolSegment *segment = &writer->segment;
+ 
+-	resetPQExpBuffer(&writer->held);
+ 	writer->state = SPOOL_TXN_NONE;
+ 
+ 	if (!spool_usable(segment))
