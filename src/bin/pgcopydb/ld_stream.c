@@ -642,36 +642,12 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 	specs->private.timeline = stream->system.timeline;
 
 	/*
-	 * The raw spool takes the place of output.db, and its start reports the
-	 * position of the last transaction it holds. A reconnect keeps the open
-	 * spool, which the rewind cut back to that transaction.
+	 * The raw spool takes the place of output.db, and only receive opens it,
+	 * through stream_open_raw_spool: a slot creation knows neither the
+	 * position the slot confirmed nor the segment size, and writes no frame.
 	 */
 	if (stream_uses_raw_spool(specs))
 	{
-		StreamContext *privateContext = &(specs->private);
-
-		if (privateContext->spoolOpen)
-		{
-			return true;
-		}
-
-		if (!spool_writer_open(&(privateContext->spool),
-							   specs->paths.dir,
-							   stream->system.identifier,
-							   stream->system.timeline,
-							   specs->confirmedFlushLSN,
-							   specs->maxReplayDBSize,
-							   specs->storedW))
-		{
-			/* errors have already been logged */
-			return false;
-		}
-
-		privateContext->spoolOpen = true;
-		privateContext->lastDurableCommitLSN =
-			Max(privateContext->lastDurableCommitLSN,
-				privateContext->spool.lastEndLSN);
-
 		return true;
 	}
 
@@ -681,6 +657,50 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 		/* errors have already been logged */
 		return false;
 	}
+
+	return true;
+}
+
+
+/*
+ * stream_open_raw_spool opens the spool of performance mode, whose start
+ * reports the position of the last transaction it holds. A reconnect keeps the
+ * open spool, which the rewind cut back to that transaction.
+ */
+static bool
+stream_open_raw_spool(StreamSpecs *specs, LogicalStreamClient *stream)
+{
+	StreamContext *privateContext = &(specs->private);
+
+	if (!stream_uses_raw_spool(specs) || privateContext->spoolOpen)
+	{
+		return true;
+	}
+
+	/* the start checks its cut against these, and a zero bounds nothing */
+	if (specs->maxReplayDBSize == 0)
+	{
+		log_error("BUG: receive opens the spool of \"%s\" with no segment size",
+				  specs->paths.dir);
+		return false;
+	}
+
+	if (!spool_writer_open(&(privateContext->spool),
+						   specs->paths.dir,
+						   stream->system.identifier,
+						   stream->system.timeline,
+						   specs->confirmedFlushLSN,
+						   specs->maxReplayDBSize,
+						   specs->storedW))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	privateContext->spoolOpen = true;
+	privateContext->lastDurableCommitLSN =
+		Max(privateContext->lastDurableCommitLSN,
+			privateContext->spool.lastEndLSN);
 
 	return true;
 }
@@ -786,7 +806,8 @@ startLogicalStreaming(StreamSpecs *specs)
 			return false;
 		}
 
-		if (!stream_init_timeline(specs, &stream))
+		if (!stream_init_timeline(specs, &stream) ||
+			!stream_open_raw_spool(specs, &stream))
 		{
 			/* errors have already been logged */
 			return false;
@@ -818,6 +839,11 @@ startLogicalStreaming(StreamSpecs *specs)
 		/* a reconnect would only meet the same error again */
 		if (privateContext->fatal)
 		{
+			if (privateContext->rawSpool)
+			{
+				spool_writer_close(&(privateContext->spool));
+			}
+
 			return false;
 		}
 
