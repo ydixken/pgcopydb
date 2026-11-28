@@ -1,4 +1,4 @@
-Mutant: the start of a segment that holds no indexed transaction ignores the high-water mark of its header, so the rule for transactions sent again loses what cleanup deleted. Must fail: the source and source14 cases of this suite, at the checks "the resend added no index record" and "canary rows on the target".
+Mutant: the start of a segment that holds no indexed transaction ignores the high-water mark of its header, so the rule for transactions sent again loses what cleanup deleted. Must fail: the source and source14 cases of this suite, at the wait for "the slot to be streamed again": the receive of the resend refuses the COMMIT it already holds and exits, which the wait reports.
 Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
