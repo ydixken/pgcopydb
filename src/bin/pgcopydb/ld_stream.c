@@ -988,7 +988,9 @@ streamCheckResumePosition(StreamSpecs *specs)
 	bool flush = false;
 	uint64_t lsn = 0;
 
-	if (!pgsql_replication_slot_exists(&src, specs->slot.slotName, &flush, &lsn))
+	/* without the version it reads restart_lsn, which is below the slot's */
+	if (!pgsql_server_version(&src) ||
+		!pgsql_replication_slot_exists(&src, specs->slot.slotName, &flush, &lsn))
 	{
 		/* errors have already been logged */
 		return false;
