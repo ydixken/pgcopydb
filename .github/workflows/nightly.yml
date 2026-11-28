@@ -205,6 +205,55 @@ jobs:
             PGVERSION: 17
           - TEST: timescaledb
             PGVERSION: 18
+          # A matrix generates at most 256 jobs, and this one now asks for
+          # more than that, which fails the run before any job starts.  The
+          # rows that Run Tests covers on the same head are the PostgreSQL 18
+          # rows of the performance entries, so they go here, and 16 and 17
+          # keep every entry.
+          - TEST: cdc-low-level-performance
+            PGVERSION: 18
+          - TEST: cdc-partitioned-target-performance
+            PGVERSION: 18
+          - TEST: cdc-replica-identity-index-performance
+            PGVERSION: 18
+          - TEST: cdc-replica-identity-full-performance
+            PGVERSION: 18
+          - TEST: cdc-pgoutput-performance
+            PGVERSION: 18
+          - TEST: cdc-pgoutput-resume-performance
+            PGVERSION: 18
+          - TEST: cdc-filtering-pgoutput-performance
+            PGVERSION: 18
+          - TEST: cdc-truncate-multi-performance
+            PGVERSION: 18
+          - TEST: cdc-origin-abort-performance
+            PGVERSION: 18
+          - TEST: cdc-receive-drain-error-performance
+            PGVERSION: 18
+          - TEST: cdc-receive-reconnect-dying-source-performance
+            PGVERSION: 18
+          - TEST: cdc-receive-status-interval-performance
+            PGVERSION: 18
+          - TEST: cdc-apply-wakeup-performance
+            PGVERSION: 18
+          - TEST: follow-pgoutput-performance
+            PGVERSION: 18
+          - TEST: follow-filtering-performance
+            PGVERSION: 18
+          - TEST: follow-resume-snapshot-performance
+            PGVERSION: 18
+          - TEST: cdc-interleaved-commits-performance
+            PGVERSION: 18
+          - TEST: cdc-resend-after-reconnect-performance
+            PGVERSION: 18
+          - TEST: cdc-commit-order-resume-performance
+            PGVERSION: 18
+          - TEST: cdc-copy-multi-insert-performance
+            PGVERSION: 18
+          - TEST: cdc-endpos-before-txn-performance
+            PGVERSION: 18
+          - TEST: cdc-origin-source-performance
+            PGVERSION: 18
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
