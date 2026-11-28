@@ -161,6 +161,18 @@ Finally, it is also possible to setup the streaming replication options
 before using the ``pgcopydb follow`` command: see the
 :ref:`pgcopydb_stream_setup` and :ref:`pgcopydb_stream_cleanup` commands.
 
+A column added while follow runs
+--------------------------------
+
+A column that is added to a table on the source and on the target while
+``pgcopydb follow`` runs reaches the target in performance mode
+(``--follow-mode performance``): pgoutput sends the new definition of the
+table, and the changes after it carry the added column.
+
+In sqlite mode, which is the default, the first definition that pgoutput sent
+for a table wins for the rest of the run, as it does in the releases before
+performance mode.
+
 Replica Identity and lack of Primary Keys
 -----------------------------------------
 

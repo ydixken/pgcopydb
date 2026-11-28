@@ -179,6 +179,16 @@ cdc-follow-mode: build
 cdc-layout-refusal: build
 	$(MAKE) -C $@
 
+# the performance pass of cdc-origin-source, which reads the raw spool
+cdc-origin-source-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-source
+
+cdc-spool-resend: build
+	$(MAKE) -C $@
+
+cdc-spool-relation: build
+	$(MAKE) -C $@
+
 # builds its own image from the build stage of the top-level Dockerfile
 catalog-stmt-cache:
 	$(MAKE) -C $@
@@ -345,6 +355,7 @@ clean-images:
 .PHONY: cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume
 .PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format cdc-parallel-crash
 .PHONY: cdc-spool-settings cdc-follow-mode cdc-layout-refusal
+.PHONY: cdc-origin-source-performance cdc-spool-resend cdc-spool-relation
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
 .PHONY: cdc-pgoutput-performance cdc-low-level-performance cdc-filtering-pgoutput-performance
 .PHONY: cdc-replica-identity-full-performance cdc-truncate-multi-performance cdc-receive-drain-error-performance
