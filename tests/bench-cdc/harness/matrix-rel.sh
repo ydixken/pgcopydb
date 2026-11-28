@@ -11,8 +11,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 order=${3:-$here/order-$workload.txt}
 : "${BENCH_LOCK:?matrix-rel.sh: set BENCH_LOCK to the shared podman lock directory}"
 [[ -f $order ]] || { echo "matrix-rel.sh: no $order" >&2; exit 2; }
-[[ -z ${TXNS:-}${SEED:-}${CLIENTS:-}${LABEL:-}${SRC_CPUS:-}${DST_CPUS:-}${POD_CPUS:-}${PG_IMAGE:-}${IMAGE_V26:-}${IMAGE_V27:-}${STAGE0:-}${BIG_IN:-} ]] || {
-  echo "matrix-rel.sh: unset TXNS, SEED, CLIENTS, LABEL, SRC_CPUS, DST_CPUS, POD_CPUS, PG_IMAGE, IMAGE_V26, IMAGE_V27, STAGE0 and BIG_IN; the matrix runs the defaults only" >&2
+# IMAGE_V27 and WANT_V27 are inputs of the V27 variants, like the four of BASE-1 and CAND-1
+[[ -z ${TXNS:-}${SEED:-}${CLIENTS:-}${LABEL:-}${SRC_CPUS:-}${DST_CPUS:-}${POD_CPUS:-}${PG_IMAGE:-}${IMAGE_V26:-}${STAGE0:-}${BIG_IN:-}${PRE_COMPARE_SQL:-} ]] || {
+  echo "matrix-rel.sh: unset TXNS, SEED, CLIENTS, LABEL, SRC_CPUS, DST_CPUS, POD_CPUS, PG_IMAGE, IMAGE_V26, STAGE0, BIG_IN and PRE_COMPARE_SQL; the matrix runs the defaults only" >&2
   exit 2
 }
 mkdir -p "$out"

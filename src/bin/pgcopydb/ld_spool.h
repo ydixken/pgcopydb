@@ -174,6 +174,7 @@ typedef struct SpoolWriter
 	uint64_t maxSegmentSize;    /* rotate after a COMMIT at or past it, 0 never */
 	SpoolHeader header;         /* of the open segment */
 	SpoolSegment segment;
+	SpoolSegment index;         /* the index file of that segment */
 
 	/* the last complete transaction, also while its record is in memory */
 	uint64_t nextSeq;
@@ -192,6 +193,9 @@ typedef struct SpoolWriter
 
 /* the sequence number of the first transaction of a new spool */
 #define SPOOL_FIRST_SEQ 1
+
+/* a start and a cleanup pass of one spool take this file exclusively (A49) */
+#define SPOOL_LOCK_FILE "spool.lock"
 
 /* the frames of one transaction, read by byte range and never past its end */
 typedef struct SpoolFrames
@@ -238,6 +242,8 @@ bool spool_header_decode(const char *buf, uint64_t size, SpoolHeader *header);
 SpoolFrameStatus spool_frame_decode(const char *buf, uint64_t size,
 									const char **message, uint32_t *length);
 
+void spool_keepalive_encode(char *buf, uint64_t lsn, uint64_t sendTime);
+
 bool spool_segment_create(SpoolSegment *segment, const char *dirname,
 						  const SpoolHeader *header);
 bool spool_append(SpoolSegment *segment, const char *message, uint32_t length);
@@ -253,9 +259,15 @@ bool spool_writer_message(SpoolWriter *writer, const char *message,
 bool spool_writer_rewind(SpoolWriter *writer);
 bool spool_writer_rotate_due(const SpoolWriter *writer);
 bool spool_writer_rotate(SpoolWriter *writer);
+bool spool_writer_flush(SpoolWriter *writer);
+void spool_writer_close(SpoolWriter *writer);
 bool spool_writer_open(SpoolWriter *writer, const char *dirname,
 					   uint64_t systemId, uint32_t timeline,
-					   uint64_t maxSegmentSize);
+					   uint64_t confirmedFlushLSN, uint64_t maxSegmentSize,
+					   uint64_t storedW);
+
+bool spool_cleanup(const char *dirname, uint64_t storedW, bool dry_run,
+				   uint64_t *filesDeleted, uint64_t *bytesFreed);
 
 SpoolFrameStatus spool_relation_decode(const char *buf, uint64_t size,
 									   SpoolRelationRecord *record);

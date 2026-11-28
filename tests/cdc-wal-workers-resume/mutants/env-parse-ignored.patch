@@ -1,0 +1,14 @@
+Mutant: A bad PGCOPYDB_FOLLOW_MODE is logged and the command goes on. Must fail: the mode case check "env PGCOPYDB_FOLLOW_MODE=bogus pgcopydb follow".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -318,7 +318,7 @@
+ 	}
+ 
+ 	if (env_exists(PGCOPYDB_FOLLOW_MODE) &&
+-		!cli_parse_follow_mode(followMode, &(options->followMode)))
++		!cli_parse_follow_mode(followMode, &(options->followMode)) && false)
+ 	{
+ 		/* errors have already been logged */
+ 		++errors;

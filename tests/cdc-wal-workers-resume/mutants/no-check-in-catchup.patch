@@ -1,0 +1,14 @@
+Mutant: stream catchup has no mode check. Must fail: the mode case check "pgcopydb stream catchup --resume --slot-name mode_slot".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -1009,7 +1009,7 @@
+ 							: (1ULL << 30);
+ 	specs.followMode = copySpecs.followMode;
+ 
+-	if (!copydb_check_cdc_layout(&specs))
++	if (false && !copydb_check_cdc_layout(&specs))
+ 	{
+ 		/* errors have already been logged */
+ 		exit(EXIT_CODE_BAD_STATE);

@@ -14,6 +14,7 @@
 
 #include "copydb.h"
 #include "ld_pgoutput.h"
+#include "ld_spool.h"
 #include "ld_store.h"
 #include "ld_stream.h"
 #include "lock_utils.h"
@@ -1364,7 +1365,8 @@ ld_store_rotate_outputdb(StreamSpecs *specs, uint64_t commit_lsn)
  * ld_store_cleanup_cdc_files removes output.db/replay.db file pairs that
  * have been fully applied to the target.  A pair is safe to delete when its
  * endpos is strictly less than sentinel.replay_lsn AND done_time_epoch is set
- * (i.e. the receive process has closed it).
+ * (i.e. the receive process has closed it).  A directory that performance
+ * mode tagged holds no pairs, and spool_cleanup removes its segments instead.
  *
  * sentinel.replay_lsn tracks durable target commits, not the primary
  * keepalive position that receive may acknowledge in network feedback.
@@ -1405,6 +1407,22 @@ ld_store_cleanup_cdc_files(StreamSpecs *specs,
 	{
 		log_debug("ld_store_cleanup_cdc_files: replay_lsn is not set, skipping");
 		return true;
+	}
+
+	/* the raw spool of performance mode holds segments, not file pairs */
+	bool recorded = false;
+	bool tagged = false;
+
+	if (!copydb_cdc_layout_mode(specs, &recorded, &tagged))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	if (tagged)
+	{
+		return spool_cleanup(specs->paths.dir, sentinel.replay_lsn, dry_run,
+							 filesDeleted, bytesFreed);
 	}
 
 	/* query cdc_files for file pairs whose endpos < replay_lsn */

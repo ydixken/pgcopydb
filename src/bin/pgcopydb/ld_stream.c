@@ -391,6 +391,20 @@ LogicalStreamModeToString(LogicalStreamMode mode)
 
 
 /*
+ * stream_uses_raw_spool routes a run to the raw spool: plugin pgoutput,
+ * --follow-mode performance and not a WAL worker process. The option parsers
+ * refuse the other two combinations, so this is also a last line of defence.
+ */
+bool
+stream_uses_raw_spool(StreamSpecs *specs)
+{
+	return specs->followMode == FOLLOW_MODE_PERFORMANCE &&
+		   specs->slot.plugin == STREAM_PLUGIN_PGOUTPUT &&
+		   !specs->walWorker;
+}
+
+
+/*
  * stream_check_in_out checks that the stdIn and stdOut file descriptors are
  * still valid: EBADF could happen when a PIPE is Broken for lack of a
  * reader/writer process.
@@ -591,6 +605,9 @@ stream_init_context(StreamSpecs *specs)
 	 */
 	privateContext->maxWrittenLSN = specs->startpos;
 
+	/* performance mode on pgoutput writes the raw spool, and no output.db */
+	privateContext->rawSpool = stream_uses_raw_spool(specs);
+
 	/* transform/apply needs catalog lookups (pkey, type oid) */
 	privateContext->sourceDB = specs->sourceDB;
 	privateContext->outputDB = specs->outputDB;
@@ -623,6 +640,40 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 	/* publish the stream client Identify System information in the specs */
 	specs->system = stream->system;
 	specs->private.timeline = stream->system.timeline;
+
+	/*
+	 * The raw spool takes the place of output.db, and its start reports the
+	 * position of the last transaction it holds. A reconnect keeps the open
+	 * spool, which the rewind cut back to that transaction.
+	 */
+	if (stream_uses_raw_spool(specs))
+	{
+		StreamContext *privateContext = &(specs->private);
+
+		if (privateContext->spoolOpen)
+		{
+			return true;
+		}
+
+		if (!spool_writer_open(&(privateContext->spool),
+							   specs->paths.dir,
+							   stream->system.identifier,
+							   stream->system.timeline,
+							   specs->confirmedFlushLSN,
+							   specs->maxReplayDBSize,
+							   specs->storedW))
+		{
+			/* errors have already been logged */
+			return false;
+		}
+
+		privateContext->spoolOpen = true;
+		privateContext->lastDurableCommitLSN =
+			Max(privateContext->lastDurableCommitLSN,
+				privateContext->spool.lastEndLSN);
+
+		return true;
+	}
 
 	/* now that we have the current timeline and startpos lsn, open output.db */
 	if (!ld_store_open_outputdb(specs))
@@ -674,7 +725,9 @@ startLogicalStreaming(StreamSpecs *specs)
 	StreamContext *privateContext = &(specs->private);
 	context.private = (void *) privateContext;
 
-	if (!ld_store_read_last_commit_lsn(specs->sourceDB,
+	/* on the raw path the start of the spool reports it, below */
+	if (!privateContext->rawSpool &&
+		!ld_store_read_last_commit_lsn(specs->sourceDB,
 									   &privateContext->lastDurableCommitLSN))
 	{
 		return false;
@@ -687,7 +740,7 @@ startLogicalStreaming(StreamSpecs *specs)
 	(void) pipeline_state_start(specs->sourceDB, "receive", specs->startpos);
 
 	/* before START_REPLICATION, so wal_sender_timeout does not run meanwhile */
-	if (!ld_store_upgrade_outputdb(specs))
+	if (!privateContext->rawSpool && !ld_store_upgrade_outputdb(specs))
 	{
 		/* errors have already been logged */
 		return false;
@@ -747,7 +800,12 @@ startLogicalStreaming(StreamSpecs *specs)
 
 		if (!cleanExit)
 		{
-			if (!ld_store_output_rollback(specs->outputDB))
+			/* the source sends a transaction without its COMMIT again in full */
+			bool rolled = privateContext->rawSpool ?
+						  spool_writer_rewind(&(privateContext->spool)) :
+						  ld_store_output_rollback(specs->outputDB);
+
+			if (!rolled)
 			{
 				return false;
 			}
@@ -831,6 +889,11 @@ startLogicalStreaming(StreamSpecs *specs)
 		endLSN = privateContext->doneLSN;
 	}
 
+	if (privateContext->rawSpool)
+	{
+		spool_writer_close(&(privateContext->spool));
+	}
+
 	(void) pipeline_state_end(specs->sourceDB, "receive", endLSN, true);
 	return true;
 }
@@ -905,6 +968,12 @@ streamCheckResumePosition(StreamSpecs *specs)
 		return false;
 	}
 
+	/* the start of the raw spool never cuts it below this position */
+	specs->confirmedFlushLSN = lsn;
+
+	/* and keeps a leftover of segment cleanup only under this one (A49) */
+	specs->storedW = sentinel.replay_lsn;
+
 	int logLevel = lsn == specs->startpos ? LOG_NOTICE : LOG_INFO;
 
 	log_level(logLevel,
@@ -948,7 +1017,18 @@ stream_commit_batch(LogicalStreamContext *context, int trigger)
 {
 	StreamContext *privateContext = (StreamContext *) context->private;
 
-	if (!ld_store_output_commit(privateContext->outputDB))
+	if (privateContext->rawSpool)
+	{
+		/* a rotation needs the frames synced and their records written */
+		if (!spool_writer_flush(&(privateContext->spool)) ||
+			(spool_writer_rotate_due(&(privateContext->spool)) &&
+			 !spool_writer_rotate(&(privateContext->spool))))
+		{
+			privateContext->fatal = true;
+			return false;
+		}
+	}
+	else if (!ld_store_output_commit(privateContext->outputDB))
 	{
 		return false;
 	}
@@ -985,6 +1065,85 @@ streamIdle(LogicalStreamContext *context)
 
 
 /*
+ * streamWriteSpool appends one message of the source to the raw spool, which
+ * keeps the frames of a complete transaction that the spool does not hold yet.
+ * The feedback and the keepalive rule read the positions it tracks here.
+ */
+static bool
+streamWriteSpool(LogicalStreamContext *context)
+{
+	StreamContext *privateContext = (StreamContext *) context->private;
+	SpoolWriter *spool = &(privateContext->spool);
+	SpoolTxnState state = spool->state;
+
+	/* the type byte of the message, read as the writer of the spool reads it */
+	char type = context->copyDataLen > SPOOL_XLOGDATA_HEADER_SIZE ?
+				context->copyData[SPOOL_XLOGDATA_HEADER_SIZE] : 'O';
+
+	if (!spool_writer_message(spool, context->copyData,
+							  (uint32_t) context->copyDataLen))
+	{
+		/* a reconnect would meet the same error again */
+		privateContext->fatal = true;
+		return false;
+	}
+
+	/* update the LSN tracking that's reported in the feedback */
+	if (context->cur_record_lsn != InvalidXLogRecPtr)
+	{
+		context->tracking->written_lsn = Max(context->tracking->written_lsn,
+											 context->cur_record_lsn);
+	}
+
+	if (type == 'B')
+	{
+		privateContext->transactionInProgress = true;
+		privateContext->currentXid = spool->txn.xid;
+		privateContext->beginFinalLSN = spool->txn.finalLSN;
+	}
+	else if (type == 'C')
+	{
+		/*
+		 * The batch commits later (idle, age, flush, rotate).  Raise
+		 * lastDurableCommitLSN now: the keepalive guard needs it ahead.  An
+		 * empty transaction and one that the spool holds already leave no
+		 * frame, and count as no commit.
+		 */
+		if (state == SPOOL_TXN_OPEN)
+		{
+			privateContext->lastDurableCommitLSN =
+				Max(privateContext->lastDurableCommitLSN,
+					context->cur_record_lsn);
+
+			if (privateContext->batchTxns++ == 0)
+			{
+				privateContext->batchStart = feGetCurrentTimestamp();
+			}
+		}
+
+		privateContext->transactionInProgress = false;
+		privateContext->currentXid = 0;
+
+		if (spool_writer_rotate_due(spool))
+		{
+			return stream_commit_batch(context, BATCH_ROTATE);
+		}
+	}
+
+	/* the socket may never drain under load: cap the batch age */
+	if (privateContext->batchTxns > 0 &&
+		feTimestampDifferenceExceeds(privateContext->batchStart,
+									 feGetCurrentTimestamp(),
+									 STREAM_BATCH_MAX_AGE_MS))
+	{
+		return stream_commit_batch(context, BATCH_AGE);
+	}
+
+	return true;
+}
+
+
+/*
  * streamWrite is a callback function for our LogicalStreamClient.
  *
  * This function is called for each message received in pgsql_stream_logical.
@@ -997,6 +1156,11 @@ streamWrite(LogicalStreamContext *context)
 	StreamContext *privateContext = (StreamContext *) context->private;
 	LogicalMessageMetadata *metadata = &(privateContext->metadata);
 	DatabaseCatalog *replayDB = privateContext->outputDB;
+
+	if (privateContext->rawSpool)
+	{
+		return streamWriteSpool(context);
+	}
 
 	if (!prepareMessageMetadataFromContext(context))
 	{
@@ -1520,7 +1684,8 @@ streamKeepalive(LogicalStreamContext *context)
 	}
 
 	/* register progress made through receiving keepalive messages */
-	if (replayDB != NULL && replayDB->db != NULL)
+	if (privateContext->rawSpool ||
+		(replayDB != NULL && replayDB->db != NULL))
 	{
 		/*
 		 * Use context->sendTime when available (from a real server keepalive
@@ -1536,26 +1701,47 @@ streamKeepalive(LogicalStreamContext *context)
 			keepaliveTime = feGetCurrentTimestamp();
 		}
 
-		InternalMessage keepalive = {
-			.action = STREAM_ACTION_KEEPALIVE,
-			.lsn = context->cur_record_lsn,
-			.time = keepaliveTime
-		};
-
-		if (!ld_store_output_begin(replayDB))
+		if (privateContext->rawSpool)
 		{
-			return false;
-		}
+			char marker[SPOOL_KEEPALIVE_SIZE];
 
-		if (!ld_store_insert_internal_message(replayDB, &keepalive))
+			spool_keepalive_encode(marker, context->cur_record_lsn,
+								   (uint64_t) keepaliveTime);
+
+			if (!spool_writer_message(&(privateContext->spool), marker,
+									  sizeof(marker)))
+			{
+				/* a reconnect would meet the same error again */
+				privateContext->fatal = true;
+				return false;
+			}
+
+			log_trace("Appended a KEEPALIVE marker for lsn %X/%X",
+					  LSN_FORMAT_ARGS(context->cur_record_lsn));
+		}
+		else
 		{
-			/* errors have already been logged */
-			return false;
-		}
+			InternalMessage keepalive = {
+				.action = STREAM_ACTION_KEEPALIVE,
+				.lsn = context->cur_record_lsn,
+				.time = keepaliveTime
+			};
 
-		log_trace("Inserted action KEEPALIVE for lsn %X/%X @%s",
-				  LSN_FORMAT_ARGS(keepalive.lsn),
-				  keepalive.timeStr);
+			if (!ld_store_output_begin(replayDB))
+			{
+				return false;
+			}
+
+			if (!ld_store_insert_internal_message(replayDB, &keepalive))
+			{
+				/* errors have already been logged */
+				return false;
+			}
+
+			log_trace("Inserted action KEEPALIVE for lsn %X/%X @%s",
+					  LSN_FORMAT_ARGS(keepalive.lsn),
+					  keepalive.timeStr);
+		}
 
 		/* update the LSN tracking that's reported in the feedback */
 		context->tracking->written_lsn = context->cur_record_lsn;

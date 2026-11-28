@@ -4632,6 +4632,8 @@ pgsql_stream_logical(LogicalStreamClient *client, LogicalStreamContext *context)
 		context->cur_record_lsn = cur_record_lsn;
 		context->buffer = copybuf + hdr_len;
 		context->bufferLen = r - hdr_len;
+		context->copyData = copybuf;
+		context->copyDataLen = r;
 		context->now = client->now;
 
 		/* the tracking LSN information is updated in the writeFunction */

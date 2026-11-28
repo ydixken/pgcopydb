@@ -1,0 +1,16 @@
+Mutant: the cut position of a start leaves out the keepalive markers that the spool holds. Must fail: a cut below the position the slot confirmed is taken when a keepalive marker of the spool holds that position.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2345,9 +2345,7 @@
+ 				message[0] == SPOOL_KIND_KEEPALIVE)
+ 			{
+ 				int pos = 1;
+-				uint64_t position = pgout_u64(message, &pos, (int) length);
+-
+-				*lsn = Max(*lsn, position);
++				(void) pgout_u64(message, &pos, (int) length);
+ 			}
+ 
+ 			offset += SPOOL_FRAME_SIZE(length);

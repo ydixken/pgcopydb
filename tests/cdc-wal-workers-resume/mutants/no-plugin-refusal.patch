@@ -1,0 +1,14 @@
+Mutant: Performance mode accepts any plugin. Must fail: the mode case check "env PGCOPYDB_FOLLOW_MODE=performance pgcopydb follow --resume --dir".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -564,7 +564,7 @@
+ {
+ 	ReplicationSlot *slot = &(options->slot);
+ 
+-	if (options->followMode == FOLLOW_MODE_PERFORMANCE &&
++	if (false && options->followMode == FOLLOW_MODE_PERFORMANCE &&
+ 		slot->plugin != STREAM_PLUGIN_PGOUTPUT)
+ 	{
+ 		log_fatal("Option --follow-mode performance requires --plugin pgoutput, "

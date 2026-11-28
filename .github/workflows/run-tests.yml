@@ -131,30 +131,44 @@ jobs:
           - defer-indexes-queue
           - defer-indexes-all-databases
           - cdc-low-level
+          - cdc-low-level-performance
           - cdc-test-decoding
           - cdc-endpos-mid-txn
           - cdc-wal2json
           - cdc-pgoutput
+          - cdc-pgoutput-performance
           - cdc-pgoutput-resume
           - cdc-keepalive
           - cdc-filtering-pgoutput
+          - cdc-filtering-pgoutput-performance
           - cdc-partitioned-target
+          - cdc-partitioned-target-performance
           - cdc-matview
           - cdc-replica-identity-index
+          - cdc-replica-identity-index-performance
           - cdc-replica-identity-full
+          - cdc-replica-identity-full-performance
           - cdc-truncate-multi
+          - cdc-truncate-multi-performance
           - cdc-origin-abort
+          - cdc-origin-abort-performance
           - cdc-receive-drain-error
+          - cdc-receive-drain-error-performance
           - cdc-receive-reconnect-dying-source
+          - cdc-receive-reconnect-dying-source-performance
           - cdc-receive-status-interval
+          - cdc-receive-status-interval-performance
           - cdc-apply-wakeup
+          - cdc-apply-wakeup-performance
           - catalog-stmt-cache
           - follow-wal2json
           - follow-pgoutput
           - follow-9.6
           - follow-data-only
           - follow-filtering
+          - follow-filtering-performance
           - follow-resume-snapshot
+          - follow-resume-snapshot-performance
           - cdc-endpos-in-multi-wal-txn
           - cdc-interleaved-commits
           - cdc-resend-after-reconnect
@@ -185,6 +199,8 @@ jobs:
           # PG16 coverage is provided by the nightly full-matrix run.
           - TEST: cdc-low-level
             PGVERSION: 16
+          - TEST: cdc-low-level-performance
+            PGVERSION: 16
           - TEST: cdc-test-decoding
             PGVERSION: 16
           - TEST: cdc-endpos-mid-txn
@@ -193,31 +209,53 @@ jobs:
             PGVERSION: 16
           - TEST: cdc-pgoutput
             PGVERSION: 16
+          - TEST: cdc-pgoutput-performance
+            PGVERSION: 16
           - TEST: cdc-pgoutput-resume
             PGVERSION: 16
           - TEST: cdc-keepalive
             PGVERSION: 16
           - TEST: cdc-filtering-pgoutput
             PGVERSION: 16
+          - TEST: cdc-filtering-pgoutput-performance
+            PGVERSION: 16
           - TEST: cdc-partitioned-target
+            PGVERSION: 16
+          - TEST: cdc-partitioned-target-performance
             PGVERSION: 16
           - TEST: cdc-matview
             PGVERSION: 16
           - TEST: cdc-replica-identity-index
             PGVERSION: 16
+          - TEST: cdc-replica-identity-index-performance
+            PGVERSION: 16
           - TEST: cdc-replica-identity-full
+            PGVERSION: 16
+          - TEST: cdc-replica-identity-full-performance
             PGVERSION: 16
           - TEST: cdc-truncate-multi
             PGVERSION: 16
+          - TEST: cdc-truncate-multi-performance
+            PGVERSION: 16
           - TEST: cdc-origin-abort
+            PGVERSION: 16
+          - TEST: cdc-origin-abort-performance
             PGVERSION: 16
           - TEST: cdc-receive-drain-error
             PGVERSION: 16
+          - TEST: cdc-receive-drain-error-performance
+            PGVERSION: 16
           - TEST: cdc-receive-reconnect-dying-source
+            PGVERSION: 16
+          - TEST: cdc-receive-reconnect-dying-source-performance
             PGVERSION: 16
           - TEST: cdc-receive-status-interval
             PGVERSION: 16
+          - TEST: cdc-receive-status-interval-performance
+            PGVERSION: 16
           - TEST: cdc-apply-wakeup
+            PGVERSION: 16
+          - TEST: cdc-apply-wakeup-performance
             PGVERSION: 16
           - TEST: catalog-stmt-cache
             PGVERSION: 16
@@ -231,7 +269,11 @@ jobs:
             PGVERSION: 16
           - TEST: follow-filtering
             PGVERSION: 16
+          - TEST: follow-filtering-performance
+            PGVERSION: 16
           - TEST: follow-resume-snapshot
+            PGVERSION: 16
+          - TEST: follow-resume-snapshot-performance
             PGVERSION: 16
           - TEST: cdc-endpos-in-multi-wal-txn
             PGVERSION: 16

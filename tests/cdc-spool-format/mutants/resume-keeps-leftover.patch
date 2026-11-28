@@ -1,13 +1,15 @@
 Mutant: the start keeps a segment file whose index file cleanup unlinked. Must fail: a segment file without its index file is deleted as a leftover of cleanup, and the directory synced.
 Apply from the repository root with git apply, and never commit it applied.
 
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..bb08af6 100644
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2231,7 +2231,6 @@
+@@ -2546,7 +2546,6 @@ spool_start_read(SpoolStart *start, const char *dirname,
  			return false;
  		}
  
 -		start->leftover = seqs[i];
  	}
  
- 	start->header = *fresh;
+ 	/* and leaves only segments below W, so a leftover above it is damage */

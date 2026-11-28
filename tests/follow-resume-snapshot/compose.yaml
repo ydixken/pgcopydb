@@ -27,6 +27,8 @@ services:
     build: .
     env_file:
       - ../uris.env
+    environment:
+      PGCOPYDB_FOLLOW_MODE:
     depends_on:
       - source
       - target

@@ -41,6 +41,10 @@ digest() { echo "select count(*), md5(string_agg(row(id, k, v)::text, ',' order 
 # commit_lsn <xid>: the COMMIT LSN prefetch decoded for that transaction
 commit_lsn() {
     local file lsn
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" = performance ]; then
+        spool_commit_lsn "$1"
+        return
+    fi
     for file in "${XDG_DATA_HOME}/pgcopydb"/*-output.db; do
         lsn=$(sqlite3 -readonly -init /dev/null -batch -noheader -list "${file}" \
             "select printf('%X/%X', lsn >> 32, lsn & 4294967295) from output where xid = $1 and action = 'C'")
@@ -115,6 +119,9 @@ kill_before_commit() {
     check "$1: rows after resume" "$(source_sql "$(digest true)")" "$(target_sql "$(digest true)")"
 }
 
+# The raw spool records no keepalive in its index, so the checks that call
+# keepalives_between run in the sqlite pass only. Performance mode pins its own
+# group rule in cdc-receive-group-commit.
 # keepalives_between <xid> <xid>: KEEPALIVE rows between the two COMMITs;
 # each one commits the group, so a case that needs one group checks for none
 keepalives_between() {
@@ -136,6 +143,8 @@ txns() {
         source_sql "begin; select pg_current_xact_id(); insert into oa values (${i}, ${i}, '${v}'); commit"
     done
 }
+
+. /var/lib/postgres/spool-probe.sh
 
 pgcopydb ping
 source_sql 'drop table if exists oa; create table oa (id integer primary key, k integer, v text)'
@@ -248,7 +257,9 @@ target_sql "create constraint trigger oa_reject after insert on oa deferrable in
 mapfile -t xids < <(txns 3001 10 dup)
 timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
 commit_d=$(commit_lsn "${xids[9]}")
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 check "D: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[9]}")"
+fi
 pgcopydb stream sentinel set endpos "${commit_d}"
 origin_before=$(origin)
 
@@ -285,7 +296,9 @@ truncate_case() {
     mapfile -t after < <(txns $((first + 11)) 10 row)
     timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
     commit=$(commit_lsn "${after[9]}")
+    if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
     check "$1: KEEPALIVE rows inside the groups" 0 "$(keepalives_between "${before[0]}" "${after[9]}")"
+    fi
     pgcopydb stream sentinel set endpos "${commit}"
     timeout 60s pgcopydb stream catchup --resume --endpos "${commit}" >"${TMPDIR}/truncate-$1.log" 2>&1 || {
         cat "${TMPDIR}/truncate-$1.log"
@@ -314,7 +327,9 @@ mapfile -t xids < <(txns 5001 6 row)
 timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
 commit_f3=$(commit_lsn "${xids[2]}")
 commit_f=$(commit_lsn "${xids[5]}")
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 check "F: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[5]}")"
+fi
 pgcopydb stream sentinel set endpos "${commit_f3}"
 timeout 60s pgcopydb stream catchup --resume --endpos "${commit_f3}"
 check "F: origin at endpos" "${commit_f3}" "$(origin)"
@@ -329,7 +344,9 @@ check "F: rows after resume" "$(source_sql "$(digest 'id > 5000')")" "$(target_s
 mapfile -t xids < <(txns 6001 3 row)
 timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
 commit_g=$(commit_lsn "${xids[2]}")
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 check "G: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[2]}")"
+fi
 pgcopydb stream sentinel set endpos "${commit_g}"
 kill_before_commit G "${commit_g}"
 
@@ -347,7 +364,9 @@ xids+=("$(source_sql "begin; select pg_current_xact_id();
     insert into oa select i, i, md5(i::text) from generate_series(9001, 209000) i; commit")")
 timeout 60s pgcopydb stream prefetch --resume --endpos "$(source_sql 'select pg_current_wal_flush_lsn()')"
 commit_h=$(commit_lsn "${xids[1]}")
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 check "H: KEEPALIVE rows inside the group" 0 "$(keepalives_between "${xids[0]}" "${xids[1]}")"
+fi
 pgcopydb stream sentinel set endpos "${commit_h}"
 target_sql "alter role current_user set idle_in_transaction_session_timeout = '100ms'"
 test "$(target_sql 'show server_version_num')" -lt 170000 ||

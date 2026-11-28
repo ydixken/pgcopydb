@@ -77,6 +77,13 @@ pgcopydb clone
     └── stream apply     (ld_apply.c)         → inline transform (ld_transform.c)
                                                  → *-replay.db, then apply to target
 
+pgcopydb clone --follow --follow-mode performance  (pgoutput only, one slot)
+└── follow worker
+    ├── stream receive   (ld_stream.c)        → appends frames to cdc/<seq>.seg,
+    │                                           cdc/relation.log, cdc/<seq>.idx
+    └── stream apply     (ld_apply.c)         → reads the index, decodes the
+                                                 frames, applies to the target
+
 pgcopydb clone --follow --wal-workers N  (N > 1, follow.c follow_supervise_workers)
 └── follow supervisor                         syncs endpos/apply down, lowest LSNs up
     └── follow worker <k>  (k = 0 .. N-1)     own catalog and CDC files in cdc/w<k>/
@@ -177,6 +184,23 @@ Default root: `$TMPDIR/pgcopydb` (set in `tests/paths.env` to `/var/run/pgcopydb
     └── lsn.json              # last written/applied LSN checkpoint
 ```
 
+With `--follow-mode performance` the cdc/ directory holds the raw spool
+instead of the SQLite CDC files:
+
+```
+└── cdc/
+    ├── <seq>.seg             # replication stream as checksummed frames
+    ├── <seq>.idx             # one 72-byte record per complete transaction
+    ├── relation.log          # every RELATION and TYPE message, checksummed
+    ├── origin                # replication origin name
+    ├── tli                   # timeline ID
+    └── wal_segment_size      # WAL segment size from source
+```
+
+The mode is recorded in `wal_worker_setup` of `schema/source.db`, and a run
+of the other mode is refused before it writes.  A directory without the
+record is a sqlite directory.
+
 To force a fully clean run (ignore previous partial state):
 ```bash
 rm -rf /tmp/pgcopydb   # or whatever $TMPDIR/pgcopydb resolves to
@@ -246,7 +270,7 @@ Shared files (compose auto-loads the env files):
 | `tests/postgres.env` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST_AUTH_METHOD` |
 | `tests/uris.env` | `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, `PGSSLMODE` |
 | `tests/paths.env` | `TMPDIR=/var/run/pgcopydb`, `XDG_DATA_HOME=/var/run/pgcopydb/cdc` |
-| `tests/spool-probe.sh` | `spool_stmts` and `spool_apply_shape`, read from `pgcopydb stream apply --target -`; a suite sources `/var/lib/postgres/spool-probe.sh` of the pagila image |
+| `tests/spool-probe.sh` | `spool_stmts` and `spool_apply_shape`, read from `pgcopydb stream apply --target -`, and `spool_commits`, `spool_commit_lsns` and `spool_commit_lsn`, read from `pgcopydb list spool`; a suite sources `/var/lib/postgres/spool-probe.sh` of the pagila image |
 
 ### Run tests
 

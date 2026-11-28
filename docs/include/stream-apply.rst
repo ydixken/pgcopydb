@@ -1,6 +1,6 @@
 ::
 
-   pgcopydb stream apply: Apply changes from the replayDB to the target database, or stdout
+   pgcopydb stream apply: Apply changes from the CDC store to the target database, or stdout
    usage: pgcopydb stream apply 
    
      --target         Postgres URI to the target database
@@ -10,4 +10,5 @@
      --resume         Allow resuming operations after a failure
      --not-consistent Allow taking a new snapshot on the source database
      --origin         Name of the Postgres replication origin
+     --follow-mode                 Follow on the SQLite spool (sqlite, default) or the raw spool (performance)
    

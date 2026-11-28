@@ -1,0 +1,18 @@
+Mutant: a cleanup pass unlinks the segment before its index file. Must fail: a cleanup pass that cannot remove the index file of a segment keeps the segment, and fails with an ERROR line that names the index file; a cleanup pass syncs the removal of an index file before it unlinks its segment.
+Apply from the repository root with git apply, and never commit it applied.
+
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index a798b76..340e7ed 100644
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2638,8 +2638,8 @@ spool_remove_segment(const char *dirname, uint64_t seq, bool dry_run,
+ 		log_info("Would remove spool segment \"%s\" and its index file, "
+ 				 "%" PRIu64 " bytes", segment, bytes);
+ 	}
+-	else if (!unlink_file(index) || !spool_sync_directory(dirname) ||
+-			 !unlink_file(segment) || !spool_sync_directory(dirname))
++	else if (!unlink_file(segment) || !spool_sync_directory(dirname) ||
++			 !unlink_file(index) || !spool_sync_directory(dirname))
+ 	{
+ 		return false;
+ 	}

@@ -47,6 +47,11 @@ tests/ci:
 tests/*: build
 	$(MAKE) -C tests $(notdir $@)
 
+# tests/* expands to the directories that exist, and a performance entry is a
+# target of tests/Makefile without one. No .PHONY: it takes no pattern.
+tests/%-performance: build
+	$(MAKE) -C tests $(notdir $@)
+
 install: bin
 	$(MAKE) -C src/bin/ install
 

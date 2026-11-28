@@ -1,0 +1,16 @@
+Mutant: the guarded writer of the sentinel replay_lsn accepts a value below the stored one. Must fail: the guarded writer refuses a value below the stored one, which stays.
+Apply from the repository root with git apply, and never commit it applied.
+
+diff --git a/src/bin/pgcopydb/sentinel.c b/src/bin/pgcopydb/sentinel.c
+index 1fed20b..0b06979 100644
+--- a/src/bin/pgcopydb/sentinel.c
++++ b/src/bin/pgcopydb/sentinel.c
+@@ -485,7 +485,7 @@ sentinel_update_replay_lsn_guarded(DatabaseCatalog *catalog, uint64_t replay_lsn
+ 
+ 	bool updated = sentinel_read_replay_lsn(db, &stored);
+ 
+-	if (updated && replay_lsn < stored)
++	if (false)
+ 	{
+ 		log_error("Refusing to move the sentinel replay_lsn back from "
+ 				  "%X/%X to %X/%X",

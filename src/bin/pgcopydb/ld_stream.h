@@ -16,6 +16,7 @@
 #include "schema.h"
 #include "string_utils.h"
 #include "ld_pgoutput.h"
+#include "ld_spool.h"
 
 #define OUTPUT_BEGIN "BEGIN; -- "
 #define OUTPUT_COMMIT "COMMIT; -- "
@@ -442,6 +443,11 @@ typedef struct StreamContext
 	DatabaseCatalog *outputDB;   /* output.db — receive writes, apply reads */
 	DatabaseCatalog *replayDB;   /* replay.db — apply writes exclusively */
 
+	/* the raw spool of performance mode, which takes the place of output.db */
+	SpoolWriter spool;
+	bool rawSpool;
+	bool spoolOpen;             /* its start returned, and a reconnect keeps it */
+
 	/* hash table acts as a cache for tables with generated columns */
 	GeneratedColumnsCache *generatedColumnsCache;
 
@@ -555,6 +561,15 @@ typedef struct PreparedStmt
 	uint32_t hash;
 	bool prepared;
 
+	/*
+	 * The raw path prepares one name per statement text: two texts of one hash
+	 * would otherwise run under the name of the first. Entries of one hash are
+	 * a chain, and the hash table holds its head.
+	 */
+	char name[NAMEDATALEN];
+	char *sql;
+	struct PreparedStmt *next;
+
 	UT_hash_handle hh;          /* makes this structure hashable */
 } PreparedStmt;
 
@@ -591,6 +606,7 @@ typedef struct StreamApplyContext
 	DatabaseCatalog *targetDB;  /* target schema SQLite catalog */
 	uint64_t sentinelSyncTime;  /* when replay_lsn was last written */
 	uint64_t sentinelWrittenLSN;    /* replay_lsn value last written */
+
 
 	ConnStrings *connStrings;
 	char origin[BUFSIZE];
@@ -631,6 +647,7 @@ typedef struct StreamApplyContext
 	bool reachedEOF;
 	bool transactionInProgress;
 	bool logSQL;
+	bool rawSpool;              /* apply from the raw spool, in commit groups */
 
 	PreparedStmt *preparedStmt;
 
@@ -686,6 +703,8 @@ struct StreamSpecs
 	uint64_t startpos;
 	uint64_t endpos;
 	uint64_t maxReplayDBSize;   /* rotate replayDB file at this size (bytes) */
+	uint64_t confirmedFlushLSN; /* of the slot, read before the start */
+	uint64_t storedW;           /* sentinel replay_lsn, read before the start */
 	CopyDBSentinel sentinel;
 
 	LogicalStreamMode mode;
@@ -743,6 +762,7 @@ struct StreamSpecs
 	int coordPort;
 
 	int walWorkers;
+	FollowMode followMode;
 	bool walWorker;             /* this process is one of walWorkers */
 	int walWorkerIndex;         /* which WAL worker, with walWorker */
 	pid_t walSupervisor;        /* a worker quits once this pid is gone */
@@ -784,6 +804,7 @@ bool stream_init_for_mode(StreamSpecs *specs, LogicalStreamMode mode);
 char * LogicalStreamModeToString(LogicalStreamMode mode);
 
 bool stream_check_in_out(StreamSpecs *specs);
+bool stream_uses_raw_spool(StreamSpecs *specs);
 
 /* Lifecycle pipe signals (out-of-band, 8-byte big-endian LSN) */
 bool stream_signal_upstream_done(StreamSpecs *specs, uint64_t done_lsn,
@@ -925,10 +946,19 @@ bool parseWal2jsonMessage(StreamContext *privateContext,
 						  JSON_Value *json);
 
 /* ld_apply.c */
+bool stream_apply_marker_at_endpos(DatabaseCatalog *sourceDB, uint64_t endpos);
+bool stream_endpos_done_before(DatabaseCatalog *sourceDB, bool rawSpool,
+							   uint64_t endpos, uint64_t replayLSN);
 bool stream_apply_catchup(StreamSpecs *specs);
 bool stream_apply_replaydb(StreamSpecs *specs, StreamApplyContext *context);
+bool stream_apply_spool(StreamSpecs *specs, StreamApplyContext *context);
+bool stream_apply_spool_open_reader(StreamApplyContext *context,
+									struct SpoolReader *reader, bool *opened);
+bool stream_apply_prepared(StreamApplyContext *context, uint32_t hash,
+						   const char *sql, PreparedStmt **entry, bool *isNew);
 bool stream_apply_stdin(StreamSpecs *specs, StreamApplyContext *context);
 bool stream_apply_to_stdout(StreamSpecs *specs, FILE *out);
+bool stream_apply_spool_to_stdout(StreamSpecs *specs, FILE *out);
 
 /* a linear scan, as stream apply --target - is a debug path */
 #define STREAM_PRINT_MAX_PREPARED 64
@@ -983,6 +1013,8 @@ bool stream_replay_reached_endpos(StreamSpecs *specs,
 
 /* follow.c */
 bool follow_export_snapshot(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
+bool copydb_cdc_layout_mode(StreamSpecs *specs, bool *recorded, bool *tagged);
+bool copydb_check_cdc_layout(StreamSpecs *specs);
 bool follow_setup_databases(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
 bool follow_reset_sequences(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs);
 bool follow_restore_fkeys(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs,

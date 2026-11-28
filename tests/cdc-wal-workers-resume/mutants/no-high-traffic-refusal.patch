@@ -1,0 +1,14 @@
+Mutant: Performance mode accepts --wal-high-traffic-tables. Must fail: the mode case check "pgcopydb follow --follow-mode performance --wal-high-traffic-tables".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_common.c
++++ b/src/bin/pgcopydb/cli_common.c
+@@ -596,7 +596,7 @@
+ 
+ 	if (options->followMode == FOLLOW_MODE_PERFORMANCE)
+ 	{
+-		if (!IS_EMPTY_STRING_BUFFER(options->walHighTrafficTables))
++		if (false && !IS_EMPTY_STRING_BUFFER(options->walHighTrafficTables))
+ 		{
+ 			log_fatal("Option --follow-mode performance is not compatible "
+ 					  "with --wal-high-traffic-tables");

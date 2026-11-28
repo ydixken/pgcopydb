@@ -155,6 +155,9 @@ pgcopydb stream catchup --resume --endpos "${lsn3}" --notice
 # (apply rewrites it to plain TRUNCATE for the partitioned target at apply time,
 # using a local buffer, without modifying the stored template).
 SHAREDIR=/var/lib/postgres/.local/share/pgcopydb
+# The stored TRUNCATE template is a stmt row, which only the SQLite layout has.
+# The target count below pins the replayed TRUNCATE in both modes.
+if [ "${PGCOPYDB_FOLLOW_MODE:-}" != performance ]; then
 REPLAYDB=$(find ${SHAREDIR} -maxdepth 1 -name '*-replay.db' -type f | head -1)
 
 # pgoutput quotes the identifiers, test_decoding does not
@@ -171,6 +174,7 @@ truncate_sql=$(sqlite3 -init /dev/null -list -noheader ${REPLAYDB} \
 if [ "${truncate_sql}" != "TRUNCATE ONLY partitioned_target.events" ]; then
     echo "FAIL: truncate stmt: got '${truncate_sql}'"
     exit 1
+fi
 fi
 fi
 

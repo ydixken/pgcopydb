@@ -1,11 +1,13 @@
 Mutant: the next transaction takes the sequence number of the last indexed one. Must fail: a writer opened on a spool continues after its last indexed transaction, with the final_lsn and end LSN of its record.
 Apply from the repository root with git apply, and never commit it applied.
 
+diff --git a/src/bin/pgcopydb/ld_spool.c b/src/bin/pgcopydb/ld_spool.c
+index c1d9088..3fdc498 100644
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2143,7 +2143,7 @@
- 		.header = tail->header,
+@@ -2336,7 +2336,7 @@ spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
  		.segment = tail->segment,
+ 		.index = { .fd = -1 },
  		.relationLog = { .fd = -1 },
 -		.nextSeq = tail->last.seq + 1,
 +		.nextSeq = tail->last.seq,

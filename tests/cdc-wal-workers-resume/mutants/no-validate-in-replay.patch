@@ -1,0 +1,14 @@
+Mutant: stream replay never checks the plugin of performance mode. Must fail: the mode case check "pgcopydb stream replay --follow-mode performance --resume".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -1039,7 +1039,7 @@
+ {
+ 	CopyDataSpec copySpecs = { 0 };
+ 
+-	if (!cli_validate_follow_mode(&streamDBoptions))
++	if (false && !cli_validate_follow_mode(&streamDBoptions))
+ 	{
+ 		/* errors have already been logged */
+ 		exit(EXIT_CODE_BAD_ARGS);

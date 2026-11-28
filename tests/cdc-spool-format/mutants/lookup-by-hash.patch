@@ -1,0 +1,14 @@
+Mutant: a cache hit of the raw path ignores the statement text. Must fail: two statement texts of one hash get a prepared name of their own.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -2371,7 +2371,7 @@
+ 		texts++;
+ 
+ 		if (!context->rawSpool ||
+-			(sql != NULL && stmt->sql != NULL && streq(stmt->sql, sql)))
++			(sql != NULL && stmt->sql != NULL))
+ 		{
+ 			*entry = stmt;
+ 			*isNew = !stmt->prepared;

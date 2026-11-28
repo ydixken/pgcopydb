@@ -356,33 +356,19 @@ sentinel_update_write_flush_lsn(DatabaseCatalog *catalog,
 
 
 /*
- * sentinel_update_replay_lsn updates our pgcopydb sentinel table end pos.
+ * sentinel_write_replay_lsn updates our pgcopydb sentinel table end pos. Its
+ * callers hold the catalog semaphore, so that a guarded write reads and
+ * writes the value in one hold.
  */
-bool
-sentinel_update_replay_lsn(DatabaseCatalog *catalog, uint64_t replay_lsn)
+static bool
+sentinel_write_replay_lsn(sqlite3 *db, uint64_t replay_lsn)
 {
-	sqlite3 *db = catalog->db;
-
-	if (db == NULL)
-	{
-		log_error("BUG: sentinel_update_replay_lsn: db is NULL");
-		return false;
-	}
-
 	char *sql = "update sentinel set replay_lsn = $1 where id = 1";
-
-	if (!semaphore_lock(&(catalog->sema)))
-	{
-		/* errors have already been logged */
-		return false;
-	}
-
 	SQLiteQuery query = { .errorOnZeroRows = true };
 
 	if (!catalog_sql_prepare(db, sql, &query))
 	{
 		/* errors have already been logged */
-		(void) semaphore_unlock(&(catalog->sema));
 		return false;
 	}
 
@@ -396,24 +382,122 @@ sentinel_update_replay_lsn(DatabaseCatalog *catalog, uint64_t replay_lsn)
 
 	int count = sizeof(params) / sizeof(params[0]);
 
-	if (!catalog_sql_bind(&query, params, count))
+	/* the query returns no row */
+	return catalog_sql_bind(&query, params, count) &&
+		   catalog_sql_execute_once(&query);
+}
+
+
+/*
+ * sentinel_fetch_replay_lsn reads the stored replay_lsn alone, for the
+ * guarded writer, which compares it before it writes.
+ */
+static bool
+sentinel_fetch_replay_lsn(SQLiteQuery *query)
+{
+	uint64_t *replay_lsn = (uint64_t *) query->context;
+
+	*replay_lsn = InvalidXLogRecPtr;
+
+	if (sqlite3_column_type(query->ppStmt, 0) == SQLITE_NULL)
 	{
-		/* errors have already been logged */
-		(void) semaphore_unlock(&(catalog->sema));
+		return true;
+	}
+
+	char *lsn = (char *) sqlite3_column_text(query->ppStmt, 0);
+
+	if (!parseLSN(lsn, replay_lsn))
+	{
+		log_error("Failed to parse sentinel replay_lsn LSN \"%s\"", lsn);
 		return false;
 	}
 
-	/* now execute the query, which does not return any row */
-	if (!catalog_sql_execute_once(&query))
+	return true;
+}
+
+
+/* the same hold as sentinel_write_replay_lsn, for the value it compares */
+static bool
+sentinel_read_replay_lsn(sqlite3 *db, uint64_t *replay_lsn)
+{
+	char *sql = "select replay_lsn from sentinel where id = 1";
+	SQLiteQuery query = {
+		.errorOnZeroRows = true,
+		.context = replay_lsn,
+		.fetchFunction = &sentinel_fetch_replay_lsn
+	};
+
+	return catalog_sql_prepare(db, sql, &query) &&
+		   catalog_sql_execute_once(&query);
+}
+
+
+/*
+ * sentinel_update_replay_lsn updates our pgcopydb sentinel table end pos.
+ */
+bool
+sentinel_update_replay_lsn(DatabaseCatalog *catalog, uint64_t replay_lsn)
+{
+	sqlite3 *db = catalog->db;
+
+	if (db == NULL)
 	{
-		/* errors have already been logged */
-		(void) semaphore_unlock(&(catalog->sema));
+		log_error("BUG: sentinel_update_replay_lsn: db is NULL");
 		return false;
 	}
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	bool updated = sentinel_write_replay_lsn(db, replay_lsn);
 
 	(void) semaphore_unlock(&(catalog->sema));
 
-	return true;
+	return updated;
+}
+
+
+/*
+ * sentinel_update_replay_lsn_guarded is the writer of the raw path: W never
+ * falls, because the slot follows it and cleanup deletes the segments below
+ * it, so a value under the stored one is refused (rule 9 of spec (h)).
+ */
+bool
+sentinel_update_replay_lsn_guarded(DatabaseCatalog *catalog, uint64_t replay_lsn)
+{
+	sqlite3 *db = catalog->db;
+	uint64_t stored = InvalidXLogRecPtr;
+
+	if (db == NULL)
+	{
+		log_error("BUG: sentinel_update_replay_lsn_guarded: db is NULL");
+		return false;
+	}
+
+	if (!semaphore_lock(&(catalog->sema)))
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	bool updated = sentinel_read_replay_lsn(db, &stored);
+
+	if (updated && replay_lsn < stored)
+	{
+		log_error("Refusing to move the sentinel replay_lsn back from "
+				  "%X/%X to %X/%X",
+				  LSN_FORMAT_ARGS(stored), LSN_FORMAT_ARGS(replay_lsn));
+		updated = false;
+	}
+
+	updated = updated && sentinel_write_replay_lsn(db, replay_lsn);
+
+	(void) semaphore_unlock(&(catalog->sema));
+
+	return updated;
 }
 
 
@@ -573,14 +657,17 @@ sentinel_sync_recv(DatabaseCatalog *catalog,
 
 /*
  * sentinel_sync_apply updates the current sentinel values for replay_lsn, and
- * fetches the current value for endpos and apply.
+ * fetches the current value for endpos and apply. With guarded, a value below
+ * the stored one is refused.
  */
 bool
 sentinel_sync_apply(DatabaseCatalog *catalog,
 					uint64_t replay_lsn,
+					bool guarded,
 					CopyDBSentinel *sentinel)
 {
-	if (!sentinel_update_replay_lsn(catalog, replay_lsn))
+	if (!(guarded ? sentinel_update_replay_lsn_guarded(catalog, replay_lsn) :
+		  sentinel_update_replay_lsn(catalog, replay_lsn)))
 	{
 		/* errors have already been logged */
 		return false;

@@ -1,0 +1,14 @@
+Mutant: stream apply with a target has no mode check. Must fail: the mode case check "pgcopydb stream apply --resume --origin mode_origin".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_stream.c
++++ b/src/bin/pgcopydb/cli_stream.c
+@@ -1542,7 +1542,7 @@
+ 	}
+ 
+ 	/* before the opens below, which can create files in the work directory */
+-	if (!stdoutMode && !copydb_check_cdc_layout(&specs))
++	if (false && !stdoutMode && !copydb_check_cdc_layout(&specs))
+ 	{
+ 		/* errors have already been logged */
+ 		exit(EXIT_CODE_BAD_STATE);

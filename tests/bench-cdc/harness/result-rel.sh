@@ -45,6 +45,8 @@ derived=$(awk -F, '
     return (u != "" && t > 0 && q > 0) ? sprintf("%.0f", 100 * u / 1e6 / t / q) : "" }
   END {
     fs = e["follow_start"]; on = e["apply_on_t"]
+    # RL runs no follow: its receive phase is the window of the drain itself
+    if (e["variant"] == "RL") { fs = e["rl_start_t"]; e["recv_close_t"] = e["rl_end_t"] }
     print "receive_s=" d(e["recv_close_t"], fs)
     print "receive_exit_s=" d(e["recv_end_t"], fs)
     print "spool_open_s=" d(e["spool_open_t"], fs)
@@ -107,31 +109,45 @@ derived=$(awk -F, '
   | map({(.k): (if .v == "" then null else (.v | tonumber? // .) end)}) | add
   | . as $r
   | (($r.endpos // "") | if test("^[0-9A-Fa-f]+/[0-9A-Fa-f]+$") then lsn else null end) as $end
+  | ($r.variant == "RL") as $rl
   | [ (if $r.rc != 0 then "exit status \($r.rc)" else empty end),
-      (if $r.compare != "pass" then "compare data: \($r.compare // "not run")" else empty end),
-      (if $r.follow_rc != 0 then "follow exited \($r.follow_rc // "-")" else empty end),
-      (if $r.recv_close_n != $r.n then "\($r.recv_close_n // 0) of \($r.n) receives reached endpos" else empty end),
-      (if ($r.recv_close_n_total // $r.n) != $r.n then "\($r.recv_close_n_total) receive endpos lines, a receive ran again" else empty end),
-      (if $r.apply_end_n != $r.n then "\($r.apply_end_n // 0) of \($r.n) applies reached endpos" else empty end),
-      (if $r.receive_marks_ok != 1 or $r.apply_marks_ok != 1 then "CPU marks missing" else empty end),
+      (if $r.receive_marks_ok != 1 then "receive CPU marks missing" else empty end),
       (if $r.sampler == "dead" then "sampler died" else empty end),
       (if $r.disk_abort != null then "disk abort" else empty end),
       (if ($r.wal_bytes | type) != "number" or $r.wal_bytes <= 0 then "WAL bytes \($r.wal_bytes // "missing")" else empty end),
       (if $r.pgbench_txns != $r.txns then "pgbench ran \($r.pgbench_txns // "no") of \($r.txns) transactions" else empty end),
-      (if $r.rows_match != 1 then "rows applied \($r.rows_applied // "-") differ from the workload rows \($r.rows_workload // "-")" else empty end),
-      (if $r.recv_dst_rows != 0 then "target rows changed by \($r.recv_dst_rows // "unknown") during receive: apply was not off" else empty end),
-      (if ($r.apply_wake_first_t | type) != "number" or ($r.apply_on_t | type) != "number"
-       then "apply wake time \($r.apply_wake_first_t // "-") or sentinel time \($r.apply_on_t // "-") missing"
-       elif $r.apply_wake_first_t < $r.apply_on_t then "apply woke before sentinel set apply" else empty end),
       (if $r.cleanup_rc != 0 then "stream cleanup exited \($r.cleanup_rc // "-")" else empty end),
       (if [$r.slots_left, $r.publications_left, $r.origins_left] != ["0,0", "0,0", "0,0"]
        then "cleanup left slots \($r.slots_left // "-"), publications \($r.publications_left // "-"), origins \($r.origins_left // "-") (source,target)" else empty end),
-      ($r.recv_flush_lsns | lsns) as $f
-      | (if $end == null or ($f | length) != $r.n or any($f[]; . < $end)
-         then "spool flush LSNs \($r.recv_flush_lsns // "-") do not all cover endpos \($r.endpos // "-")" else empty end) ] as $dq
+      (if $rl then
+         (if $r.rl_rc != 0 then "pg_recvlogical exited \($r.rl_rc // "-")" else empty end),
+         # a drain that read nothing exits 0 in no time and would read as the fastest receive
+         (if ($r.rl_bytes | type) != "number" or $r.rl_bytes <= 0 then "the drain wrote \($r.rl_bytes // "no") bytes" else empty end)
+       else
+         (if $r.compare != "pass" then "compare data: \($r.compare // "not run")" else empty end),
+         (if $r.follow_rc != 0 then "follow exited \($r.follow_rc // "-")" else empty end),
+         (if $r.recv_close_n != $r.n then "\($r.recv_close_n // 0) of \($r.n) receives reached endpos" else empty end),
+         (if ($r.recv_close_n_total // $r.n) != $r.n then "\($r.recv_close_n_total) receive endpos lines, a receive ran again" else empty end),
+         (if $r.apply_end_n != $r.n then "\($r.apply_end_n // 0) of \($r.n) applies reached endpos" else empty end),
+         (if $r.apply_marks_ok != 1 then "apply CPU marks missing" else empty end),
+         (if $r.rows_match != 1 then "rows applied \($r.rows_applied // "-") differ from the workload rows \($r.rows_workload // "-")" else empty end),
+         (if $r.recv_dst_rows != 0 then "target rows changed by \($r.recv_dst_rows // "unknown") during receive: apply was not off" else empty end),
+         (if ($r.apply_wake_first_t | type) != "number" or ($r.apply_on_t | type) != "number"
+          then "apply wake time \($r.apply_wake_first_t // "-") or sentinel time \($r.apply_on_t // "-") missing"
+          elif $r.apply_wake_first_t < $r.apply_on_t then "apply woke before sentinel set apply" else empty end),
+         # a build that ignores PGCOPYDB_FOLLOW_MODE writes the SQLite layout and no segment
+         (if $r.follow_mode == "performance" and ($r.spool_segments // 0) < 1
+          then "no cdc/*.seg file after receive: the build did not run performance mode" else empty end),
+         (($r.recv_flush_lsns | lsns) as $f
+          | (if $end == null or ($f | length) != $r.n or any($f[]; . < $end)
+             then "spool flush LSNs \($r.recv_flush_lsns // "-") do not all cover endpos \($r.endpos // "-")" else empty end))
+       end) ] as $dq
+  # the phases the variant has: RL never applies, so a missing apply reading is
+  # not a missing reading
+  | (if $rl then ["receive"] else ["receive", "apply"] end) as $phases
   | (if $r.host_cpu_limit == "off" then []
-     elif $r.receive_host_cpu_pct == null or $r.apply_host_cpu_pct == null then ["no host CPU reading"]
-     else [ (["receive", "apply"][] as $p | $r[$p + "_host_cpu_pct"] as $h
+     elif any($phases[]; $r[. + "_host_cpu_pct"] == null) then ["no host CPU reading"]
+     else [ ($phases[] as $p | $r[$p + "_host_cpu_pct"] as $h
        | select($h > ($r.host_cpu_limit // 400)) | "host CPU outside the VM \($h)% during \($p), limit \($r.host_cpu_limit // 400)%") ] end) as $host
   | . + { disqualified: $dq,
           contended_by: ((if .contended == 1 then ["containers \(.others)"] else [] end)
@@ -141,4 +157,5 @@ derived=$(awk -F, '
           full_size: (if .full_size == 1 and ([.src_cpus, .dst_cpus, .pod_cpus, .image_v26, .image_v27, .stage0, .big_in] | all(. != null))
             then 1 else 0 end) }
   | . + { contended: ((.contended_by | length) > 0) }
-  | . + { valid: (($dq | length) == 0 and (.contended | not) and .receive_s != null and .apply_s != null) }'
+  | . + { valid: (($dq | length) == 0 and (.contended | not) and .receive_s != null
+                  and ($rl or .apply_s != null)) }'

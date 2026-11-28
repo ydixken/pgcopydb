@@ -47,6 +47,7 @@ services:
       PGCOPYDB_INDEX_JOBS: 2
       PGCOPYDB_HOST: "0.0.0.0"
       PGCOPYDB_PORT: "5442"
+      PGCOPYDB_FOLLOW_MODE:
     env_file:
       - ../uris.env
       - ../paths.env

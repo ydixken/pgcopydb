@@ -1,0 +1,16 @@
+Mutant: snapshot parses --follow-mode and ignores it. Must fail: the mode case check "env PGCOPYDB_FOLLOW_MODE=performance pgcopydb snapshot --follow --follow-mode sqlite".
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/cli_snapshot.c
++++ b/src/bin/pgcopydb/cli_snapshot.c
+@@ -135,7 +135,9 @@
+ 
+ 			case 1009:      /* --follow-mode */
+ 			{
+-				if (!cli_parse_follow_mode(optarg, &(options.followMode)))
++				FollowMode ignored = FOLLOW_MODE_SQLITE;
++
++				if (!cli_parse_follow_mode(optarg, &ignored))
+ 				{
+ 					/* errors have already been logged */
+ 					exit(EXIT_CODE_BAD_ARGS);
