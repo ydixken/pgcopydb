@@ -6,9 +6,9 @@
 # refuse that directory before it changes anything in it.
 #
 # Case refuse reads the refusal that a mode mismatch produces.
-# Case perfdir is not in the default list: it leaves the replication slot of
-# the case before it in place, and its snapshot --follow then fails on a slot
-# that already exists.  Run it alone with CASE=perfdir.
+# Case perfdir reads the two refusals that a performance directory produces.
+# It runs before refuse, which ends with the replication slot of its prefetch
+# still in place, where a snapshot --follow of a later case would fail on it.
 
 set -euo pipefail
 
@@ -317,11 +317,12 @@ perfdir() {
     # the mode check answers first, so the setup check never reports
     expect 3 "${REFUSAL}" sqlite-clone "${NEW}" clone --follow --resume \
            --not-consistent --endpos "${lsn}" --dir "${dir}"
-    grep -qF 'an earlier attempt set up' /tmp/perfdir/sqlite-clone.log &&
+    grep -qF 'Failed to re-use replication slot' /tmp/perfdir/sqlite-clone.log &&
         fail 'the setup check answered before the mode check'
     expect 3 "${REFUSAL}" sqlite-follow "${NEW}" follow --resume \
            --not-consistent --endpos "${lsn}" --dir "${dir}"
-    expect 6 'an earlier attempt set up' old-clone "${OLD}" clone --follow --resume \
+    expect 6 'it was set up with --wal-workers 1 --wal-high-traffic-tables "performance"' \
+           old-clone "${OLD}" clone --follow --resume \
            --not-consistent --endpos "${lsn}" --dir "${dir}"
     check 'the refused runs changed the directory' "${before}" "$(record "${dir}")"
 
@@ -334,7 +335,7 @@ perfdir() {
 "${OLD}" --version
 "${NEW}" ping
 
-for c in ${CASE:-one two nine refuse}; do
+for c in ${CASE:-one two nine perfdir refuse}; do
     case "${c}" in
         one) one ;;
         two) two ;;
