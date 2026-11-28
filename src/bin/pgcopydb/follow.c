@@ -104,7 +104,8 @@ follow_export_snapshot(CopyDataSpec *copySpecs, StreamSpecs *streamSpecs)
 	if (!copydb_create_logical_replication_slot(copySpecs,
 												logrep_pguri,
 												&(streamSpecs->slot),
-												streamSpecs->paths.dir))
+												streamSpecs->paths.dir,
+												streamSpecs->maxReplayDBSize))
 	{
 		/* errors have already been logged */
 		return false;

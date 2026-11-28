@@ -641,14 +641,10 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
 	specs->system = stream->system;
 	specs->private.timeline = stream->system.timeline;
 
-	/*
-	 * The raw spool takes the place of output.db, and only receive opens it,
-	 * through stream_open_raw_spool: a slot creation knows neither the
-	 * position the slot confirmed nor the segment size, and writes no frame.
-	 */
+	/* the raw spool takes the place of output.db, and the apply reads it */
 	if (stream_uses_raw_spool(specs))
 	{
-		return true;
+		return stream_open_raw_spool(specs, stream);
 	}
 
 	/* now that we have the current timeline and startpos lsn, open output.db */
@@ -667,7 +663,7 @@ stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream)
  * reports the position of the last transaction it holds. A reconnect keeps the
  * open spool, which the rewind cut back to that transaction.
  */
-static bool
+bool
 stream_open_raw_spool(StreamSpecs *specs, LogicalStreamClient *stream)
 {
 	StreamContext *privateContext = &(specs->private);
@@ -806,8 +802,7 @@ startLogicalStreaming(StreamSpecs *specs)
 			return false;
 		}
 
-		if (!stream_init_timeline(specs, &stream) ||
-			!stream_open_raw_spool(specs, &stream))
+		if (!stream_init_timeline(specs, &stream))
 		{
 			/* errors have already been logged */
 			return false;

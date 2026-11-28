@@ -404,10 +404,12 @@ SQL
     done
     test -s "${TMPDIR}/snapshot.out" || fail 'no exported snapshot'
 
-    # receive creates the first segment, because the slot creation knows
-    # neither the position the slot confirmed nor the size of a segment
-    test "$(segments)" -eq 0 ||
-        fail "the slot creation left $(segments) spool segment(s) in ${spool}"
+    # the slot creation leaves the first segment and the relation log, which
+    # the apply of the first run opens before receive has written a frame
+    test "$(segments)" -eq 1 ||
+        fail "the slot creation left $(segments) spool segment(s) in ${spool}, not one"
+    test -f "${spool}/relation.log" ||
+        fail "the slot creation left no relation log in ${spool}"
 
     pgcopydb stream setup
     pgcopydb clone
