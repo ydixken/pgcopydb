@@ -20,6 +20,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume \
 	 cdc-wal-workers-idle wal-workers-assign cdc-spool-format \
 	 cdc-spool-settings cdc-follow-mode cdc-layout-refusal \
+	 cdc-parallel-differential \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering follow-resume-snapshot \
 	 orphaned-target-backend split-table-resume \
@@ -189,6 +190,12 @@ cdc-spool-resend: build
 cdc-spool-relation: build
 	$(MAKE) -C $@
 
+cdc-parallel-differential: build
+	$(MAKE) -C $@
+
+cdc-parallel-isolation: build
+	$(MAKE) -C $@
+
 # builds its own image from the build stage of the top-level Dockerfile
 catalog-stmt-cache:
 	$(MAKE) -C $@
@@ -356,6 +363,8 @@ clean-images:
 .PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format cdc-parallel-crash
 .PHONY: cdc-spool-settings cdc-follow-mode cdc-layout-refusal
 .PHONY: cdc-origin-source-performance cdc-spool-resend cdc-spool-relation
+.PHONY: cdc-wal-workers-idle wal-workers-assign cdc-spool-format
+.PHONY: cdc-parallel-differential cdc-parallel-isolation
 .PHONY: follow-wal2json follow-9.6 follow-resume-snapshot orphaned-target-backend split-table-resume
 .PHONY: cdc-pgoutput-performance cdc-low-level-performance cdc-filtering-pgoutput-performance
 .PHONY: cdc-replica-identity-full-performance cdc-truncate-multi-performance cdc-receive-drain-error-performance
