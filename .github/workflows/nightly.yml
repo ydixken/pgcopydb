@@ -172,6 +172,7 @@ jobs:
           - cdc-copy-multi-insert
           - cdc-receive-group-commit
           - cdc-endpos-before-txn
+          - cdc-endpos-before-txn-performance
           - cdc-origin-source
           - cdc-wal-workers
           - cdc-wal-workers-endpos

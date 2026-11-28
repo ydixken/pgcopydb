@@ -1,0 +1,13 @@
+Mutant: the worker takes the cut as its applied position, which moves its origin to endpos. Must fail: the stored replay position check of the cut at the BEGIN position, which publishes the cut instead of the last commit.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_apply.c
++++ b/src/bin/pgcopydb/ld_apply.c
+@@ -749,6 +749,7 @@ stream_apply_spool_cut(StreamApplyContext *context, PipelineStateEntry *current,
+ 
+ 	cut->endpos = endpos;
+ 	cut->lsn = Max(endpos, context->previousLSN);
++	context->previousLSN = cut->lsn;
+ 
+ 	if (endpos != InvalidXLogRecPtr)
+ 	{
