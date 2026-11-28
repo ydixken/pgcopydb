@@ -267,6 +267,12 @@ cdc-partitioned-target-performance: build
 cdc-pgoutput-resume-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-pgoutput-resume
 
+# Not in "all" and not in the CI lists: the group rule holds by a margin of a
+# few hundred transactions on the raw spool, where sqlite mode commits 20001
+# transactions in 6 batches. Run it by hand until that is settled.
+cdc-receive-group-commit-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-group-commit
+
 build:
 	@docker image inspect pagila > /dev/null 2>&1 \
 	  && echo "pagila image already present — skipping build (run 'make force-build' to rebuild)" \
@@ -312,7 +318,7 @@ clean-images:
 .PHONY: cdc-receive-reconnect-dying-source-performance cdc-receive-status-interval-performance cdc-origin-abort-performance
 .PHONY: cdc-apply-wakeup-performance follow-filtering-performance follow-resume-snapshot-performance
 .PHONY: cdc-replica-identity-index-performance cdc-partitioned-target-performance
-.PHONY: cdc-pgoutput-resume-performance
+.PHONY: cdc-pgoutput-resume-performance cdc-receive-group-commit-performance
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases
 .PHONY: timescaledb citus
