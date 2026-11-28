@@ -616,7 +616,8 @@ bool
 copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 									   const char *logrep_pguri,
 									   ReplicationSlot *slot,
-									   char *cdcPathDir)
+									   char *cdcPathDir,
+									   uint64_t maxSegmentSize)
 {
 	TransactionSnapshot *sourceSnapshot = &(copySpecs->sourceSnapshot);
 	StreamSpecs specs = { 0 };
@@ -775,6 +776,15 @@ copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 	specs.outputDB = &(copySpecs->catalogs.output);
 	specs.replayDB = &(copySpecs->catalogs.replay);
 	specs.private.startpos = slot->lsn;
+
+	/*
+	 * The start of the spool checks its cut against these. The slot is new, so
+	 * it confirmed the position it was created at and the target has replayed
+	 * nothing, and the apply of the first run reads the files this creates.
+	 */
+	specs.confirmedFlushLSN = slot->lsn;
+	specs.storedW = InvalidXLogRecPtr;
+	specs.maxReplayDBSize = maxSegmentSize;
 
 	if (!stream_init_timeline(&specs, stream))
 	{

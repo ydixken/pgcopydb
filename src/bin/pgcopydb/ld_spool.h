@@ -29,6 +29,8 @@ typedef struct SpoolHeader
 {
 	uint64_t firstSeq;          /* sequence number of the first transaction */
 	uint64_t systemId;          /* of the source, as IDENTIFY_SYSTEM gives it */
+
+	/* provenance: a resume on a later timeline of the same system is legitimate */
 	uint32_t timeline;
 
 	/* of the last complete transaction before this segment */

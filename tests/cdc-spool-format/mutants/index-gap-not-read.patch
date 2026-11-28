@@ -1,0 +1,19 @@
+Mutant: the index read of a start stops at the gap, so a valid record above it, which the cut drops, is never read. Must fail: a valid index record above the damage whose transaction ends at or below the position the slot confirmed ends every start with an error that names both positions, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2208,12 +2208,7 @@
+ 			{
+ 				tail->gap = true;
+ 
+-				if (tail->dropped == InvalidXLogRecPtr)
+-				{
+-					tail->dropped = record.endLSN;
+-				}
+-
+-				continue;
++				return true;
+ 			}
+ 
+ 			tail->last = record;

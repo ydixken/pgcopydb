@@ -450,7 +450,8 @@ bool copydb_close_snapshot(CopyDataSpec *copySpecs);
 bool copydb_create_logical_replication_slot(CopyDataSpec *copySpecs,
 											const char *logrep_pguri,
 											ReplicationSlot *slot,
-											char *cdcPathDir);
+											char *cdcPathDir,
+											uint64_t maxSegmentSize);
 
 /* extensions.c */
 bool copydb_extension_options_are_consistent(CopyDataSpec *specs);

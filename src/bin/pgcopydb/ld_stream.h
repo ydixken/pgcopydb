@@ -812,6 +812,7 @@ bool stream_signal_upstream_done(StreamSpecs *specs, uint64_t done_lsn,
 bool stream_recv_upstream_done(StreamSpecs *specs, int pipe_read_fd);
 bool stream_init_context(StreamSpecs *specs);
 bool stream_init_timeline(StreamSpecs *specs, LogicalStreamClient *stream);
+bool stream_open_raw_spool(StreamSpecs *specs, LogicalStreamClient *stream);
 
 bool startLogicalStreaming(StreamSpecs *specs);
 bool streamCheckResumePosition(StreamSpecs *specs);

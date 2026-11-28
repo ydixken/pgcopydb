@@ -3,12 +3,12 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2144,7 +2144,7 @@
- 			 * records: the records before it are kept, and the rule of A47
- 			 * decides whether that cut is safe.
+@@ -2204,7 +2204,7 @@
+ 			 * decides whether that cut is safe. The read goes on past that
+ 			 * gap, because what the cut drops decides it (A47).
  			 */
--			tail->gap = at + i > tail->keep;
-+			tail->gap = i > tail->keep;
- 
- 			if (!tail->gap)
+-			if (at + i > tail->keep)
++			if (i > tail->keep)
  			{
+ 				tail->gap = true;
+ 

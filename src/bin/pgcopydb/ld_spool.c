@@ -2123,6 +2123,9 @@ typedef struct SpoolTail
 	uint64_t keep;              /* index length up to the end of last, or 0 */
 	uint64_t indexSize;
 	bool gap;                   /* a valid record follows an invalid one */
+
+	/* the end LSN of the first valid record above keep, which a cut drops */
+	uint64_t dropped;
 } SpoolTail;
 
 
@@ -2136,8 +2139,9 @@ spool_tail_close(SpoolTail *tail)
 
 
 /*
- * spool_tail_read opens segment seq, reads its header, and the last valid
- * record of its index file, after which only invalid records may follow.
+ * spool_tail_read opens segment seq, reads its header, the last valid record
+ * of its index file, and the first valid record above it, which names a
+ * transaction that a cut at that offset drops.
  */
 static bool
 spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed)
@@ -2176,8 +2180,7 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 
 	tail->indexSize = (uint64_t) st.st_size;
 
-	for (uint64_t at = 0; !tail->gap && at < (uint64_t) st.st_size;
-		 at += sizeof(bytes))
+	for (uint64_t at = 0; at < (uint64_t) st.st_size; at += sizeof(bytes))
 	{
 		if (!spool_pread(tail->indexFd, tail->index, bytes,
 						 Min(sizeof(bytes), (uint64_t) st.st_size - at), at, &done))
@@ -2185,7 +2188,7 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 			return false;
 		}
 
-		for (uint64_t i = 0; !tail->gap && i < done; i += SPOOL_INDEX_RECORD_SIZE)
+		for (uint64_t i = 0; i < done; i += SPOOL_INDEX_RECORD_SIZE)
 		{
 			SpoolIndexRecord record = { 0 };
 
@@ -2198,15 +2201,23 @@ spool_tail_read(SpoolTail *tail, const char *dirname, uint64_t seq, bool indexed
 			 * A power loss can keep a later record of a write and not an
 			 * earlier one, and a cut cannot tell that from damage of synced
 			 * records: the records before it are kept, and the rule of A47
-			 * decides whether that cut is safe.
+			 * decides whether that cut is safe. The read goes on past that
+			 * gap, because what the cut drops decides it (A47).
 			 */
-			tail->gap = at + i > tail->keep;
-
-			if (!tail->gap)
+			if (at + i > tail->keep)
 			{
-				tail->last = record;
-				tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+				tail->gap = true;
+
+				if (tail->dropped == InvalidXLogRecPtr)
+				{
+					tail->dropped = record.endLSN;
+				}
+
+				continue;
 			}
+
+			tail->last = record;
+			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
 		}
 	}
 
@@ -2356,17 +2367,19 @@ spool_tail_append(SpoolTail *tail, SpoolWriter *writer, const char *dirname,
 
 
 /*
- * spool_keepalive_scan raises lsn to the highest keepalive position that the
- * frames of a segment hold. The feedback reports such a position as flushed
- * under the rule of stream_sync_sentinel, and the marker carries no change, so
- * a cut that drops one loses nothing. It stops at the first frame that is not
- * whole, which no sync covered.
+ * spool_dropped_scan raises lsn to the highest end LSN at or below bound that
+ * a COMMIT frame above at holds: a cut at that offset drops those
+ * transactions, and the walsender sends again only what is above the position
+ * the slot confirmed. A keepalive marker carries no change, so a cut that
+ * drops one loses nothing. It stops at the first frame that is not whole,
+ * which no sync covered.
  */
 static bool
-spool_keepalive_scan(const SpoolSegment *segment, uint64_t *lsn)
+spool_dropped_scan(const SpoolSegment *segment, uint64_t from, uint64_t bound,
+				   uint64_t *lsn)
 {
 	char *buf = (char *) malloc(SPOOL_BLOCK_SIZE);
-	uint64_t at = SPOOL_HEADER_SIZE;
+	uint64_t at = from;
 	bool read = true;
 
 	if (buf == NULL)
@@ -2397,13 +2410,18 @@ spool_keepalive_scan(const SpoolSegment *segment, uint64_t *lsn)
 				break;
 			}
 
-			if (length == SPOOL_KEEPALIVE_SIZE &&
-				message[0] == SPOOL_KIND_KEEPALIVE)
+			/* 'C' at flags, the commit LSN, then the end LSN of pgoutput */
+			if (message[0] == SPOOL_KIND_XLOGDATA &&
+				length >= SPOOL_XLOGDATA_HEADER_SIZE + 18 &&
+				message[SPOOL_XLOGDATA_HEADER_SIZE] == 'C')
 			{
-				int pos = 1;
-				uint64_t position = pgout_u64(message, &pos, (int) length);
+				int pos = SPOOL_XLOGDATA_HEADER_SIZE + 10;
+				uint64_t endLSN = pgout_u64(message, &pos, (int) length);
 
-				*lsn = Max(*lsn, position);
+				if (endLSN <= bound)
+				{
+					*lsn = Max(*lsn, endLSN);
+				}
 			}
 
 			offset += SPOOL_FRAME_SIZE(length);
@@ -2686,28 +2704,49 @@ spool_start_read(SpoolStart *start, const char *dirname,
 
 	/*
 	 * Damage in the index file of the last segment drops transactions that the
-	 * slot can hold as flushed. A cut at or above the position it confirmed is
-	 * safe, because the walsender sends every transaction above it again, and
-	 * a keepalive marker of the spool counts where the feedback counts it.
+	 * slot can hold as flushed, so the rule of A47 reads what the cut drops:
+	 * the index records above the damage, and the COMMIT frames above the cut,
+	 * which the flush synced before it wrote those records. One at or below
+	 * the position the slot confirmed is a transaction the walsender does not
+	 * send again, and one above the stored replay position is one the target
+	 * does not hold either, so the cut would lose it.
 	 */
 	bool damaged = start->last.gap || start->last.keep < start->last.indexSize;
 	uint64_t kept = start->tail != NULL ? start->tail->last.endLSN :
 					start->header.lastEndLSN;
+	uint64_t dropped = start->last.dropped <= confirmedFlushLSN ?
+					   start->last.dropped : InvalidXLogRecPtr;
 
-	if (damaged && kept < confirmedFlushLSN && start->tail != NULL &&
-		!spool_keepalive_scan(&start->tail->segment, &kept))
+	if (damaged && kept < confirmedFlushLSN && storedW < confirmedFlushLSN)
 	{
-		return false;
-	}
+		/* the cut keeps the tail up to its last indexed transaction */
+		if (start->tail != NULL &&
+			!spool_dropped_scan(&start->tail->segment,
+								start->tail->last.endOffset, confirmedFlushLSN,
+								&dropped))
+		{
+			return false;
+		}
 
-	if (damaged && kept < confirmedFlushLSN)
-	{
-		log_error("Spool file \"%s\" holds no valid index record at offset %"
-				  PRIu64 ", and a cut there keeps the spool up to %X/%X, below "
-						 "the %X/%X that the replication slot confirmed as flushed",
-				  start->last.index, start->last.keep, LSN_FORMAT_ARGS(kept),
-				  LSN_FORMAT_ARGS(confirmedFlushLSN));
-		return false;
+		/* and the act pass removes a last segment that holds no record */
+		if (start->removed &&
+			!spool_dropped_scan(&start->last.segment, SPOOL_HEADER_SIZE,
+								confirmedFlushLSN, &dropped))
+		{
+			return false;
+		}
+
+		if (dropped > storedW)
+		{
+			log_error("Spool file \"%s\" holds no valid index record at offset %"
+					  PRIu64 ", and a cut there drops the transaction that ends "
+							 "at %X/%X, at or below the %X/%X that the "
+							 "replication slot confirmed as flushed",
+					  start->last.index, start->last.keep,
+					  LSN_FORMAT_ARGS(dropped),
+					  LSN_FORMAT_ARGS(confirmedFlushLSN));
+			return false;
+		}
 	}
 
 	if (start->last.gap)

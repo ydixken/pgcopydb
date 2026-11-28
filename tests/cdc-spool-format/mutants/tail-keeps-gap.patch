@@ -3,19 +3,22 @@ Apply from the repository root with git apply, and never commit it applied.
 
 --- a/src/bin/pgcopydb/ld_spool.c
 +++ b/src/bin/pgcopydb/ld_spool.c
-@@ -2144,13 +2144,8 @@
- 			 * records: the records before it are kept, and the rule of A47
- 			 * decides whether that cut is safe.
+@@ -2204,18 +2204,6 @@
+ 			 * decides whether that cut is safe. The read goes on past that
+ 			 * gap, because what the cut drops decides it (A47).
  			 */
--			tail->gap = at + i > tail->keep;
--
--			if (!tail->gap)
+-			if (at + i > tail->keep)
 -			{
--				tail->last = record;
--				tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+-				tail->gap = true;
+-
+-				if (tail->dropped == InvalidXLogRecPtr)
+-				{
+-					tail->dropped = record.endLSN;
+-				}
+-
+-				continue;
 -			}
-+			tail->last = record;
-+			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
+-
+ 			tail->last = record;
+ 			tail->keep = at + i + SPOOL_INDEX_RECORD_SIZE;
  		}
- 	}
- 

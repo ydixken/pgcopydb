@@ -13,12 +13,12 @@ tc=${1:-${CASE:-all}}
 
 case "${tc}" in
     all)
-        for one in cleanup receive worker start power; do
+        for one in cleanup receive worker start removal power; do
             bash "$0" "${one}"
         done
         exit 0
         ;;
-    cleanup | receive | worker | start | power) ;;
+    cleanup | receive | worker | start | removal | power) ;;
     *)
         echo "Unknown crash case: ${tc}" >&2
         exit 1
@@ -119,6 +119,7 @@ counts() {
 segments() { ls "${spool}"/*.seg 2> /dev/null | wc -l | tr -d ' '; }
 indexes() { ls "${spool}"/*.idx 2> /dev/null | wc -l | tr -d ' '; }
 lowest_seg() { ls "${spool}"/*.seg 2> /dev/null | sort | head -1; }
+highest_seg() { ls "${spool}"/*.seg 2> /dev/null | sort | tail -1; }
 spool_list() { timeout 60s pgcopydb list spool --json; }
 spool_txns() { spool_list | jq -r '[.[].end_lsn] | join(",")'; }
 spool_txns_without() { spool_list | jq -r --arg s "$1" '[.[] | select(.segment != $s) | .end_lsn] | join(",")'; }
@@ -180,15 +181,22 @@ running() {
     fail "the run did not reach the raw spool apply, see $1"
 }
 
-# drained: the worker applied every indexed transaction of the spool
+# drained: the worker applied every indexed transaction of the spool. A short
+# apply can store its position and exit between the two reads, so an ended run
+# is read again before it counts as one that stopped early.
 drained() {
     local want got=0/0
     for _ in $(seq 240); do
         want=$(spool_last)
         got=$(replay)
         lsn_ge "${got}" "${want}" && { echo "OK the worker applied the spool up to ${want}"; return; }
-        test -z "${pid}" || kill -0 "${pid}" 2> /dev/null ||
+        if [ -n "${pid}" ] && ! kill -0 "${pid}" 2> /dev/null; then
+            want=$(spool_last)
+            got=$(replay)
+            lsn_ge "${got}" "${want}" &&
+                { echo "OK the worker applied the spool up to ${want}"; return; }
             fail "the run ended before it applied the spool up to ${want}, at ${got}"
+        fi
         sleep 0.5
     done
     fail "the worker did not apply the spool up to ${want}, at ${got}"
@@ -226,11 +234,12 @@ prefetch() {
     echo "OK receive reached $1"
 }
 
-# receive_to endpos log: receive alone without the follow supervisor, so that
-# no cleanup pass of its own can remove what the start of the spool leaves
+# receive_to endpos log [size]: receive alone without the follow supervisor, so
+# that no cleanup pass of its own can remove what the start of the spool
+# leaves. A size no round reaches keeps the last segment, which rotates none.
 receive_to() {
     timeout 300 pgcopydb stream receive --resume --endpos "$1" \
-            --max-replaydb-size 8kB > "${TMPDIR}/$2.log" 2>&1 ||
+            --max-replaydb-size "${3:-8kB}" > "${TMPDIR}/$2.log" 2>&1 ||
         { cat "${TMPDIR}/$2.log"; return 1; }
     if grep -q 'Removed spool segment' "${TMPDIR}/$2.log"; then
         fail "a cleanup pass ran inside the receive of $2, which no check may rely on"
@@ -394,6 +403,13 @@ SQL
         sleep 0.5
     done
     test -s "${TMPDIR}/snapshot.out" || fail 'no exported snapshot'
+
+    # the slot creation leaves the first segment and the relation log, which
+    # the apply of the first run opens before receive has written a frame
+    test "$(segments)" -eq 1 ||
+        fail "the slot creation left $(segments) spool segment(s) in ${spool}, not one"
+    test -f "${spool}/relation.log" ||
+        fail "the slot creation left no relation log in ${spool}"
 
     pgcopydb stream setup
     pgcopydb clone
@@ -595,6 +611,79 @@ case_worker() {
           "$(src -c "select '$(replay)'::pg_lsn <= '$(origin)'::pg_lsn")"
 
     catchup "${endpos}" catchup
+    equal_target
+}
+
+#
+# removal: the last segment loses the page that holds its index records, after
+# the target applied a position inside it and receive reported that position
+# to the slot. The removal then drops no transaction that the target lacks and
+# none the source keeps, so the start takes it: a refusal there writes
+# nothing, so it repeats on every later start and costs a new base copy.
+#
+case_removal() {
+    local endpos last before kept dropped confirmed first w
+
+    setup
+    rounds 1 40
+    endpos=$(src -c 'select pg_current_wal_flush_lsn()')
+    prefetch "${endpos}" prefetch || fail 'the receive of the workload failed'
+    raw_spool
+    test "$(segments)" -ge 2 || fail "the workload left $(segments) segment(s), fewer than 2"
+
+    # both processes under their supervisor, which stores the position the
+    # target applied and has receive report it to the slot
+    pgcopydb stream sentinel set apply > /dev/null
+    pgcopydb follow --resume --not-consistent --endpos "${endpos}" \
+            > "${TMPDIR}/follow.log" 2>&1 &
+    pid=$!
+    running "${TMPDIR}/follow.log"
+    drained
+    ended "${TMPDIR}/follow.log" 'Follow mode is now done, reached endpos'
+    equal_target
+
+    w=$(replay)
+    confirmed=$(src -c "select confirmed_flush_lsn from pg_replication_slots
+                        where slot_name = '${S}'")
+    check 'the slot confirmed the position the target applied' "${w}" "${confirmed}"
+
+    # without this, the cut would keep the spool at or above what the slot
+    # confirmed, and the start would take it whatever this case does next
+    last=$(highest_seg)
+    first=$(spool_list | jq -r --arg s "$(basename "${last}" .seg)" \
+        '[.[] | select(.segment == $s)] | .[0].end_lsn')
+    lsn_ge "${confirmed}" "${first}" ||
+        fail "the slot confirmed ${confirmed}, below the first transaction ${first} of the last segment, so this case proves nothing"
+
+    # the index file of the last segment keeps bytes that name no transaction,
+    # which is what a lost page of an already synced region leaves
+    before=$(spool_txns)
+    kept=$(spool_txns_without "$(basename "${last}" .seg)")
+    truncate -s 0 "${last%.seg}.idx"
+    truncate -s 30 "${last%.seg}.idx"
+
+    test "$(txn_lines "$(spool_txns)")" -lt "$(txn_lines "${before}")" ||
+        fail "the index file of \"$(basename "${last}")\" still names every transaction it held, so the damage did nothing"
+    echo "OK \"$(basename "${last}")\" names no transaction, at $(stat -c %s "${last%.seg}.idx") bytes, and the slot confirmed ${confirmed}"
+
+    receive_to "$(endpos_after 41)" receive-removal 100MB ||
+        fail 'the start refused a last segment whose index file names no transaction, although every transaction it drops is one the target holds or the source sends again'
+    test -f "${last}" || fail "the start left no segment \"${last}\""
+    grown "${kept}"
+
+    # what the removal dropped: the target holds it, or it is above the
+    # position the slot confirmed, where the walsender sends it again
+    dropped=$(comm -23 <(tr ',' '\n' <<< "${before}" | sort) \
+                       <(tr ',' '\n' <<< "$(spool_txns)" | sort) | paste -sd, -)
+    test -n "${dropped}" ||
+        fail 'the removal dropped no indexed transaction, so it proves nothing'
+    echo "the removal dropped $(txn_lines "${dropped}") indexed transaction(s)"
+    check 'every transaction the removal dropped is applied or sent again' t \
+          "$(src -c "select bool_and(x::pg_lsn <= '${w}'::pg_lsn or
+                                     x::pg_lsn > '${confirmed}'::pg_lsn) from
+                     unnest(string_to_array('${dropped}', ',')) as t(x) where x <> ''")"
+
+    catchup "$(spool_last)" catchup-after-removal
     equal_target
 }
 
