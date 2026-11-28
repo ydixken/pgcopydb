@@ -510,6 +510,13 @@ The following options are available to ``pgcopydb follow``:
   transaction will not be consumed and will be replayed again when the slot
   is next read from. Individual messages are never truncated.
 
+  In ``performance`` mode, see :ref:`raw_spool`, exit status 0 with endpos set
+  means that apply recorded its finish at that endpos. A run that a signal
+  stops short of endpos exits with an error and records none, and the next run
+  resumes to endpos. A transaction that commits above endpos is left for a
+  later run even when the spool holds all of it, so the origin can stay below
+  endpos after a clean finish.
+
   See also documentation for `pg_recvlogical`__.
 
   __ https://www.postgresql.org/docs/current/app-pgrecvlogical.html
