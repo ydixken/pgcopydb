@@ -161,6 +161,7 @@ jobs:
           - follow-9.6
           - follow-data-only
           - follow-pgoutput
+          - follow-pgoutput-performance
           - follow-filtering
           - follow-filtering-performance
           - follow-resume-snapshot

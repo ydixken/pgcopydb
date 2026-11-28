@@ -163,6 +163,7 @@ jobs:
           - catalog-stmt-cache
           - follow-wal2json
           - follow-pgoutput
+          - follow-pgoutput-performance
           - follow-9.6
           - follow-data-only
           - follow-filtering
@@ -263,6 +264,8 @@ jobs:
           - TEST: follow-wal2json
             PGVERSION: 16
           - TEST: follow-pgoutput
+            PGVERSION: 16
+          - TEST: follow-pgoutput-performance
             PGVERSION: 16
           - TEST: follow-9.6
             PGVERSION: 16

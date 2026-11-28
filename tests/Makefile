@@ -31,7 +31,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-origin-abort-performance cdc-apply-wakeup-performance \
 	 follow-filtering-performance follow-resume-snapshot-performance \
 	 cdc-replica-identity-index-performance cdc-partitioned-target-performance \
-	 cdc-endpos-before-txn-performance;
+	 cdc-endpos-before-txn-performance follow-pgoutput-performance;
 
 pagila: build
 	$(MAKE) -C $@
@@ -267,6 +267,9 @@ cdc-partitioned-target-performance: build
 cdc-endpos-before-txn-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-endpos-before-txn
 
+follow-pgoutput-performance: build
+	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C follow-pgoutput
+
 build:
 	@docker image inspect pagila > /dev/null 2>&1 \
 	  && echo "pagila image already present — skipping build (run 'make force-build' to rebuild)" \
@@ -312,7 +315,7 @@ clean-images:
 .PHONY: cdc-receive-reconnect-dying-source-performance cdc-receive-status-interval-performance cdc-origin-abort-performance
 .PHONY: cdc-apply-wakeup-performance follow-filtering-performance follow-resume-snapshot-performance
 .PHONY: cdc-replica-identity-index-performance cdc-partitioned-target-performance
-.PHONY: cdc-endpos-before-txn-performance
+.PHONY: cdc-endpos-before-txn-performance follow-pgoutput-performance
 .PHONY: all-databases-resume large-objects-resume json-logs
 .PHONY: defer-indexes defer-indexes-queue defer-indexes-all-databases
 .PHONY: timescaledb citus
