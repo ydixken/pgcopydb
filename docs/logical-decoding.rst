@@ -373,6 +373,8 @@ It appends the replication stream to numbered segment files in the CDC directory
 - ``relation.log`` holds every RELATION and TYPE message, each with the position it was logged at, its length, the message unchanged, and the CRC-32C.
   Apply needs it after a restart, because the walsender sends a relation definition once per connection.
 
+A frame keeps the value text the walsender printed, so receive pins the settings of that connection: see :ref:`value_text_pin`.
+
 Receive syncs in this order, and only then reports a flush position: the segment, the relation log, then the index record.
 A reader therefore never meets an index record whose frames or relation definitions are missing.
 ``pgcopydb list spool`` prints the index records of a work directory and reads no frame.
