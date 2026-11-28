@@ -194,6 +194,8 @@ jobs:
           - wal-workers-assign
           - cdc-spool-format
           - cdc-spool-settings
+          - cdc-spool-resend
+          - cdc-spool-relation
           - cdc-follow-mode
           - cdc-layout-refusal
           - cdc-parallel-differential
@@ -339,6 +341,10 @@ jobs:
           - TEST: cdc-spool-format
             PGVERSION: 16
           - TEST: cdc-spool-settings
+            PGVERSION: 16
+          - TEST: cdc-spool-resend
+            PGVERSION: 16
+          - TEST: cdc-spool-relation
             PGVERSION: 16
           - TEST: cdc-follow-mode
             PGVERSION: 16
