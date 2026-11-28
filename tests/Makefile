@@ -30,6 +30,7 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-filtering-pgoutput-performance cdc-replica-identity-full-performance \
 	 cdc-truncate-multi-performance cdc-receive-drain-error-performance \
 	 cdc-receive-reconnect-dying-source-performance cdc-receive-status-interval-performance \
+	 cdc-receive-group-commit-performance \
 	 cdc-origin-abort-performance cdc-apply-wakeup-performance \
 	 follow-filtering-performance follow-resume-snapshot-performance \
 	 cdc-replica-identity-index-performance cdc-partitioned-target-performance \
@@ -186,15 +187,15 @@ cdc-layout-refusal: build
 cdc-origin-source-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-source
 
-# Not in "all" and not in the CI lists: case source times out waiting for
-# cleanup to delete the segment of the canary transaction on the merged head.
-# Run it by hand until that is settled.
+# Not in "all" and not in the CI lists: the source and source14 cases count a
+# second relation record as the proof of a resend, and the relation log of the
+# merged head drops a repeat it already holds.  Case diskfull passes.
 cdc-spool-resend: build
 	$(MAKE) -C $@
 
-# Not in "all" and not in the CI lists: case skipped times out waiting for the
-# RELATION of the resend on the merged head.  Run it by hand until that is
-# settled.
+# Not in "all" and not in the CI lists: case skipped counts the same second
+# relation record as the source case of cdc-spool-resend, which the relation
+# log of the merged head does not append.
 cdc-spool-relation: build
 	$(MAKE) -C $@
 
@@ -318,9 +319,8 @@ cdc-partitioned-target-performance: build
 cdc-pgoutput-resume-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-pgoutput-resume
 
-# Not in "all" and not in the CI lists: the group rule holds by a margin of a
-# few hundred transactions on the raw spool, where sqlite mode commits 20001
-# transactions in 6 batches. Run it by hand until that is settled.
+# The group rule holds here by a margin of a few hundred transactions on the
+# raw spool, where sqlite mode commits 20001 transactions in 6 batches.
 cdc-receive-group-commit-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-receive-group-commit
 

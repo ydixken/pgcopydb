@@ -181,6 +181,7 @@ jobs:
           - cdc-copy-multi-insert
           - cdc-copy-multi-insert-performance
           - cdc-receive-group-commit
+          - cdc-receive-group-commit-performance
           - cdc-endpos-before-txn
           - cdc-endpos-before-txn-performance
           - cdc-origin-source
@@ -312,6 +313,8 @@ jobs:
           - TEST: cdc-copy-multi-insert-performance
             PGVERSION: 16
           - TEST: cdc-receive-group-commit
+            PGVERSION: 16
+          - TEST: cdc-receive-group-commit-performance
             PGVERSION: 16
           - TEST: cdc-endpos-before-txn
             PGVERSION: 16
