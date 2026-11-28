@@ -190,6 +190,8 @@ jobs:
           - wal-workers-assign
           - cdc-spool-format
           - cdc-spool-settings
+          - cdc-spool-resend
+          - cdc-spool-relation
           - cdc-follow-mode
           - cdc-layout-refusal
           - cdc-parallel-differential
@@ -209,8 +211,12 @@ jobs:
           # A matrix generates at most 256 jobs, and this one now asks for
           # more than that, which fails the run before any job starts.  The
           # rows that Run Tests covers on the same head are the PostgreSQL 18
-          # rows of the performance entries, so they go here, and 16 and 17
-          # keep every entry.
+          # rows of the entries that only run in performance mode, so they go
+          # here, and 16 and 17 keep every entry.
+          - TEST: cdc-spool-resend
+            PGVERSION: 18
+          - TEST: cdc-spool-relation
+            PGVERSION: 18
           - TEST: cdc-low-level-performance
             PGVERSION: 18
           - TEST: cdc-partitioned-target-performance

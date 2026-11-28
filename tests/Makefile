@@ -19,7 +19,8 @@ all: pagila pagila-multi-steps blobs unit filtering extensions \
 	 cdc-receive-group-commit cdc-endpos-before-txn cdc-origin-source cdc-wal-workers \
 	 cdc-wal-workers-endpos cdc-wal-workers-fk cdc-wal-workers-resume \
 	 cdc-wal-workers-idle wal-workers-assign cdc-spool-format \
-	 cdc-spool-settings cdc-follow-mode cdc-layout-refusal \
+	 cdc-spool-settings cdc-spool-resend cdc-spool-relation \
+	 cdc-follow-mode cdc-layout-refusal \
 	 cdc-parallel-differential \
 	 follow-wal2json follow-9.6 follow-data-only \
 	 follow-pgoutput follow-filtering follow-resume-snapshot \
@@ -187,15 +188,12 @@ cdc-layout-refusal: build
 cdc-origin-source-performance: build
 	PGCOPYDB_FOLLOW_MODE=performance $(MAKE) -C cdc-origin-source
 
-# Not in "all" and not in the CI lists: the source and source14 cases count a
-# second relation record as the proof of a resend, and the relation log of the
-# merged head drops a repeat it already holds.  Case diskfull passes.
+# the rule for transactions sent again, once cleanup deleted the segment of
+# the first copy, and a work volume that fills up
 cdc-spool-resend: build
 	$(MAKE) -C $@
 
-# Not in "all" and not in the CI lists: case skipped counts the same second
-# relation record as the source case of cdc-spool-resend, which the relation
-# log of the merged head does not append.
+# the relation log, when a definition changes under a running follow
 cdc-spool-relation: build
 	$(MAKE) -C $@
 
