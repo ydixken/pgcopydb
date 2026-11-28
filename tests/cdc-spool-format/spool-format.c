@@ -2693,6 +2693,25 @@ flip_byte(const char *path, uint64_t offset)
 }
 
 
+/* the frames of a transaction, as a flush synced them before it indexed them */
+static bool
+put_frames(const char *path, const Msg *msgs, int n)
+{
+	for (int i = 0; i < n; i++)
+	{
+		char buf[256];
+		uint64_t size = frame(buf, msgs[i].bytes, msgs[i].length);
+
+		if (!put_bytes(path, -1, buf, size))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
 /* closes the files of a writer, as a kill does */
 static void
 kill_writer(SpoolWriter *writer)
@@ -3752,9 +3771,11 @@ test_start_cut(const char *dir)
 /* a start whose system calls fail, or that cannot list its directory */
 
 /*
- * The rule of A47: a start never cuts the spool below the position that the
- * replication slot confirmed as flushed, and the header of every segment that
- * the read pass reads names the transaction that its file name names.
+ * The rule of A47: a start never drops a transaction at or below the position
+ * that the replication slot confirmed as flushed, which it reads from the
+ * index records above the damage and the COMMIT frames above the cut, and the
+ * header of every segment that the read pass reads names the transaction that
+ * its file name names.
  */
 static void
 test_start_confirmed(const char *dir)
@@ -3776,7 +3797,7 @@ test_start_confirmed(const char *dir)
 	char tail[64];
 
 	/* a valid record of another transaction, which follows an invalid one */
-	SpoolIndexRecord any = { .seq = 7, .endOffset = 1 };
+	SpoolIndexRecord any = { .seq = 7, .endOffset = 1, .endLSN = 0xD231 };
 
 	spool_index_encode(&any, record);
 
@@ -3828,47 +3849,86 @@ test_start_confirmed(const char *dir)
 	check(made && refused_twice(writer.dirname, 7, 0, 50, line),
 		  "a last segment without an indexed transaction whose header does not continue the segment before it ends every start with an error, and no file changes");
 
-	/* a cut at an invalid index record, below what the slot confirmed */
+	/* a valid index record above the damage names a transaction the cut drops */
 	made = make_spool(&writer, dir) &&
 		   put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, zeroes,
 					 sizeof(zeroes)) &&
 		   put_bytes(idx, -1, record, sizeof(record));
 	sformat(line, sizeof(line),
-			"Spool file \"%s\" holds no valid index record at offset %d, and a cut there keeps the spool up to 0/D230, below the 0/D231 that the replication slot confirmed as flushed",
+			"Spool file \"%s\" holds no valid index record at offset %d, and a cut there drops the transaction that ends at 0/D231, at or below the 0/D231 that the replication slot confirmed as flushed",
 			idx, 2 * SPOOL_INDEX_RECORD_SIZE);
 
 	check(made && refused_twice(writer.dirname, 7, 0xD231, 0, line),
-		  "an invalid index record before a valid one ends every start with an error that names both positions when the cut would go below the one the slot confirmed, and no file changes");
+		  "a valid index record above the damage whose transaction ends at or below the position the slot confirmed ends every start with an error that names both positions, and no file changes");
 
-	/* the same for the torn record that an unsynced write leaves */
+	/* and so does a COMMIT frame above the cut, which the flush synced */
 	made = make_spool(&writer, dir) &&
+		   put_frames(spool_file(seg, writer.dirname, 5, ".seg"), thirdTxn,
+					  lengthof(thirdTxn)) &&
 		   put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, record, 30);
 	sformat(line, sizeof(line),
-			"Spool file \"%s\" holds no valid index record at offset %d, and a cut there keeps the spool up to 0/D230, below the 0/D231 that the replication slot confirmed as flushed",
+			"Spool file \"%s\" holds no valid index record at offset %d, and a cut there drops the transaction that ends at 0/D330, at or below the 0/D330 that the replication slot confirmed as flushed",
 			idx, 2 * SPOOL_INDEX_RECORD_SIZE);
 
-	check(made && refused_twice(writer.dirname, 7, 0xD231, 0, line),
-		  "a torn record at the tail of the index file ends every start with an error when the cut would go below the position the slot confirmed, and no file changes");
+	check(made && refused_twice(writer.dirname, 7, 0xD330, 0, line),
+		  "a torn record at the tail of the index file ends every start with an error when the frames above the cut hold a COMMIT at or below the position the slot confirmed, and no file changes");
 
-	/* a keepalive marker holds the position that the feedback reported */
-	spool_keepalive_encode(marker, 0xD2F0, 1234);
+	/* a keepalive marker that the cut drops as well proves nothing about it */
+	spool_keepalive_encode(marker, 0xD400, 1234);
 
 	uint64_t tailSize = frame(tail, marker, sizeof(marker));
+
+	made = make_spool(&writer, dir) &&
+		   put_frames(spool_file(seg, writer.dirname, 5, ".seg"), thirdTxn,
+					  lengthof(thirdTxn)) &&
+		   put_bytes(seg, -1, tail, tailSize) &&
+		   put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, record, 30);
+	sformat(line, sizeof(line),
+			"Spool file \"%s\" holds no valid index record at offset %d, and a cut there drops the transaction that ends at 0/D330, at or below the 0/D400 that the replication slot confirmed as flushed",
+			idx, 2 * SPOOL_INDEX_RECORD_SIZE);
+
+	check(made && refused_twice(writer.dirname, 7, 0xD400, 0, line),
+		  "a keepalive marker above the cut, at the position the slot confirmed, does not make a start cut the COMMIT frames below it");
+
+	/* the same damage, with the target holding every commit the cut drops */
+	made = make_spool(&writer, dir) &&
+		   put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, zeroes,
+					 sizeof(zeroes)) &&
+		   put_bytes(idx, -1, record, sizeof(record));
+	storedW = 0xD231;
+	long mark = log_mark();
+	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2,
+											 0xD231, 0, storedW);
+	char *text = logged_since(mark);
+
+	storedW = 0;
+
+	check(started && count(text, " ERROR ") == 0 &&
+		  file_size(idx) == 2 * SPOOL_INDEX_RECORD_SIZE &&
+		  file_size(spool_file(seg, writer.dirname, 5, ".seg")) ==
+		  (int64_t) SECOND_END &&
+		  reader_holds(writer.dirname, 0, kept, lengthof(kept)),
+		  "a cut below the position the slot confirmed is taken when the stored replay position is at or above it");
+	kill_writer(&opened);
+
+	/* a keepalive marker carries no change, so a cut that drops one loses none */
+	spool_keepalive_encode(marker, 0xD2F0, 1234);
+	tailSize = frame(tail, marker, sizeof(marker));
 
 	made = make_spool(&writer, dir) &&
 		   put_bytes(spool_file(seg, writer.dirname, 5, ".seg"), -1, tail,
 					 tailSize) &&
 		   put_bytes(spool_file(idx, writer.dirname, 5, ".idx"), -1, record, 30);
-	long mark = log_mark();
-	bool started = made && spool_writer_open(&opened, writer.dirname, 7, 2,
-											 0xD2F0, 0, storedW);
-	char *text = logged_since(mark);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0xD2F0, 0,
+										storedW);
+	text = logged_since(mark);
 
 	check(started && count(text, " ERROR ") == 0 &&
 		  file_size(idx) == 2 * SPOOL_INDEX_RECORD_SIZE &&
 		  file_size(seg) == (int64_t) SECOND_END &&
 		  reader_holds(writer.dirname, 0, kept, lengthof(kept)),
-		  "a cut below the position the slot confirmed is taken when a keepalive marker of the spool holds that position");
+		  "a cut below the position the slot confirmed is taken when it drops only a keepalive marker");
 	kill_writer(&opened);
 
 	/* a spool that holds no indexed transaction loses nothing to a cut */
@@ -3879,6 +3939,22 @@ test_start_confirmed(const char *dir)
 
 	check(started && opened.nextSeq == 5,
 		  "a start of a spool without an indexed transaction keeps it, whatever the slot confirmed");
+	kill_writer(&opened);
+
+	/* and the segment that a rotation created holds none the removal drops */
+	made = make_rotated(&writer, dir, false) &&
+		   put_bytes(spool_file(idx, writer.dirname, 7, ".idx"), -1, record, 30);
+	mark = log_mark();
+	started = made && spool_writer_open(&opened, writer.dirname, 7, 2, 0xD2F0, 50,
+										storedW);
+	text = logged_since(mark);
+
+	check(started && count(text, " ERROR ") == 0 && opened.nextSeq == 7 &&
+		  file_size(idx) == -1 &&
+		  file_size(spool_file(seg, writer.dirname, 7, ".seg")) ==
+		  (int64_t) SPOOL_HEADER_SIZE &&
+		  reader_holds(writer.dirname, 0, kept, lengthof(kept)),
+		  "a start removes a last segment whose index file holds a torn record, whatever the slot confirmed, and keeps every transaction before it");
 	kill_writer(&opened);
 }
 

@@ -1,0 +1,17 @@
+Mutant: the scan of a start leaves out the COMMIT frames above the cut, so a transaction that no index record names any more is cut without a word. Must fail: a torn record at the tail of the index file ends every start with an error when the frames above the cut hold a COMMIT at or below the position the slot confirmed, and no file changes.
+Apply from the repository root with git apply, and never commit it applied.
+
+--- a/src/bin/pgcopydb/ld_spool.c
++++ b/src/bin/pgcopydb/ld_spool.c
+@@ -2418,10 +2418,7 @@
+ 				int pos = SPOOL_XLOGDATA_HEADER_SIZE + 10;
+ 				uint64_t endLSN = pgout_u64(message, &pos, (int) length);
+ 
+-				if (endLSN <= bound)
+-				{
+-					*lsn = Max(*lsn, endLSN);
+-				}
++				(void) endLSN;
+ 			}
+ 
+ 			offset += SPOOL_FRAME_SIZE(length);
